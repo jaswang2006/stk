@@ -23,7 +23,7 @@ struct Snapshot_Record { // discrete or 3s fixed interval
   uint16_t bid_volumes[5];  // 10 bytes - units of 100 shares
   float ask_price_ticks[5]; // 20 bytes - prices in RMB
   uint16_t ask_volumes[5];  // 10 bytes - units of 100 shares
-  uint8_t direction;        // 1 byte - 0: buy, 1: sell
+  uint8_t direction;        // 1 byte - 0: buy, 1: sell (direction of the latest trade, not necessarily align with direction of vwap in 3s)
   // features =============================================
   float ofi_ask[5]; // 20 bytes
   float ofi_bid[5]; // 20 bytes
