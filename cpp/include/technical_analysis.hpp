@@ -56,7 +56,8 @@ private:
   uint8_t last_market_hour_ = 255;
   uint8_t last_market_minute_ = 255;
   uint8_t market_state_ = 0; // state: 0: market-close, 1: pre-market, 2: market, 3: post-market
-  inline bool UpdateMarketState(const Table::Snapshot_Record &snapshot);
+  bool is_session_start_ = false;
+  inline void UpdateMarketState(const Table::Snapshot_Record &snapshot);
 
   // intermediate data for feature computation
   CBuffer<uint16_t, BLen> snapshot_delta_t_;

@@ -32,8 +32,8 @@ public:
         spreads_(spreads),
         mid_prices_(mid_prices) {}
 
-  inline void update(const Table::Snapshot_Record *snapshot, bool is_new_session_start) {
-    T_delta_t delta_t = static_cast<T_delta_t>(is_new_session_start ? 0 : (snapshot->seconds_in_day - last_seconds_in_day));
+  inline void update(const Table::Snapshot_Record *snapshot, bool is_session_start) {
+    T_delta_t delta_t = static_cast<T_delta_t>(is_session_start ? 0 : (snapshot->seconds_in_day - last_seconds_in_day));
     const float best_bid_price = snapshot->bid_price_ticks[0];
     const float best_ask_price = snapshot->ask_price_ticks[0];
 
@@ -45,15 +45,16 @@ public:
     const float volume = static_cast<float>(snapshot->volume) * 100.0f; // hands -> shares
     const float turnover = static_cast<float>(snapshot->turnover);
     const float vwap = (volume > 0) ? (turnover / volume) : vwaps_->back();
+    const T_direction dir = static_cast<T_direction>(snapshot->direction);
 
-    // println(delta_t, snapshot->latest_price_tick, vwap, volume, spread, mid_price);
+    println(static_cast<int>(dir), delta_t, snapshot->latest_price_tick, vwap, volume, spread, mid_price);
 
     // Batch update analysis buffers for better cache locality
     delta_t_->push_back(delta_t);
     prices_->push_back(snapshot->latest_price_tick);
     volumes_->push_back(volume);
     vwaps_->push_back(vwap);
-    directions_->push_back(static_cast<T_direction>(snapshot->direction));
+    directions_->push_back(dir);
     spreads_->push_back(spread);
     mid_prices_->push_back(mid_price);
 

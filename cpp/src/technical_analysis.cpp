@@ -37,9 +37,16 @@ TechnicalAnalysis::~TechnicalAnalysis() {
 }
 
 void TechnicalAnalysis::AnalyzeSnapshot(const Table::Snapshot_Record &snapshot) {
-  const bool is_new_session_start_ = UpdateMarketState(snapshot);
-  // std::cout << "market_state_: " << static_cast<int>(market_state_) << " " << static_cast<int>(snapshot.hour) << " " << static_cast<int>(snapshot.minute) << " " << is_new_session_start_;
-  lob.update(&snapshot, is_new_session_start_);
+  UpdateMarketState(snapshot);
+  // std::cout << "market_state_: "
+  //           << static_cast<int>(market_state_) << " "
+  //           << static_cast<int>(snapshot.hour) << " "
+  //           << static_cast<int>(snapshot.minute) << " "
+  //           << static_cast<int>(snapshot.second) << " "
+  //           << static_cast<int>(is_session_start_) << " ";
+  if (market_state_ == 2) [[likely]] { // in market open
+    lob.update(&snapshot, is_session_start_);
+  }
 
   // Debug output
 #ifdef PRINT_SNAPSHOT
@@ -135,7 +142,7 @@ void TechnicalAnalysis::ProcessSnapshotInternal(const Table::Snapshot_Record &sn
   }
 }
 
-inline bool TechnicalAnalysis::UpdateMarketState(const Table::Snapshot_Record &snapshot) {
+inline void TechnicalAnalysis::UpdateMarketState(const Table::Snapshot_Record &snapshot) {
   // States (no seconds):
   // 0 close: default
   // 1 pre-market: 09:15:01-09:25:00 (inclusive minutes)
@@ -144,14 +151,12 @@ inline bool TechnicalAnalysis::UpdateMarketState(const Table::Snapshot_Record &s
 
   const uint8_t h = snapshot.hour;
   const uint8_t m = snapshot.minute;
+  uint8_t new_state = market_state_;
 
   // Only recompute when minute changes to minimize work
   if ((h != last_market_hour_) | (m != last_market_minute_)) [[unlikely]] {
     last_market_hour_ = h;
     last_market_minute_ = m;
-
-    // Default close
-    uint8_t new_state = 0;
 
     // Market time (most common) checked first
     if (((h == 9 && m >= 30) || h == 10 || (h == 11 && m <= 30) || h == 13 || (h == 14 && m <= 56))) [[likely]] {
@@ -165,12 +170,10 @@ inline bool TechnicalAnalysis::UpdateMarketState(const Table::Snapshot_Record &s
     } else {
       new_state = 0;
     }
-
-    const bool session_start = (market_state_ != 2) & (new_state == 2); // transition into market state
-    market_state_ = new_state;
-    return session_start;
   }
-  return false;
+
+  is_session_start_ = (market_state_ != 2) && (new_state == 2);
+  market_state_ = new_state;
 }
 
 bool TechnicalAnalysis::IsNewMinuteBar(const Table::Snapshot_Record &snapshot) {
