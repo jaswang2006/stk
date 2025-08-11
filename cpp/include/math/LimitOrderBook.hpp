@@ -20,7 +20,6 @@ public:
       CBuffer<T_delta_t, N> *delta_t,
       CBuffer<T1, N> *prices,
       CBuffer<T1, N> *volumes,
-      CBuffer<T1, N> *turnovers,
       CBuffer<T1, N> *vwaps,
       CBuffer<T_direction, N> *directions,
       CBuffer<T1, N> *spreads,
@@ -28,13 +27,12 @@ public:
       : delta_t_(delta_t),
         prices_(prices),
         volumes_(volumes),
-        turnovers_(turnovers),
         vwaps_(vwaps),
         directions_(directions),
         spreads_(spreads),
         mid_prices_(mid_prices) {}
 
-  inline void update(const Table::Snapshot_Record *snapshot, const bool is_new_session_start) {
+  inline void update(const Table::Snapshot_Record *snapshot, bool is_new_session_start) {
     T_delta_t delta_t = static_cast<T_delta_t>(is_new_session_start ? 0 : (snapshot->seconds_in_day - last_seconds_in_day));
     const float best_bid_price = snapshot->bid_price_ticks[0];
     const float best_ask_price = snapshot->ask_price_ticks[0];
@@ -48,13 +46,12 @@ public:
     const float turnover = static_cast<float>(snapshot->turnover);
     const float vwap = (volume > 0) ? (turnover / volume) : vwaps_->back();
 
-    println(delta_t, snapshot->latest_price_tick, volume, turnover, vwap, spread, mid_price);
+    // println(delta_t, snapshot->latest_price_tick, vwap, volume, spread, mid_price);
 
     // Batch update analysis buffers for better cache locality
     delta_t_->push_back(delta_t);
     prices_->push_back(snapshot->latest_price_tick);
     volumes_->push_back(volume);
-    turnovers_->push_back(turnover);
     vwaps_->push_back(vwap);
     directions_->push_back(static_cast<T_direction>(snapshot->direction));
     spreads_->push_back(spread);
@@ -69,7 +66,6 @@ private:
   CBuffer<T_delta_t, N> *delta_t_;
   CBuffer<T1, N> *prices_;
   CBuffer<T1, N> *volumes_;
-  CBuffer<T1, N> *turnovers_;
   CBuffer<T1, N> *vwaps_;
   CBuffer<T_direction, N> *directions_;
   CBuffer<T1, N> *spreads_;

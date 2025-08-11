@@ -23,7 +23,6 @@ TechnicalAnalysis::TechnicalAnalysis(size_t capacity)
     : lob(&snapshot_delta_t_,
           &snapshot_prices_,
           &snapshot_volumes_,
-          &snapshot_turnovers_,
           &snapshot_vwaps_,
           &snapshot_directions_,
           &snapshot_spreads_,
@@ -38,7 +37,8 @@ TechnicalAnalysis::~TechnicalAnalysis() {
 }
 
 void TechnicalAnalysis::AnalyzeSnapshot(const Table::Snapshot_Record &snapshot) {
-  const bool is_new_session_start_ = IsNewSessionStart(snapshot);
+  const bool is_new_session_start_ = UpdateMarketState(snapshot);
+  // std::cout << "market_state_: " << static_cast<int>(market_state_) << " " << static_cast<int>(snapshot.hour) << " " << static_cast<int>(snapshot.minute) << " " << is_new_session_start_;
   lob.update(&snapshot, is_new_session_start_);
 
   // Debug output
@@ -53,8 +53,6 @@ void TechnicalAnalysis::AnalyzeSnapshot(const Table::Snapshot_Record &snapshot) 
       snapshot.seconds_in_day,
       snapshot.latest_price_tick,
       snapshot.volume,
-      vwap,
-      spread,
       snapshot.direction);
 #endif
 }
@@ -71,7 +69,6 @@ void TechnicalAnalysis::AnalyzeMinuteBar(const Table::Bar_1m_Record &bar) {
   bar_lows_.push_back(bar.low);
   bar_closes_.push_back(bar.close);
   bar_volumes_.push_back(bar.volume);
-  bar_turnovers_.push_back(bar.turnover);
   bar_vwaps_.push_back(vwap);
 
 #ifdef PRINT_BAR
@@ -138,13 +135,40 @@ void TechnicalAnalysis::ProcessSnapshotInternal(const Table::Snapshot_Record &sn
   }
 }
 
-bool TechnicalAnalysis::IsNewSessionStart(const Table::Snapshot_Record &snapshot) {
-  // 09:30:01-11:30:01, 13:00:01-14:57:01
-  if (snapshot.hour != last_hour_) [[unlikely]] {
-    if ((snapshot.hour == 9 && snapshot.minute >= 30) || (snapshot.hour == 13 && snapshot.minute >= 0)) {
-      return true;
+inline bool TechnicalAnalysis::UpdateMarketState(const Table::Snapshot_Record &snapshot) {
+  // States (no seconds):
+  // 0 close: default
+  // 1 pre-market: 09:15:01-09:25:00 (inclusive minutes)
+  // 2 market: 09:30:01-11:30:01 and 13:00:01-14:57:00
+  // 3 post-market: 14:57:01-15:00:01
+
+  const uint8_t h = snapshot.hour;
+  const uint8_t m = snapshot.minute;
+
+  // Only recompute when minute changes to minimize work
+  if ((h != last_market_hour_) | (m != last_market_minute_)) [[unlikely]] {
+    last_market_hour_ = h;
+    last_market_minute_ = m;
+
+    // Default close
+    uint8_t new_state = 0;
+
+    // Market time (most common) checked first
+    if (((h == 9 && m >= 30) || h == 10 || (h == 11 && m <= 30) || h == 13 || (h == 14 && m <= 56))) [[likely]] {
+      new_state = 2;
+    } else if ((h == 14 && m >= 57) || (h == 15)) {
+      // Post-market minute buckets
+      new_state = 3;
+    } else if (h == 9 && m >= 15 && m <= 25) [[unlikely]] {
+      // Pre-market
+      new_state = 1;
+    } else {
+      new_state = 0;
     }
-    last_hour_ = snapshot.hour;
+
+    const bool session_start = (market_state_ != 2) & (new_state == 2); // transition into market state
+    market_state_ = new_state;
+    return session_start;
   }
   return false;
 }
