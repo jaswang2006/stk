@@ -6,10 +6,10 @@
 
 #include "define/CBuffer.hpp"
 #include "define/Dtype.hpp"
-#include "sample/ResampleRunBar.hpp"
 #include "technical_analysis.hpp"
 
-#include "math/LimitOrderBook.hpp"
+#include "math/feature/LimitOrderBook.hpp" // LOB
+#include "math/sample/ResampleRunBar.hpp" // resample bar
 
 // #define PRINT_SNAPSHOT
 // #define PRINT_BAR
@@ -20,12 +20,6 @@
 
 TechnicalAnalysis::TechnicalAnalysis(size_t capacity)
     : lob(
-          &snapshot_year_,
-          &snapshot_month_,
-          &snapshot_day_,
-          &snapshot_hour_,
-          &snapshot_minute_,
-          &snapshot_second_,
           &snapshot_delta_t_,
           &snapshot_prices_,
           &snapshot_volumes_,
@@ -35,7 +29,6 @@ TechnicalAnalysis::TechnicalAnalysis(size_t capacity)
           &snapshot_spreads_,
           &snapshot_mid_prices_),
       ResampleRunBar_(
-          &snapshot_day_,
           &snapshot_delta_t_,
           &snapshot_prices_,
           &snapshot_volumes_,
@@ -56,8 +49,8 @@ TechnicalAnalysis::~TechnicalAnalysis() {
   // Cleanup completed
 }
 
-void TechnicalAnalysis::AnalyzeSnapshot(const Table::Snapshot_Record &snapshot) {
-  lob.update(&snapshot, is_session_start_);
+void TechnicalAnalysis::AnalyzeSnapshot(Table::Snapshot_Record &snapshot) {
+  lob.update(snapshot, is_session_start_);
 
   // Debug output
 #ifdef PRINT_SNAPSHOT
@@ -79,6 +72,7 @@ void TechnicalAnalysis::AnalyzeSnapshot(const Table::Snapshot_Record &snapshot) 
 }
 
 void TechnicalAnalysis::AnalyzeRunBar(const Table::RunBar_Record &bar) {
+  (void)bar; // Suppress unused parameter warning
 
 #ifdef PRINT_BAR
   println(
@@ -97,8 +91,7 @@ void TechnicalAnalysis::AnalyzeRunBar(const Table::RunBar_Record &bar) {
 #endif
 }
 
-void TechnicalAnalysis::ProcessSingleSnapshot(const Table::Snapshot_Record &snapshot) {
-
+void TechnicalAnalysis::ProcessSingleSnapshot(Table::Snapshot_Record &snapshot) { // pass by reference
   // Fill gaps by creating intermediate snapshots and processing each one
 #ifdef FILL_GAP_SNAPSHOT
   if (has_previous_snapshot_) [[likely]] {
@@ -124,32 +117,17 @@ void TechnicalAnalysis::ProcessSingleSnapshot(const Table::Snapshot_Record &snap
 #endif
 }
 
-void TechnicalAnalysis::ProcessSnapshotInternal(const Table::Snapshot_Record &snapshot) {
+void TechnicalAnalysis::ProcessSnapshotInternal(Table::Snapshot_Record &snapshot) {
   UpdateMarketState(snapshot);
 
   if (market_state_ == 2) [[likely]] { // in market open
 
-    // 1. Store in continuous snapshots table - use emplace_back for efficiency
+    AnalyzeSnapshot(snapshot);
     snapshots_.emplace_back(snapshot);
 
-    // 2. Immediate snapshot analysis and buffer updates - optimized inline
-    AnalyzeSnapshot(snapshot);
-
-    if (ResampleRunBar_.process()) {
-      resampled_bar_.year = snapshot.year;
-      resampled_bar_.month = snapshot.month;
-      resampled_bar_.day = snapshot.day;
-      resampled_bar_.hour = snapshot.hour;
-      resampled_bar_.minute = snapshot.minute;
-      resampled_bar_.second = snapshot.second;
-      resampled_bar_.open = bar_opens_.back();
-      resampled_bar_.high = bar_highs_.back();
-      resampled_bar_.low = bar_lows_.back();
-      resampled_bar_.close = bar_closes_.back();
-      resampled_bar_.vwap = bar_vwaps_.back();
-      bars.emplace_back(resampled_bar_);
-
+    if (ResampleRunBar_.process(snapshot, resampled_bar_)) {
       AnalyzeRunBar(resampled_bar_);
+      bars.emplace_back(resampled_bar_);
     }
   }
 }

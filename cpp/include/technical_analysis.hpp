@@ -2,8 +2,8 @@
 
 #include "define/CBuffer.hpp"
 #include "define/Dtype.hpp"
-#include "math/LimitOrderBook.hpp"
-#include "sample/ResampleRunBar.hpp"
+#include "math/feature/LimitOrderBook.hpp"
+#include "math/sample/ResampleRunBar.hpp"
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -16,7 +16,7 @@ public:
   ~TechnicalAnalysis();
 
   // Main interface - processes single snapshot with richer info
-  void ProcessSingleSnapshot(const Table::Snapshot_Record &snapshot);
+  void ProcessSingleSnapshot(Table::Snapshot_Record &snapshot);
 
   // Export functionality
   void DumpSnapshotCSV(const std::string &asset_code, const std::string &output_dir, size_t last_n = 0) const;
@@ -28,10 +28,10 @@ public:
 
 private:
   // Core unified processing function
-  inline void ProcessSnapshotInternal(const Table::Snapshot_Record &snapshot);
+  inline void ProcessSnapshotInternal(Table::Snapshot_Record &snapshot);
 
   // Analysis functions
-  inline void AnalyzeSnapshot(const Table::Snapshot_Record &snapshot);
+  inline void AnalyzeSnapshot(Table::Snapshot_Record &snapshot);
   inline void AnalyzeRunBar(const Table::RunBar_Record &bar);
 
 #ifdef FILL_GAP_SNAPSHOT
@@ -58,12 +58,6 @@ private:
 
   // Snapshot data ================================================================================
   LimitOrderBook<BLen> lob;
-  CBuffer<uint16_t, 1> snapshot_year_;
-  CBuffer<uint8_t, 1> snapshot_month_;
-  CBuffer<uint8_t, 1> snapshot_day_;
-  CBuffer<uint8_t, 1> snapshot_hour_;
-  CBuffer<uint8_t, 1> snapshot_minute_;
-  CBuffer<uint8_t, 1> snapshot_second_;
   CBuffer<uint16_t, BLen> snapshot_delta_t_;
   CBuffer<float, BLen> snapshot_prices_;
   CBuffer<float, BLen> snapshot_volumes_;
@@ -85,14 +79,8 @@ private:
   CBuffer<float, BLen> bar_vwaps_;
 
   // daily data ===================================================================================
-  CBuffer<uint16_t, 1> daily_year_;
-  CBuffer<uint8_t, 1> daily_month_;
-  CBuffer<uint8_t, 1> daily_day_;
 
   // features =============================================
-  CBuffer<float, BLen> norm_spread_;
-  CBuffer<std::array<float, 5>, BLen> norm_ofi_ask_;
-  CBuffer<std::array<float, 5>, BLen> norm_ofi_bid_;
   // Analysis buffers for resample bar data
 
   // Limit Order Book for snapshot analysis

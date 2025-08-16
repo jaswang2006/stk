@@ -16,7 +16,6 @@ template <size_t N> // compiler auto derive
 class ResampleRunBar {
 public:
   explicit ResampleRunBar(
-      CBuffer<uint8_t, 1> *snapshot_day,
       CBuffer<uint16_t, N> *snapshot_delta_t,
       CBuffer<float, N> *snapshot_prices,
       CBuffer<float, N> *snapshot_volumes,
@@ -28,8 +27,7 @@ public:
       CBuffer<float, N> *bar_low,
       CBuffer<float, N> *bar_close,
       CBuffer<float, N> *bar_vwap)
-      : snapshot_day_(snapshot_day),
-        snapshot_delta_t_(snapshot_delta_t),
+      : snapshot_delta_t_(snapshot_delta_t),
         snapshot_prices_(snapshot_prices),
         snapshot_volumes_(snapshot_volumes),
         snapshot_turnovers_(snapshot_turnovers),
@@ -44,14 +42,14 @@ public:
     daily_snapshot_volume.reserve(int(3600 / MIN_DATA_BASE_PERIOD * trade_hrs_in_a_day));
   }
 
-  inline bool process() {
+  inline bool process(const Table::Snapshot_Record &snapshot, Table::RunBar_Record &bar) {
     // ---- Label Calculation ----
     label_long = snapshot_directions_->back() == 0;
     buy_vol = label_long ? static_cast<float>(snapshot_volumes_->back()) : 0.0f;
     sell_vol = label_long ? 0.0f : static_cast<float>(snapshot_volumes_->back());
 
     // ---- New Day Handling ----
-    auto date = snapshot_day_->back();
+    auto date = snapshot.day;
     if (date != prev_date) [[unlikely]] {
       if (!daily_snapshot_label.empty()) [[likely]] {
         daily_thresh = find_run_threshold();
@@ -101,19 +99,30 @@ public:
       cumm_buy = cumm_sell = cumm_vol = cumm_turnover = 0.0f;
       cumm_tdelta = 0;
       daily_bar_count++;
+
+      bar.year = snapshot.year;
+      bar.month = snapshot.month;
+      bar.day = snapshot.day;
+      bar.hour = snapshot.hour;
+      bar.minute = snapshot.minute;
+      bar.second = snapshot.second;
+      bar.open = bar_open_->back();
+      bar.high = bar_high_->back();
+      bar.low = bar_low_->back();
+      bar.close = bar_close_->back();
+      bar.vwap = bar_vwap_->back();
       return true;
     }
 
     return false;
   }
 
-private:  
+private:
   int p_ori = MIN_DATA_BASE_PERIOD; // original sampling period (seconds)
   int p_tar = RESAMPLE_BASE_PERIOD; // target bar length (seconds)
   int expected_num_daily_samples = int(3600 * trade_hrs_in_a_day / p_tar);
   int tolerance = static_cast<int>(expected_num_daily_samples * 0.05);
 
-  CBuffer<uint8_t, 1> *snapshot_day_;
   CBuffer<uint16_t, N> *snapshot_delta_t_;
   CBuffer<float, N> *snapshot_prices_;
   CBuffer<float, N> *snapshot_volumes_;

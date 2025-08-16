@@ -1,0 +1,10 @@
+| Method      | Formula                         | Pros                         | Cons                            |                    |                  |
+| ----------- | ------------------------------- | ---------------------------- | ------------------------------- | ------------------ | ---------------- |
+| Z-score     | $(x-\mu)/\sigma$                | Standardizes, widely used    | Sensitive to outliers           |                    |                  |
+| Min-Max     | $(x-x_{min})/(x_{max}-x_{min})$ | Bounded range                | Outlier-sensitive               |                    |                  |
+| Robust      | $(x-\text{median})/IQR$         | Outlier-robust               | Ignores data distribution tails |                    |                  |
+| Log / Power | $\log(x+ε), x^\lambda$          | Reduces skew                 | Only positive or requires shift |                    |                  |
+| Max-Abs     | (x/                             | x\_{max}                     | )                               | Preserves sparsity | Sensitive to max |
+| Unit Vector | $x/\|x\|$                       | Useful for vector similarity | Changes absolute magnitude      |                    |                  |
+| Quantile    | rank-based mapping              | Makes Gaussian-like          | Non-linear distortion           |                    |                  |
+| Clipping    | limit extremes                  | Controls outliers            | Loses information               |                    |                  |
