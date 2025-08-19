@@ -82,3 +82,6 @@ mount | grep /mnt/$DEV
 df -h /mnt/$DEV
 xfs_info /mnt/$DEV | sed -n '1,25p'
 # 持久化挂载（fstab）对于USB用处不大, 不考虑
+
+misc:
+rsync -av --progress --info=progress2 /source/folder/ /destination/folder/
