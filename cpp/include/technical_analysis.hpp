@@ -68,8 +68,6 @@ private:
   CBuffer<float, BLen> snapshot_mid_prices_;
 
   // Resample data ================================================================================
-  float resample_bar_volume_ = 0.0f;
-  float resample_bar_turnover_ = 0.0f;
   ResampleRunBar<BLen> ResampleRunBar_;
   CBuffer<uint16_t, BLen> bar_delta_t_;
   CBuffer<float, BLen> bar_opens_;

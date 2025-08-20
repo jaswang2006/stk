@@ -24,7 +24,7 @@ template <typename T, size_t N>
 class RollingZScore {
 public:
   explicit RollingZScore()
-      : buf{}, idx(0), count(0), mean(0), M2(0), stddev(0), zs(0) {}
+      : buf{}, idx(0), count(0), M2(0), mean(0), stddev(0), zs(0) {}
 
   // Update with new value, return z-score
   inline T update(T x) noexcept {

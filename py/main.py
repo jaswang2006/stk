@@ -13,12 +13,12 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "app/Exchange_API/"))
 
 
 def run_cpp_build():
-    '''Trigger the C++ build.bat file'''
+    '''Trigger the C++ build.sh file'''
     cpp_dir = os.path.join(os.path.dirname(__file__), TOP, "cpp")
     
     print("Triggering C++ build script...")
     result = subprocess.run(
-        "build.bat", 
+        "./build.sh", 
         cwd=cpp_dir, 
         shell=True
     )

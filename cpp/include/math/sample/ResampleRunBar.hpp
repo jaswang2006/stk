@@ -155,8 +155,8 @@ private:
   float cumm_turnover = 0.0f;
 
   float ohlc_open = 0.0f;
-  float ohlc_high = -std::numeric_limits<float>::infinity();
-  float ohlc_low = std::numeric_limits<float>::infinity();
+  float ohlc_high = -std::numeric_limits<float>::max();
+  float ohlc_low = std::numeric_limits<float>::max();
   float ohlc_close = 0.0f;
 
   std::vector<bool> daily_snapshot_label;

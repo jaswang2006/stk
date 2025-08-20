@@ -27,10 +27,15 @@ if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2 /W4 /EHsc")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL /Gy /Gw /arch:AVX2 /fp:fast")
     set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF")
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    # GCC/Clang flags
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    # GCC flags with LTO
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra -march=native -flto")
     set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -ffast-math")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    # Clang flags with modern LTO using lld linker
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra -march=native -flto")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -ffinite-math-only")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
 endif()
 
 # Output directories
@@ -47,11 +52,22 @@ set(SOURCES
     src/main.cpp
 )
 
+# code specific settings ==========================================================================
 # Set C language for miniz.c and suppress external library warnings
 set_source_files_properties(src/miniz.c PROPERTIES LANGUAGE C)
 if(MSVC)
     set_source_files_properties(src/miniz.c PROPERTIES COMPILE_FLAGS "/wd4132 /wd4127")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties(src/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-#pragma-messages")
+elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+    set_source_files_properties(src/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-pragma-messages")
 endif()
+
+# Disable -ffinite-math-only for JSON-related files to avoid nlohmann/json warnings
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    set_source_files_properties(src/json_config.cpp PROPERTIES COMPILE_FLAGS "-fno-finite-math-only")
+endif()
+# =================================================================================================
 
 set(HEADERS
     include/misc/misc.hpp
@@ -65,10 +81,10 @@ set(HEADERS
 )
 
 # Create executable
-add_executable(binary_parser_L1 ${SOURCES} ${HEADERS})
+add_executable(stk_main ${SOURCES} ${HEADERS})
 
 # Include directories
-target_include_directories(binary_parser_L1 PRIVATE 
+target_include_directories(stk_main PRIVATE 
     src 
     include 
     
@@ -80,31 +96,31 @@ target_include_directories(binary_parser_L1 PRIVATE
 # Windows-specific settings
 if(WIN32)
     # For Windows, we might need additional libraries
-    target_link_libraries(binary_parser_L1 PRIVATE ws2_32)
+    target_link_libraries(stk_main PRIVATE ws2_32)
     
     # Set subsystem to console
-    set_target_properties(binary_parser_L1 PROPERTIES
+    set_target_properties(stk_main PROPERTIES
         WIN32_EXECUTABLE FALSE
     )
 endif()
 
 # Installation
-install(TARGETS binary_parser_L1
+install(TARGETS stk_main
     RUNTIME DESTINATION bin
 )
 
 # Custom target for running with default parameters
 add_custom_target(run
-    COMMAND binary_parser_L1
-    DEPENDS binary_parser_L1
+    COMMAND stk_main
+    DEPENDS stk_main
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running binary parser with default parameters"
 )
 
 # Custom target for running with custom parameters
 add_custom_target(run_custom
-    COMMAND binary_parser_L1 "D:/data/A_stock/A_L1_binary" "parsed_output.csv"
-    DEPENDS binary_parser_L1
+    COMMAND stk_main "D:/data/A_stock/A_L1_binary" "parsed_output.csv"
+    DEPENDS stk_main
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running binary parser with custom parameters"
 )

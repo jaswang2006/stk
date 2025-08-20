@@ -38,6 +38,8 @@ def remove_old_files():
             os.remove(file)
             print(f"Removed {file}")
 
+
+
 def main():
     # Change to the directory where this script is located
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
@@ -58,11 +60,15 @@ def main():
     
     main = f"./py/main.py"
     # main = f"./strategies/Strategy_Fund/main.py"
+    
+    # Use the virtual environment Python interpreter
+    venv_python = "/home/chuyin/work/py3_12_3/bin/python"
+    
     try:
         if cfg_stk.profile:
-            subprocess.run(["viztracer", "--tracer_entries", "1000000", main], check=True)
+            subprocess.run([venv_python, "-m", "viztracer", "--tracer_entries", "1000000", main], check=True)
         else:
-            subprocess.run(["python", main], check=True)
+            subprocess.run([venv_python, main], check=True)
         print("main.py finished")
         if cfg_stk.profile:
             subprocess.run(["vizviewer", "result.json"], check=True)
