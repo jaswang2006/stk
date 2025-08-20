@@ -4,7 +4,6 @@
 #include <iostream>
 #include <sstream>
 
-#include "define/CBuffer.hpp"
 #include "define/Dtype.hpp"
 #include "technical_analysis.hpp"
 
