@@ -46,21 +46,21 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 # Source files
 set(SOURCES
     src/json_config.cpp
-    src/miniz.c
-    src/binary_parser_L1.cpp
+    src/package/miniz/miniz.c
+    src/codec/binary_parser_L1.cpp
     src/technical_analysis.cpp
     src/main.cpp
 )
 
 # code specific settings ==========================================================================
 # Set C language for miniz.c and suppress external library warnings
-set_source_files_properties(src/miniz.c PROPERTIES LANGUAGE C)
+set_source_files_properties(src/package/miniz/miniz.c PROPERTIES LANGUAGE C)
 if(MSVC)
-    set_source_files_properties(src/miniz.c PROPERTIES COMPILE_FLAGS "/wd4132 /wd4127")
+    set_source_files_properties(src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "/wd4132 /wd4127")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set_source_files_properties(src/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-#pragma-messages")
+    set_source_files_properties(src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-#pragma-messages")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set_source_files_properties(src/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-pragma-messages")
+    set_source_files_properties(src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-pragma-messages")
 endif()
 
 # Disable -ffinite-math-only for JSON-related files to avoid nlohmann/json warnings
@@ -75,8 +75,8 @@ set(HEADERS
     include/misc/affinity.hpp
     include/define/CBuffer.hpp
     include/json_config.hpp
-    include/miniz.h
-    include/binary_parser_L1.hpp
+    include/package/miniz/miniz.h
+    include/codec/binary_parser_L1.hpp
     include/technical_analysis.hpp
 )
 
@@ -87,11 +87,9 @@ add_executable(stk_main ${SOURCES} ${HEADERS})
 target_include_directories(stk_main PRIVATE 
     src 
     include 
-    
+    include/package/miniz
+    include/package/nlohmann
 )
-
-# Define MINIZ_EXPORTS for proper function export
-# target_compile_definitions(binary_parser_L1 PRIVATE MINIZ_EXPORTS)
 
 # Windows-specific settings
 if(WIN32)

@@ -1,4 +1,4 @@
-#include "binary_parser_L1.hpp"
+#include "codec/binary_parser_L1.hpp"
 #include "misc/misc.hpp"
 #include "technical_analysis.hpp"
 
@@ -11,7 +11,7 @@
 #include <vector>
 
 extern "C" {
-#include "miniz.h"
+#include "package/miniz/miniz.h"
 }
 
 // #define DEBUG_TIMER
