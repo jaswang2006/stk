@@ -45,7 +45,7 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # Source files
 set(SOURCES
-    src/json_config.cpp
+    src/codec/json_config.cpp
     src/package/miniz/miniz.c
     src/codec/binary_decoder_L1.cpp
     src/technical_analysis.cpp
@@ -65,7 +65,7 @@ endif()
 
 # Disable -ffinite-math-only for JSON-related files to avoid nlohmann/json warnings
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set_source_files_properties(src/json_config.cpp PROPERTIES COMPILE_FLAGS "-fno-finite-math-only")
+    set_source_files_properties(src/codec/json_config.cpp PROPERTIES COMPILE_FLAGS "-fno-finite-math-only")
 endif()
 # =================================================================================================
 
@@ -74,7 +74,7 @@ set(HEADERS
     include/misc/print.hpp
     include/misc/affinity.hpp
     include/define/CBuffer.hpp
-    include/json_config.hpp
+    include/codec/json_config.hpp
     include/package/miniz/miniz.h
     include/codec/binary_decoder_L1.hpp
     include/technical_analysis.hpp

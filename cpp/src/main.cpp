@@ -1,5 +1,5 @@
 #include "codec/binary_decoder_L1.hpp"
-#include "json_config.hpp"
+#include "codec/json_config.hpp"
 #include "misc/affinity.hpp"
 #include <algorithm>
 #include <filesystem>
