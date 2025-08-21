@@ -1,6 +1,6 @@
+.cache/
 build/
 *.exe
-.cache/
+app_main
+app_database
 compile_commands.json
-*.csv
-stk_main

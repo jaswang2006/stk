@@ -33,27 +33,27 @@ echo "Build completed successfully!"
 # Copy compile_commands.json to root directory for IDE access
 if [ -f "build/compile_commands.json" ]; then
     echo "Copying compile_commands.json to root directory..."
-    cp "build/compile_commands.json" "compile_commands.json"
+    cp "build/compile_commands.json" "../../compile_commands.json"
     echo "compile_commands.json copied to root directory"
 else
     echo "Warning: compile_commands.json not found"
 fi
 
 # Move executable to root directory
-if [ -f "build/bin/stk_main" ]; then
+if [ -f "build/bin/app_main" ]; then
     echo "Moving executable to root directory..."
-    mv "build/bin/stk_main" "stk_main"
-    echo "Executable moved to: stk_main"
+    mv "build/bin/app_main" "../../app_main"
+    echo "Executable moved to: ../../app_main"
 else
     echo "Warning: Executable not found at expected location"
 fi
 
 # Run the executable automatically
-if [ -f "stk_main" ]; then
-    echo "Running stk_main..."
-    ./stk_main
+if [ -f "../../app_main" ]; then
+    echo "Running app_main..."
+    ../../app_main
 else
-    echo "Error: stk_main not found in root directory"
+    echo "Error: app_main not found in root directory"
 fi
 
 echo

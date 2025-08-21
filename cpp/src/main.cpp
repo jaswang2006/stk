@@ -54,9 +54,9 @@ int main() {
 #endif
 
     // Configuration file paths
-    std::string config_file = "../config/config.json";
-    std::string stock_info_file = "../config/daily_holding/stock_info_test.json";
-    std::string output_dir = "../output";
+    std::string config_file = "../../../config/config.json";
+    std::string stock_info_file = "../../../config/daily_holding/stock_info_test.json";
+    std::string output_dir = "../../../output";
 
     std::cout << "=== Asset Parser ====================================================" << "\n";
     std::cout << "Loading configuration..." << "\n";

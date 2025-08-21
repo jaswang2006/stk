@@ -45,80 +45,80 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 
 # Source files
 set(SOURCES
-    src/codec/json_config.cpp
-    src/package/miniz/miniz.c
-    src/codec/binary_decoder_L1.cpp
-    src/technical_analysis.cpp
-    src/main.cpp
+    ../../src/codec/json_config.cpp
+    ../../src/package/miniz/miniz.c
+    ../../src/codec/binary_decoder_L1.cpp
+    ../../src/technical_analysis.cpp
+    ../../src/main.cpp
 )
 
 # code specific settings ==========================================================================
 # Set C language for miniz.c and suppress external library warnings
-set_source_files_properties(src/package/miniz/miniz.c PROPERTIES LANGUAGE C)
+set_source_files_properties(../../src/package/miniz/miniz.c PROPERTIES LANGUAGE C)
 if(MSVC)
-    set_source_files_properties(src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "/wd4132 /wd4127")
+    set_source_files_properties(../../src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "/wd4132 /wd4127")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set_source_files_properties(src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-#pragma-messages")
+    set_source_files_properties(../../src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-#pragma-messages")
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    set_source_files_properties(src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-pragma-messages")
+    set_source_files_properties(../../src/package/miniz/miniz.c PROPERTIES COMPILE_FLAGS "-Wno-pragma-messages")
 endif()
 
 # Disable -ffinite-math-only for JSON-related files to avoid nlohmann/json warnings
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    set_source_files_properties(src/codec/json_config.cpp PROPERTIES COMPILE_FLAGS "-fno-finite-math-only")
+    set_source_files_properties(../../src/codec/json_config.cpp PROPERTIES COMPILE_FLAGS "-fno-finite-math-only")
 endif()
 # =================================================================================================
 
 set(HEADERS
-    include/misc/misc.hpp
-    include/misc/print.hpp
-    include/misc/affinity.hpp
-    include/define/CBuffer.hpp
-    include/codec/json_config.hpp
-    include/package/miniz/miniz.h
-    include/codec/binary_decoder_L1.hpp
-    include/technical_analysis.hpp
+    ../../include/misc/misc.hpp
+    ../../include/misc/print.hpp
+    ../../include/misc/affinity.hpp
+    ../../include/define/CBuffer.hpp
+    ../../include/codec/json_config.hpp
+    ../../include/package/miniz/miniz.h
+    ../../include/codec/binary_decoder_L1.hpp
+    ../../include/technical_analysis.hpp
 )
 
 # Create executable
-add_executable(stk_main ${SOURCES} ${HEADERS})
+add_executable(app_main ${SOURCES} ${HEADERS})
 
 # Include directories
-target_include_directories(stk_main PRIVATE 
-    src 
-    include 
-    include/package/miniz
-    include/package/nlohmann
+target_include_directories(app_main PRIVATE
+    ../../src
+    ../../include
+    ../../include/package/miniz
+    ../../include/package/nlohmann
 )
 
 # Windows-specific settings
 if(WIN32)
     # For Windows, we might need additional libraries
-    target_link_libraries(stk_main PRIVATE ws2_32)
+    target_link_libraries(app_main PRIVATE ws2_32)
     
     # Set subsystem to console
-    set_target_properties(stk_main PROPERTIES
+    set_target_properties(app_main PROPERTIES
         WIN32_EXECUTABLE FALSE
     )
 endif()
 
 # Installation
-install(TARGETS stk_main
+install(TARGETS app_main
     RUNTIME DESTINATION bin
 )
 
 # Custom target for running with default parameters
 add_custom_target(run
-    COMMAND stk_main
-    DEPENDS stk_main
+    COMMAND app_main
+    DEPENDS app_main
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running binary parser with default parameters"
 )
 
 # Custom target for running with custom parameters
 add_custom_target(run_custom
-    COMMAND stk_main "D:/data/A_stock/A_L1_binary" "parsed_output.csv"
-    DEPENDS stk_main
+    COMMAND app_main "D:/data/A_stock/A_L1_binary" "parsed_output.csv"
+    DEPENDS app_main
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running binary parser with custom parameters"
 )
