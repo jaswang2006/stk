@@ -11,7 +11,7 @@ namespace L1 {
 
 // Binary record structure (54 bytes total)
 #pragma pack(push, 1)
-struct BinaryRecord {
+struct Snapshot {
   bool sync;                  // 1 byte
   uint8_t day;                // 1 byte
   uint16_t time_s;            // 2 bytes - seconds in day

@@ -27,19 +27,19 @@ Encoder::~Encoder() {
 // CORE ENCODING FUNCTIONS
 // ============================================================================
 
-std::vector<uint8_t> Encoder::EncodeMonthSnapshots(const std::vector<L1::BinaryRecord> &records) {
+std::vector<uint8_t> Encoder::EncodeMonthSnapshots(const std::vector<L1::Snapshot> &records) {
   if (records.empty()) {
     return {};
   }
 
   // Create a copy for differential encoding
-  std::vector<L1::BinaryRecord> encoded_records = records;
+  std::vector<L1::Snapshot> encoded_records = records;
 
   // Apply differential encoding
   ApplyDifferentialEncoding(encoded_records);
 
   // Convert to raw bytes
-  size_t total_size = encoded_records.size() * sizeof(L1::BinaryRecord);
+  size_t total_size = encoded_records.size() * sizeof(L1::Snapshot);
   std::vector<uint8_t> raw_bytes(total_size);
   std::memcpy(raw_bytes.data(), encoded_records.data(), total_size);
 
@@ -47,7 +47,7 @@ std::vector<uint8_t> Encoder::EncodeMonthSnapshots(const std::vector<L1::BinaryR
   return CompressData(raw_bytes);
 }
 
-void Encoder::ApplyDifferentialEncoding(std::vector<L1::BinaryRecord> &records) {
+void Encoder::ApplyDifferentialEncoding(std::vector<L1::Snapshot> &records) {
   if (records.size() <= 1) {
     return;
   }

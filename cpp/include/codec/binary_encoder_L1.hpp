@@ -17,7 +17,7 @@ public:
     ~Encoder();
 
     // Main encoding interface
-    std::vector<uint8_t> EncodeMonthSnapshots(const std::vector<L1::BinaryRecord>& records);
+    std::vector<uint8_t> EncodeMonthSnapshots(const std::vector<L1::Snapshot>& records);
 
 private:
     // ========================================================================
@@ -25,7 +25,7 @@ private:
     // ========================================================================
 
     // Differential encoding
-    void ApplyDifferentialEncoding(std::vector<L1::BinaryRecord>& records);
+    void ApplyDifferentialEncoding(std::vector<L1::Snapshot>& records);
     
     // Compression
     std::vector<uint8_t> CompressData(const std::vector<uint8_t>& raw_data);

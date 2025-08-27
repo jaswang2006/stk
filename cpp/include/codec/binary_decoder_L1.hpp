@@ -32,14 +32,14 @@ private:
 
   // File I/O and decompression
   std::vector<uint8_t> DecompressFile(const std::string &filepath, size_t record_count);
-  std::vector<L1::BinaryRecord> ParseBinaryData(const std::vector<uint8_t> &binary_data);
-  void ReverseDifferentialEncoding(std::vector<L1::BinaryRecord> &records);
+  std::vector<L1::Snapshot> ParseBinaryData(const std::vector<uint8_t> &binary_data);
+  void ReverseDifferentialEncoding(std::vector<L1::Snapshot> &records);
 
   // ========================================================================
   // DATA CONVERSION FUNCTIONS
   // ========================================================================
 
-  void ProcessBinaryRecords(const std::vector<L1::BinaryRecord> &binary_records, uint16_t year, uint8_t month);
+  void ProcessSnapshots(const std::vector<L1::Snapshot> &binary_records, uint16_t year, uint8_t month);
 
   // ========================================================================
   // FILE SYSTEM UTILITIES

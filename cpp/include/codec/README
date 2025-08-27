@@ -32,8 +32,9 @@
 #      L2分为展示行情和非展示行情, 数据完全相同, 非展示行情可以转发(交易所托管), 原则上不出交易所机房, 年授权费30W, 托管成本更低
 #      这两类行情在数据上相同, 但是非展示行情是binary encoded(25Mbps), 延迟更低, 建议用FPGA/ASIC在交易所机房部署
 #      正向撮合规则: https://github.com/fpga2u/AXOrderBook/blob/main/doc/SE.md
-#      https://www.szse.cn/marketServices/technicalservice/interface/P020230626320262885992.pdf
-#      https://www.sseinfo.com/services/assortment/document/interface/c/10759998/files/f3ca62e905764efaa3983a7c20d9e1d9.pdf
+#      https://www.szse.cn/marketServices/technicalservice/interface/
+#      https://www.sseinfo.com/services/assortment/document/
+#      https://www.sse.com.cn/services/tradingtech/data/
 # ================================================================================================
 # 算法: 成交方向推断(Trade Direction Inference)
 # | **Algorithm**     | **Core Idea**                                    | **Input Required**                | **Output**              | **Accuracy** | **Applicable Data Types**         | **Usage Notes**                               |

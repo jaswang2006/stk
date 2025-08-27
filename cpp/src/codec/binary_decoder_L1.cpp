@@ -67,7 +67,7 @@ std::vector<uint8_t> Decoder::DecompressFile(const std::string &filepath, size_t
   file.close();
 
   // Use exact buffer size from record count for fast single decompression
-  mz_ulong exact_size = static_cast<mz_ulong>(record_count * sizeof(L1::BinaryRecord));
+  mz_ulong exact_size = static_cast<mz_ulong>(record_count * sizeof(L1::Snapshot));
   std::vector<uint8_t> decompressed_data(static_cast<size_t>(exact_size));
 
   int result = mz_uncompress(decompressed_data.data(), &exact_size,
@@ -82,22 +82,22 @@ std::vector<uint8_t> Decoder::DecompressFile(const std::string &filepath, size_t
   return decompressed_data;
 }
 
-std::vector<L1::BinaryRecord> Decoder::ParseBinaryData(const std::vector<uint8_t> &binary_data) {
+std::vector<L1::Snapshot> Decoder::ParseBinaryData(const std::vector<uint8_t> &binary_data) {
 #ifdef DEBUG_TIMER
   misc::Timer timer("ParseBinaryData");
 #endif
-  size_t record_count = binary_data.size() / sizeof(L1::BinaryRecord);
-  if (record_count == 0 || binary_data.size() % sizeof(L1::BinaryRecord) != 0) {
+  size_t record_count = binary_data.size() / sizeof(L1::Snapshot);
+  if (record_count == 0 || binary_data.size() % sizeof(L1::Snapshot) != 0) {
     std::cerr << "Invalid binary data size: " << binary_data.size() << "\n";
     return {};
   }
 
-  std::vector<L1::BinaryRecord> records(record_count);
+  std::vector<L1::Snapshot> records(record_count);
   std::memcpy(records.data(), binary_data.data(), binary_data.size());
   return records;
 }
 
-void Decoder::ReverseDifferentialEncoding(std::vector<L1::BinaryRecord> &records) {
+void Decoder::ReverseDifferentialEncoding(std::vector<L1::Snapshot> &records) {
 #ifdef DEBUG_TIMER
   misc::Timer timer("ReverseDifferentialEncoding");
 #endif
@@ -131,9 +131,9 @@ void Decoder::ReverseDifferentialEncoding(std::vector<L1::BinaryRecord> &records
 // DATA CONVERSION FUNCTIONS
 // ============================================================================
 
-void Decoder::ProcessBinaryRecords(const std::vector<L1::BinaryRecord> &binary_records, uint16_t year, uint8_t month) {
+void Decoder::ProcessSnapshots(const std::vector<L1::Snapshot> &binary_records, uint16_t year, uint8_t month) {
 #ifdef DEBUG_TIMER
-  misc::Timer timer("ProcessBinaryRecords");
+  misc::Timer timer("ProcessSnapshots");
 #endif
   if (binary_records.empty())
     return;
@@ -336,7 +336,7 @@ void Decoder::ParseAsset(const std::string &asset_code,
       ReverseDifferentialEncoding(records);
 
       // Process binary records through technical analysis
-      ProcessBinaryRecords(records, year, month);
+      ProcessSnapshots(records, year, month);
 
     } catch (const std::exception &e) {
       std::cout << "  Warning: Error processing " << asset_file << ": " << e.what() << "\n";
