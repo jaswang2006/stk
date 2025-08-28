@@ -37,14 +37,26 @@ uint32_t BinaryEncoder_L2::parse_price_to_fen(const std::string& price_str) {
     if (price_str.empty() || price_str == " " || price_str == "\0") {
         return 0;
     }
-    return static_cast<uint32_t>(std::stod(price_str));
+    // Optimized: Convert directly from CSV to 0.01 RMB units
+    // CSV / 10000 / 0.01 = CSV / 100, avoiding floating point operations
+    return static_cast<uint32_t>(std::stoll(price_str) / 100);
+}
+
+uint32_t BinaryEncoder_L2::parse_vwap_price(const std::string& price_str) {
+    if (price_str.empty() || price_str == " " || price_str == "\0") {
+        return 0;
+    }
+    // Optimized: Convert directly from CSV to 0.001 RMB units
+    // CSV / 10000 / 0.001 = CSV / 10, avoiding floating point operations
+    return static_cast<uint32_t>(std::stoll(price_str) / 10);
 }
 
 uint32_t BinaryEncoder_L2::parse_volume_to_100shares(const std::string& volume_str) {
     if (volume_str.empty() || volume_str == " " || volume_str == "\0") {
         return 0;
     }
-    return static_cast<uint32_t>(std::stoll(volume_str));
+    // Convert from shares to 100-share units
+    return static_cast<uint32_t>(std::stoll(volume_str) / 100);
 }
 
 uint64_t BinaryEncoder_L2::parse_turnover_to_fen(const std::string& turnover_str) {
@@ -109,8 +121,8 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string& filepath, std::vect
             snapshot.bid_volumes[i] = parse_volume_to_100shares(fields[47 + i]);
         }
         
-        snapshot.weighted_avg_ask_price = parse_price_to_fen(fields[57]);
-        snapshot.weighted_avg_bid_price = parse_price_to_fen(fields[58]);
+        snapshot.weighted_avg_ask_price = parse_vwap_price(fields[57]);
+        snapshot.weighted_avg_bid_price = parse_vwap_price(fields[58]);
         snapshot.total_ask_volume = parse_volume_to_100shares(fields[59]);
         snapshot.total_bid_volume = parse_volume_to_100shares(fields[60]);
         

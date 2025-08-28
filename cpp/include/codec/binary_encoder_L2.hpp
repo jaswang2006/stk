@@ -14,8 +14,8 @@ struct CSVSnapshot {
     std::string exchange_code;
     uint32_t date;
     uint32_t time;
-    uint32_t price;           // in fen (1/100 RMB)
-    uint32_t volume;          // in 100 shares
+    uint32_t price;           // in 0.01 RMB units  
+    uint32_t volume;          // in 100-share units
     uint64_t turnover;        // in fen
     uint32_t trade_count;
     
@@ -25,15 +25,15 @@ struct CSVSnapshot {
     uint32_t prev_close;
     
     // bid/ask prices and volumes (10 levels each)
-    uint32_t bid_prices[10];
-    uint32_t bid_volumes[10];
-    uint32_t ask_prices[10];
-    uint32_t ask_volumes[10];
+    uint32_t bid_prices[10];   // in 0.01 RMB units
+    uint32_t bid_volumes[10];  // in 100-share units
+    uint32_t ask_prices[10];   // in 0.01 RMB units
+    uint32_t ask_volumes[10];  // in 100-share units
     
-    uint32_t weighted_avg_ask_price;
-    uint32_t weighted_avg_bid_price;
-    uint32_t total_ask_volume;
-    uint32_t total_bid_volume;
+    uint32_t weighted_avg_ask_price;  // in 0.001 RMB units (VWAP)
+    uint32_t weighted_avg_bid_price;  // in 0.001 RMB units (VWAP)
+    uint32_t total_ask_volume;        // in 100-share units
+    uint32_t total_bid_volume;        // in 100-share units
 };
 
 struct CSVOrder {
@@ -45,8 +45,8 @@ struct CSVOrder {
     uint64_t exchange_order_id;
     char order_type;     // A:add, D:delete for SSE; 0 for SZSE
     char order_side;     // B:bid, S:ask
-    uint32_t price;      // in fen
-    uint32_t volume;     // in 100 shares
+    uint32_t price;      // in 0.01 RMB units
+    uint32_t volume;     // in 100-share units
 };
 
 struct CSVTrade {
@@ -58,8 +58,8 @@ struct CSVTrade {
     char trade_code;     // 0:trade, C:cancel for SZSE; empty for SSE
     char dummy_code;     // not used
     char bs_flag;        // B:buy, S:sell, empty:cancel
-    uint32_t price;      // in fen
-    uint32_t volume;     // in 100 shares
+    uint32_t price;      // in 0.01 RMB units
+    uint32_t volume;     // in 100-share units
     uint64_t ask_order_id;
     uint64_t bid_order_id;
 };
@@ -70,7 +70,8 @@ public:
     static std::vector<std::string> split_csv_line(const std::string& line);
     static uint32_t parse_time_to_ms(uint32_t time_int);
     static uint32_t parse_price_to_fen(const std::string& price_str);
-    static uint32_t parse_volume_to_100shares(const std::string& volume_str);
+    static uint32_t parse_vwap_price(const std::string& price_str);  // For VWAP prices with 0.001 RMB precision
+    static uint32_t parse_volume_to_100shares(const std::string& volume_str);  // Convert shares to 100-share units
     static uint64_t parse_turnover_to_fen(const std::string& turnover_str);
     
     static bool parse_snapshot_csv(const std::string& filepath, std::vector<CSVSnapshot>& snapshots);

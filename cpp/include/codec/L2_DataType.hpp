@@ -36,23 +36,23 @@ constexpr ColumnMeta Snapshot_Schema[] = {
     {"trade_count",        DataType::INT,   false, 8,   true,  CompressionAlgo::RLE             },// "单调递增, 多数时候递增(永远为正)为0或小值，连续重复特征明显，RLE最优"},
     {"volume",             DataType::INT,   false, 16,  false, CompressionAlgo::RLE             },// "波动较大，但也有大量0, 用RLE或bitpack"},
     {"turnover",           DataType::INT,   false, 32,  false, CompressionAlgo::RLE             },// "波动较大，但也有大量0, 用RLE或bitpack"},
-    {"high",               DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续，先取delta, 再bitpack"},
-    {"low",                DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续，先取delta, 再bitpack"},
-    {"close",              DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续，先取delta, 再bitpack"},
-    {"bid_price_ticks[10]",DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单价长时间静态，局部跳变，delta+bitpack最优"},
+    {"high",               DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续(0.01 RMB units)，先取delta, 再bitpack"},
+    {"low",                DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续(0.01 RMB units)，先取delta, 再bitpack"},
+    {"close",              DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续(0.01 RMB units)，先取delta, 再bitpack"},
+    {"bid_price_ticks[10]",DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单价长时间静态(0.01 RMB units)，局部跳变，delta+bitpack最优"},
     {"bid_volumes[10]",    DataType::INT,   false, 14,  false, CompressionAlgo::BITPACK_DYNAMIC },// "订单量长时间静态，局部跳变，delta+bitpack最优"},
-    {"ask_price_ticks[10]",DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单价长时间静态，局部跳变，delta+bitpack最优"},
+    {"ask_price_ticks[10]",DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单价长时间静态(0.01 RMB units)，局部跳变，delta+bitpack最优"},
     {"ask_volumes[10]",    DataType::INT,   false, 14,  false, CompressionAlgo::BITPACK_DYNAMIC },// "订单量长时间静态，局部跳变，delta+bitpack最优"},
     {"direction",          DataType::BOOL,  false, 1,   false, CompressionAlgo::DICTIONARY      },// "仅买/卖两种值，字典压缩效率最高"},
-    {"all_bid_vwap",       DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续，先取delta, 再bitpack"},
-    {"all_ask_vwap",       DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续，先取delta, 再bitpack"},
+    {"all_bid_vwap",       DataType::INT,   true,  15,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "VWAP价格连续(0.001 RMB units)，先取delta, 再bitpack"},
+    {"all_ask_vwap",       DataType::INT,   true,  15,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "VWAP价格连续(0.001 RMB units)，先取delta, 再bitpack"},
     {"all_bid_volume",     DataType::INT,   true, 14,   true,  CompressionAlgo::BITPACK_DYNAMIC },// "总量变化平滑，delta+bitpack 适合"},
     {"all_ask_volume",     DataType::INT,   true, 14,   true,  CompressionAlgo::BITPACK_DYNAMIC },// "总量变化平滑，delta+bitpack 适合"},
 
     // order
     {"order_type",         DataType::INT,   false, 2,   false, CompressionAlgo::DICTIONARY      },// "仅增删改成交四种值，字典压缩效率最高"},
     {"order_dir",          DataType::BOOL,  false, 1,   false, CompressionAlgo::DICTIONARY      },// "仅bid ask 两种值，字典压缩效率最高"},
-    {"price",              DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续，先取delta, 再bitpack"},
+    {"price",              DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续(0.01 RMB units)，先取delta, 再bitpack"},
     {"volume",             DataType::INT,   false, 16,  false, CompressionAlgo::BITPACK_DYNAMIC },// "大部分绝对值小，delta+bitpack最优"},
     {"bid_order_id",       DataType::INT,   true, 32,   true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单id大部分递增，局部跳变，delta+bitpack最优"},
     {"ask_order_id",       DataType::INT,   true, 32,   true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单id大部分递增，局部跳变，delta+bitpack最优"},
@@ -66,16 +66,16 @@ struct Snapshot {
   uint8_t trade_count;          // 8bit
   uint16_t volume;              // 16bit - units of 100 shares
   uint32_t turnover;            // 32bit - RMB
-  uint16_t high;                // 14bit - price in RMB * 100
-  uint16_t low;                 // 14bit - price in RMB * 100
-  uint16_t close;               // 14bit - price in RMB * 100
-  uint16_t bid_price_ticks[10]; // 14bits * 10 - prices in RMB * 100
+  uint16_t high;                // 14bit - price in 0.01 RMB units
+  uint16_t low;                 // 14bit - price in 0.01 RMB units
+  uint16_t close;               // 14bit - price in 0.01 RMB units
+  uint16_t bid_price_ticks[10]; // 14bits * 10 - prices in 0.01 RMB units
   uint16_t bid_volumes[10];     // 14bits * 10 - units of 100 shares
-  uint16_t ask_price_ticks[10]; // 14bits * 10 - prices in RMB * 100
+  uint16_t ask_price_ticks[10]; // 14bits * 10 - prices in 0.01 RMB units
   uint16_t ask_volumes[10];     // 14bits * 10 - units of 100 shares
   bool direction;               // 1bit - 0: buy, 1: sell (vwap_last > vwap_now)
-  uint16_t all_bid_vwap;        // 14bit - vwap in RMB * 100 of all bid orders
-  uint16_t all_ask_vwap;        // 14bit - vwap in RMB * 100 of all ask orders
+  uint16_t all_bid_vwap;        // 15bit - vwap in 0.001 RMB units of all bid orders
+  uint16_t all_ask_vwap;        // 15bit - vwap in 0.001 RMB units of all ask orders
   uint16_t all_bid_volume;      // 14bit - volume of all bid orders in 100 shares
   uint16_t all_ask_volume;      // 14bit - volume of all ask orders in 100 shares
 };
@@ -89,7 +89,7 @@ struct Order {
 
   uint8_t order_type; // 2bit - 0:maker(order) 1:cancel 2:change 3:taker(trade)
   uint8_t order_dir;  // 1bit - 0:bid 1:ask
-  uint16_t price;     // 14bit - price in RMB * 100
+  uint16_t price;     // 14bit - price in 0.01 RMB units
   uint16_t volume;    // 16bit - units of 100 shares
 
   uint32_t bid_order_id; // 32bit

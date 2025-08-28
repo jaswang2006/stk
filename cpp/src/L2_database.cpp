@@ -73,6 +73,7 @@ int main() {
                 std::vector<Snapshot> snapshots;
                 if (BinaryDecoder_L2::decode_snapshots_from_binary(filepath, snapshots)) {
                     BinaryDecoder_L2::print_all_snapshots(snapshots);
+                    exit(0);
                 } else {
                     std::cerr << "Failed to decode snapshots from " << filepath << std::endl;
                 }
@@ -80,7 +81,7 @@ int main() {
                 // Decode orders
                 std::vector<Order> orders;
                 if (BinaryDecoder_L2::decode_orders_from_binary(filepath, orders)) {
-                    BinaryDecoder_L2::print_all_orders(orders);
+                    // BinaryDecoder_L2::print_all_orders(orders);
                 } else {
                     std::cerr << "Failed to decode orders from " << filepath << std::endl;
                 }
