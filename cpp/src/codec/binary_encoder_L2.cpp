@@ -1,13 +1,41 @@
 #include "codec/binary_encoder_L2.hpp"
-#include "codec/compress_algo/compression.hpp"
+#include "codec/delta_encoding.hpp"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
-#include <iomanip>
 
 namespace L2 {
+
+// Constructor with capacity hints
+BinaryEncoder_L2::BinaryEncoder_L2(size_t estimated_snapshots, size_t estimated_orders) {
+    // Pre-reserve space for snapshot vectors
+    temp_hours.reserve(estimated_snapshots);
+    temp_minutes.reserve(estimated_snapshots);
+    temp_seconds.reserve(estimated_snapshots);
+    temp_highs.reserve(estimated_snapshots);
+    temp_lows.reserve(estimated_snapshots);
+    temp_closes.reserve(estimated_snapshots);
+    temp_all_bid_vwaps.reserve(estimated_snapshots);
+    temp_all_ask_vwaps.reserve(estimated_snapshots);
+    temp_all_bid_volumes.reserve(estimated_snapshots);
+    temp_all_ask_volumes.reserve(estimated_snapshots);
+    
+    for (size_t i = 0; i < 10; ++i) {
+        temp_bid_prices[i].reserve(estimated_snapshots);
+        temp_ask_prices[i].reserve(estimated_snapshots);
+    }
+    
+    // Pre-reserve space for order vectors
+    temp_order_hours.reserve(estimated_orders);
+    temp_order_minutes.reserve(estimated_orders);
+    temp_order_seconds.reserve(estimated_orders);
+    temp_order_milliseconds.reserve(estimated_orders);
+    temp_order_prices.reserve(estimated_orders);
+    temp_bid_order_ids.reserve(estimated_orders);
+    temp_ask_order_ids.reserve(estimated_orders);
+}
 
 // CSV parsing functions
 std::vector<std::string> BinaryEncoder_L2::split_csv_line(const std::string &line) {
@@ -413,288 +441,215 @@ Order BinaryEncoder_L2::csv_to_trade(const CSVTrade &csv_trade) {
   return order;
 }
 
-// Binary encoding functions
-bool BinaryEncoder_L2::encode_snapshots_to_binary(const std::vector<Snapshot> &snapshots,
-                                                  const std::string &filepath) {
-  std::ofstream file(filepath, std::ios::binary);
-  if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to open snapshot output file: " << filepath << std::endl;
-    return false;
-  }
 
-  // Write header: number of snapshots
-  size_t count = snapshots.size();
-  file.write(reinterpret_cast<const char *>(&count), sizeof(count));
-  if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to write snapshot header: " << filepath << std::endl;
-    return false;
-  }
 
-  // Batch write all snapshots at once for maximum efficiency
-  if (count > 0) {
-    file.write(reinterpret_cast<const char *>(snapshots.data()), count * sizeof(Snapshot));
-    if (file.fail()) [[unlikely]] {
-      std::cerr << "L2 Encoder: Failed to write snapshot data: " << filepath << std::endl;
-      return false;
-    }
-  }
-
-  return true;
-}
-
-bool BinaryEncoder_L2::encode_orders_to_binary(const std::vector<Order> &orders,
-                                               const std::string &filepath) {
-  std::ofstream file(filepath, std::ios::binary);
-  if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to open order output file: " << filepath << std::endl;
-    return false;
-  }
-
-  // Write header: number of orders
-  size_t count = orders.size();
-  file.write(reinterpret_cast<const char *>(&count), sizeof(count));
-  if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to write order header: " << filepath << std::endl;
-    return false;
-  }
-
-  // Batch write all orders at once for maximum efficiency
-  if (count > 0) {
-    file.write(reinterpret_cast<const char *>(orders.data()), count * sizeof(Order));
-    if (file.fail()) [[unlikely]] {
-      std::cerr << "L2 Encoder: Failed to write order data: " << filepath << std::endl;
-      return false;
-    }
-  }
-
-  return true;
-}
-
-// High-level processing function
-bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
-                                          const std::string &output_dir,
-                                          const std::string &stock_code) {
-  // Create output directory if it doesn't exist
-  std::filesystem::create_directories(output_dir);
-
-  std::vector<CSVSnapshot> csv_snapshots;
-  std::vector<CSVOrder> csv_orders;
-  std::vector<CSVTrade> csv_trades;
-
-  // Parse CSV files
-  std::string snapshot_file = stock_dir + "/行情.csv";
-  std::string order_file = stock_dir + "/逐笔委托.csv";
-  std::string trade_file = stock_dir + "/逐笔成交.csv";
-
-  // Parse snapshots
-  if (std::filesystem::exists(snapshot_file)) {
-    if (!parse_snapshot_csv(snapshot_file, csv_snapshots)) {
-      return false;
-    }
-  }
-
-  // Parse orders
-  if (std::filesystem::exists(order_file)) {
-    if (!parse_order_csv(order_file, csv_orders)) {
-      return false;
-    }
-  }
-
-  // Parse trades
-  if (std::filesystem::exists(trade_file)) {
-    if (!parse_trade_csv(trade_file, csv_trades)) {
-      return false;
-    }
-  }
-
-  // Convert and encode snapshots
-  if (!csv_snapshots.empty()) {
-    std::vector<Snapshot> snapshots;
-    snapshots.reserve(csv_snapshots.size()); // Pre-allocate for efficiency
-    for (const auto &csv_snap : csv_snapshots) {
-      snapshots.push_back(csv_to_snapshot(csv_snap));
-    }
-
-    // Include count in filename for decoder optimization
-    std::string output_file = output_dir + "/" + stock_code + "_snapshots_" + std::to_string(snapshots.size()) + ".bin";
-    if (!encode_snapshots_to_binary(snapshots, output_file)) {
-      return false;
-    }
-  }
-
-  // Convert and encode orders and trades together
-  std::vector<Order> all_orders;
-  all_orders.reserve(csv_orders.size() + csv_trades.size()); // Pre-allocate for efficiency
-
-  // Add orders
-  for (const auto &csv_order : csv_orders) {
-    all_orders.push_back(csv_to_order(csv_order));
-  }
-
-  // Add trades as taker orders
-  for (const auto &csv_trade : csv_trades) {
-    all_orders.push_back(csv_to_trade(csv_trade));
-  }
-
-  // Sort orders by time using optimized lambda
-  std::sort(all_orders.begin(), all_orders.end(), [](const Order &a, const Order &b) -> bool {
-    uint32_t time_a = a.hour * 3600000 + a.minute * 60000 + a.second * 1000 + a.millisecond * 10;
-    uint32_t time_b = b.hour * 3600000 + b.minute * 60000 + b.second * 1000 + b.millisecond * 10;
-    return time_a < time_b;
-  });
-
-  if (!all_orders.empty()) {
-    // Include count in filename for decoder optimization
-    std::string output_file = output_dir + "/" + stock_code + "_orders_" + std::to_string(all_orders.size()) + ".bin";
-    if (!encode_orders_to_binary(all_orders, output_file)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-// Compressed encoding functions
-bool BinaryEncoder_L2::encode_snapshots_compressed(const std::vector<Snapshot>& snapshots, 
-                                                   const std::string& filepath) {
+// binary encoding functions
+bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot>& snapshots, 
+                                        const std::string& filepath, bool use_delta) {
   if (snapshots.empty()) {
     std::cerr << "L2 Encoder: No snapshots to encode: " << filepath << std::endl;
     return false;
   }
   
-  // Compress snapshots column by column
-  auto compressed_data = compress::g_column_compressor.compress_snapshots(snapshots);
+  // Create local copies for delta encoding (based on schema use_delta flags)
+  std::vector<Snapshot> delta_snapshots = snapshots;
+  size_t count = delta_snapshots.size();
   
-  // Print compression statistics
-  compress::g_column_compressor.print_snapshot_stats(compressed_data);
+  if (use_delta && count > 1) {
+    std::cout << "L2 Encoder: Applying delta encoding to " << count << " snapshots..." << std::endl;
+    // Apply delta encoding to columns marked with use_delta=true in schema
+    // Reuse pre-allocated member vectors for better performance
+    temp_hours.resize(count);
+    temp_minutes.resize(count);
+    temp_seconds.resize(count);
+    temp_highs.resize(count);
+    temp_lows.resize(count);
+    temp_closes.resize(count);
+    temp_all_bid_vwaps.resize(count);
+    temp_all_ask_vwaps.resize(count);
+    temp_all_bid_volumes.resize(count);
+    temp_all_ask_volumes.resize(count);
+    
+    for (size_t i = 0; i < 10; ++i) {
+      temp_bid_prices[i].resize(count);
+      temp_ask_prices[i].resize(count);
+    }
+    
+    // Extract data
+    for (size_t i = 0; i < count; ++i) {
+      temp_hours[i] = delta_snapshots[i].hour;
+      temp_minutes[i] = delta_snapshots[i].minute;
+      temp_seconds[i] = delta_snapshots[i].second;
+      temp_highs[i] = delta_snapshots[i].high;
+      temp_lows[i] = delta_snapshots[i].low;
+      temp_closes[i] = delta_snapshots[i].close;
+      temp_all_bid_vwaps[i] = delta_snapshots[i].all_bid_vwap;
+      temp_all_ask_vwaps[i] = delta_snapshots[i].all_ask_vwap;
+      temp_all_bid_volumes[i] = delta_snapshots[i].all_bid_volume;
+      temp_all_ask_volumes[i] = delta_snapshots[i].all_ask_volume;
+      
+      for (size_t j = 0; j < 10; ++j) {
+        temp_bid_prices[j][i] = delta_snapshots[i].bid_price_ticks[j];
+        temp_ask_prices[j][i] = delta_snapshots[i].ask_price_ticks[j];
+      }
+    }
+    
+    // Apply delta encoding where use_delta=true
+    DeltaUtils::encode_deltas(temp_hours.data(), count);
+    DeltaUtils::encode_deltas(temp_minutes.data(), count);
+    DeltaUtils::encode_deltas(temp_seconds.data(), count);
+    DeltaUtils::encode_deltas(temp_highs.data(), count);
+    DeltaUtils::encode_deltas(temp_lows.data(), count);
+    DeltaUtils::encode_deltas(temp_closes.data(), count);
+    DeltaUtils::encode_deltas(temp_all_bid_vwaps.data(), count);
+    DeltaUtils::encode_deltas(temp_all_ask_vwaps.data(), count);
+    DeltaUtils::encode_deltas(temp_all_bid_volumes.data(), count);
+    DeltaUtils::encode_deltas(temp_all_ask_volumes.data(), count);
+    
+    for (size_t j = 0; j < 10; ++j) {
+      DeltaUtils::encode_deltas(temp_bid_prices[j].data(), count);
+      DeltaUtils::encode_deltas(temp_ask_prices[j].data(), count);
+    }
+    
+    // Copy back delta-encoded data
+    for (size_t i = 0; i < count; ++i) {
+      delta_snapshots[i].hour = temp_hours[i];
+      delta_snapshots[i].minute = temp_minutes[i];
+      delta_snapshots[i].second = temp_seconds[i];
+      delta_snapshots[i].high = temp_highs[i];
+      delta_snapshots[i].low = temp_lows[i];
+      delta_snapshots[i].close = temp_closes[i];
+      delta_snapshots[i].all_bid_vwap = temp_all_bid_vwaps[i];
+      delta_snapshots[i].all_ask_vwap = temp_all_ask_vwaps[i];
+      delta_snapshots[i].all_bid_volume = temp_all_bid_volumes[i];
+      delta_snapshots[i].all_ask_volume = temp_all_ask_volumes[i];
+      
+      for (size_t j = 0; j < 10; ++j) {
+        delta_snapshots[i].bid_price_ticks[j] = temp_bid_prices[j][i];
+        delta_snapshots[i].ask_price_ticks[j] = temp_ask_prices[j][i];
+      }
+    }
+  }
   
-  // Write compressed data to file
+  // Write binary data to file
   std::ofstream file(filepath, std::ios::binary);
   if (!file.is_open()) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to open snapshot output file: " << filepath << std::endl;
     return false;
   }
   
-  // Write header: magic number, version, count, column count
-  uint32_t magic = 0x4C324353; // "L2CS" - L2 Compressed Snapshots
-  uint16_t version = 1;
-  size_t count = snapshots.size();
-  uint8_t column_count = 18;
-  
-  file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
-  file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+  // Write simple header: count
   file.write(reinterpret_cast<const char*>(&count), sizeof(count));
-  file.write(reinterpret_cast<const char*>(&column_count), sizeof(column_count));
   
   if (file.fail()) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to write header: " << filepath << std::endl;
     return false;
   }
   
-  // Write column sizes table
-  for (size_t i = 0; i < column_count; ++i) {
-    size_t column_size = compressed_data.column_data[i].size();
-    file.write(reinterpret_cast<const char*>(&column_size), sizeof(column_size));
-  }
+  // Write snapshots directly
+  file.write(reinterpret_cast<const char*>(delta_snapshots.data()), 
+             delta_snapshots.size() * sizeof(Snapshot));
   
   if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to write column sizes: " << filepath << std::endl;
+    std::cerr << "L2 Encoder: Failed to write snapshot data: " << filepath << std::endl;
     return false;
   }
   
-  // Write compressed column data
-  for (size_t i = 0; i < column_count; ++i) {
-    const auto& column_data = compressed_data.column_data[i];
-    if (!column_data.empty()) {
-      file.write(reinterpret_cast<const char*>(column_data.data()), column_data.size());
-      if (file.fail()) [[unlikely]] {
-        std::cerr << "L2 Encoder: Failed to write column " << i << " data: " << filepath << std::endl;
-        return false;
-      }
-    }
-  }
-  
-  std::cout << "L2 Encoder: Successfully wrote " << count << " compressed snapshots to " << filepath << std::endl;
-  std::cout << "Overall compression ratio: " << std::fixed << std::setprecision(3) 
-            << compressed_data.overall_compression_ratio 
-            << " (saved " << std::setprecision(1) 
-            << ((1.0 - compressed_data.overall_compression_ratio) * 100.0) << "%)" << std::endl;
+  std::cout << "L2 Encoder: Successfully wrote " << count << " snapshots to " << filepath << std::endl;
   
   return true;
 }
 
-bool BinaryEncoder_L2::encode_orders_compressed(const std::vector<Order>& orders,
-                                               const std::string& filepath) {
+bool BinaryEncoder_L2::encode_orders(const std::vector<Order>& orders,
+                                    const std::string& filepath, bool use_delta) {
   if (orders.empty()) {
     std::cerr << "L2 Encoder: No orders to encode: " << filepath << std::endl;
     return false;
   }
   
-  // Compress orders column by column
-  auto compressed_data = compress::g_column_compressor.compress_orders(orders);
+  // Create local copies for delta encoding (based on schema use_delta flags)
+  std::vector<Order> delta_orders = orders;
+  size_t count = delta_orders.size();
   
-  // Print compression statistics
-  compress::g_column_compressor.print_order_stats(compressed_data);
+  if (use_delta && count > 1) {
+    std::cout << "L2 Encoder: Applying delta encoding to " << count << " orders..." << std::endl;
+    // Apply delta encoding to columns marked with use_delta=true in schema
+    // Reuse pre-allocated member vectors for better performance
+    temp_order_hours.resize(count);
+    temp_order_minutes.resize(count);
+    temp_order_seconds.resize(count);
+    temp_order_milliseconds.resize(count);
+    temp_order_prices.resize(count);
+    temp_bid_order_ids.resize(count);
+    temp_ask_order_ids.resize(count);
+    
+    // Extract data
+    for (size_t i = 0; i < count; ++i) {
+      temp_order_hours[i] = delta_orders[i].hour;
+      temp_order_minutes[i] = delta_orders[i].minute;
+      temp_order_seconds[i] = delta_orders[i].second;
+      temp_order_milliseconds[i] = delta_orders[i].millisecond;
+      temp_order_prices[i] = delta_orders[i].price;
+      temp_bid_order_ids[i] = delta_orders[i].bid_order_id;
+      temp_ask_order_ids[i] = delta_orders[i].ask_order_id;
+    }
+    
+    // Apply delta encoding where use_delta=true (based on schema)
+    DeltaUtils::encode_deltas(temp_order_hours.data(), count);
+    DeltaUtils::encode_deltas(temp_order_minutes.data(), count);
+    DeltaUtils::encode_deltas(temp_order_seconds.data(), count);
+    DeltaUtils::encode_deltas(temp_order_milliseconds.data(), count);
+    DeltaUtils::encode_deltas(temp_order_prices.data(), count);
+    DeltaUtils::encode_deltas(temp_bid_order_ids.data(), count);
+    DeltaUtils::encode_deltas(temp_ask_order_ids.data(), count);
+    
+    // Copy back delta-encoded data
+    for (size_t i = 0; i < count; ++i) {
+      delta_orders[i].hour = temp_order_hours[i];
+      delta_orders[i].minute = temp_order_minutes[i];
+      delta_orders[i].second = temp_order_seconds[i];
+      delta_orders[i].millisecond = temp_order_milliseconds[i];
+      delta_orders[i].price = temp_order_prices[i];
+      delta_orders[i].bid_order_id = temp_bid_order_ids[i];
+      delta_orders[i].ask_order_id = temp_ask_order_ids[i];
+    }
+  }
   
-  // Write compressed data to file
+  // Write binary data to file
   std::ofstream file(filepath, std::ios::binary);
   if (!file.is_open()) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to open order output file: " << filepath << std::endl;
     return false;
   }
   
-  // Write header: magic number, version, count, column count
-  uint32_t magic = 0x4C32434F; // "L2CO" - L2 Compressed Orders
-  uint16_t version = 1;
-  size_t count = orders.size();
-  uint8_t column_count = 10;
-  
-  file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
-  file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+  // Write simple header: count
   file.write(reinterpret_cast<const char*>(&count), sizeof(count));
-  file.write(reinterpret_cast<const char*>(&column_count), sizeof(column_count));
   
   if (file.fail()) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to write header: " << filepath << std::endl;
     return false;
   }
   
-  // Write column sizes table
-  for (size_t i = 0; i < column_count; ++i) {
-    size_t column_size = compressed_data.column_data[i].size();
-    file.write(reinterpret_cast<const char*>(&column_size), sizeof(column_size));
-  }
+  // Write orders directly
+  file.write(reinterpret_cast<const char*>(delta_orders.data()), 
+             delta_orders.size() * sizeof(Order));
   
   if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to write column sizes: " << filepath << std::endl;
+    std::cerr << "L2 Encoder: Failed to write order data: " << filepath << std::endl;
     return false;
   }
   
-  // Write compressed column data
-  for (size_t i = 0; i < column_count; ++i) {
-    const auto& column_data = compressed_data.column_data[i];
-    if (!column_data.empty()) {
-      file.write(reinterpret_cast<const char*>(column_data.data()), column_data.size());
-      if (file.fail()) [[unlikely]] {
-        std::cerr << "L2 Encoder: Failed to write column " << i << " data: " << filepath << std::endl;
-        return false;
-      }
-    }
-  }
-  
-  std::cout << "L2 Encoder: Successfully wrote " << count << " compressed orders to " << filepath << std::endl;
-  std::cout << "Overall compression ratio: " << std::fixed << std::setprecision(3) 
-            << compressed_data.overall_compression_ratio 
-            << " (saved " << std::setprecision(1) 
-            << ((1.0 - compressed_data.overall_compression_ratio) * 100.0) << "%)" << std::endl;
+  std::cout << "L2 Encoder: Successfully wrote " << count << " orders to " << filepath << std::endl;
   
   return true;
 }
 
-// Enhanced processing function with compression
-bool BinaryEncoder_L2::process_stock_data_compressed(const std::string& stock_dir,
-                                                     const std::string& output_dir,
-                                                     const std::string& stock_code) {
+// Enhanced processing function with delta encoding
+bool BinaryEncoder_L2::process_stock_data(const std::string& stock_dir,
+                                          const std::string& output_dir,
+                                          const std::string& stock_code,
+                                          std::vector<Snapshot>* out_snapshots,
+                                          std::vector<Order>* out_orders) {
   // Create output directory if it doesn't exist
   std::filesystem::create_directories(output_dir);
   
@@ -736,8 +691,13 @@ bool BinaryEncoder_L2::process_stock_data_compressed(const std::string& stock_di
       snapshots.push_back(csv_to_snapshot(csv_snap));
     }
     
-    std::string output_file = output_dir + "/" + stock_code + "_snapshots_compressed_" + std::to_string(snapshots.size()) + ".bin";
-    if (!encode_snapshots_compressed(snapshots, output_file)) {
+    // Store original data if requested
+    if (out_snapshots) {
+      *out_snapshots = snapshots;
+    }
+    
+    std::string output_file = output_dir + "/" + stock_code + "_snapshots_" + std::to_string(snapshots.size()) + ".bin";
+    if (!encode_snapshots(snapshots, output_file, ENABLE_DELTA_ENCODING)) {
       return false;
     }
   }
@@ -764,8 +724,13 @@ bool BinaryEncoder_L2::process_stock_data_compressed(const std::string& stock_di
   });
   
   if (!all_orders.empty()) {
-    std::string output_file = output_dir + "/" + stock_code + "_orders_compressed_" + std::to_string(all_orders.size()) + ".bin";
-    if (!encode_orders_compressed(all_orders, output_file)) {
+    // Store original data if requested
+    if (out_orders) {
+      *out_orders = all_orders;
+    }
+    
+    std::string output_file = output_dir + "/" + stock_code + "_orders_" + std::to_string(all_orders.size()) + ".bin";
+    if (!encode_orders(all_orders, output_file, ENABLE_DELTA_ENCODING)) {
       return false;
     }
   }

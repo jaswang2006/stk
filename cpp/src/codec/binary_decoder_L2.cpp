@@ -1,5 +1,5 @@
 #include "codec/binary_decoder_L2.hpp"
-#include "codec/compress_algo/compression.hpp"
+#include "codec/delta_encoding.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -7,6 +7,35 @@
 #include <regex>
 
 namespace L2 {
+
+// Constructor with capacity hints
+BinaryDecoder_L2::BinaryDecoder_L2(size_t estimated_snapshots, size_t estimated_orders) {
+    // Pre-reserve space for snapshot vectors
+    temp_hours.reserve(estimated_snapshots);
+    temp_minutes.reserve(estimated_snapshots);
+    temp_seconds.reserve(estimated_snapshots);
+    temp_highs.reserve(estimated_snapshots);
+    temp_lows.reserve(estimated_snapshots);
+    temp_closes.reserve(estimated_snapshots);
+    temp_all_bid_vwaps.reserve(estimated_snapshots);
+    temp_all_ask_vwaps.reserve(estimated_snapshots);
+    temp_all_bid_volumes.reserve(estimated_snapshots);
+    temp_all_ask_volumes.reserve(estimated_snapshots);
+    
+    for (size_t i = 0; i < 10; ++i) {
+        temp_bid_prices[i].reserve(estimated_snapshots);
+        temp_ask_prices[i].reserve(estimated_snapshots);
+    }
+    
+    // Pre-reserve space for order vectors
+    temp_order_hours.reserve(estimated_orders);
+    temp_order_minutes.reserve(estimated_orders);
+    temp_order_seconds.reserve(estimated_orders);
+    temp_order_milliseconds.reserve(estimated_orders);
+    temp_order_prices.reserve(estimated_orders);
+    temp_bid_order_ids.reserve(estimated_orders);
+    temp_ask_order_ids.reserve(estimated_orders);
+}
 
 size_t BinaryDecoder_L2::extract_count_from_filename(const std::string &filepath) {
   // Extract count from filename pattern: *_snapshots_<count>.bin or *_orders_<count>.bin
@@ -24,85 +53,7 @@ size_t BinaryDecoder_L2::extract_count_from_filename(const std::string &filepath
   return 0; // Return 0 if count cannot be extracted
 }
 
-bool BinaryDecoder_L2::decode_snapshots_from_binary(const std::string &filepath, std::vector<Snapshot> &snapshots) {
-  // Try to extract count from filename for optimal pre-allocation
-  size_t expected_count = extract_count_from_filename(filepath);
 
-  std::ifstream file(filepath, std::ios::binary);
-  if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Decoder: Failed to open snapshot file: " << filepath << std::endl;
-    return false;
-  }
-
-  // Read header: number of snapshots
-  size_t count;
-  file.read(reinterpret_cast<char *>(&count), sizeof(count));
-  if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Decoder: Failed to read snapshot header: " << filepath << std::endl;
-    return false;
-  }
-
-  // If filename count doesn't match, fall back to standard behavior
-  if (expected_count != 0 && expected_count != count) {
-    expected_count = count;
-  }
-
-  // Pre-allocate exact size for optimal memory usage
-  snapshots.clear();
-  snapshots.resize(count);
-
-  // Batch read all snapshots at once for maximum efficiency
-  if (count > 0) {
-    file.read(reinterpret_cast<char *>(snapshots.data()), count * sizeof(Snapshot));
-    if (file.fail()) [[unlikely]] {
-      std::cerr << "L2 Decoder: Failed to read snapshot data: " << filepath << std::endl;
-      snapshots.clear();
-      return false;
-    }
-  }
-
-  return true;
-}
-
-bool BinaryDecoder_L2::decode_orders_from_binary(const std::string &filepath, std::vector<Order> &orders) {
-  // Try to extract count from filename for optimal pre-allocation
-  size_t expected_count = extract_count_from_filename(filepath);
-
-  std::ifstream file(filepath, std::ios::binary);
-  if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Decoder: Failed to open order file: " << filepath << std::endl;
-    return false;
-  }
-
-  // Read header: number of orders
-  size_t count;
-  file.read(reinterpret_cast<char *>(&count), sizeof(count));
-  if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Decoder: Failed to read order header: " << filepath << std::endl;
-    return false;
-  }
-
-  // If filename count doesn't match, fall back to standard behavior
-  if (expected_count != 0 && expected_count != count) {
-    expected_count = count;
-  }
-
-  // Pre-allocate exact size for optimal memory usage
-  orders.clear();
-  orders.resize(count);
-
-  // Batch read all orders at once for maximum efficiency
-  if (count > 0) {
-    file.read(reinterpret_cast<char *>(orders.data()), count * sizeof(Order));
-    if (file.fail()) [[unlikely]] {
-      std::cerr << "L2 Decoder: Failed to read order data: " << filepath << std::endl;
-      orders.clear();
-      return false;
-    }
-  }
-
-  return true;
-}
 
 std::string BinaryDecoder_L2::time_to_string(uint8_t hour, uint8_t minute, uint8_t second, uint8_t millisecond_10ms) {
   std::ostringstream oss;
@@ -312,145 +263,187 @@ void BinaryDecoder_L2::print_all_orders(const std::vector<Order> &orders) {
   }
 }
 
-// Compressed decoder functions
-bool BinaryDecoder_L2::decode_snapshots_compressed(const std::string& filepath, std::vector<Snapshot>& snapshots) {
+// decoder functions
+bool BinaryDecoder_L2::decode_snapshots(const std::string& filepath, std::vector<Snapshot>& snapshots, bool use_delta) {
   std::ifstream file(filepath, std::ios::binary);
   if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Decoder: Failed to open compressed snapshot file: " << filepath << std::endl;
+    std::cerr << "L2 Decoder: Failed to open snapshot file: " << filepath << std::endl;
     return false;
   }
   
-  // Read and validate header
-  uint32_t magic;
-  uint16_t version;
+  // Read simple header: count
   size_t count;
-  uint8_t column_count;
-  
-  file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-  file.read(reinterpret_cast<char*>(&version), sizeof(version));
   file.read(reinterpret_cast<char*>(&count), sizeof(count));
-  file.read(reinterpret_cast<char*>(&column_count), sizeof(column_count));
   
   if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Decoder: Failed to read compressed header: " << filepath << std::endl;
+    std::cerr << "L2 Decoder: Failed to read header: " << filepath << std::endl;
     return false;
   }
   
-  if (magic != 0x4C324353) [[unlikely]] { // "L2CS"
-    std::cerr << "L2 Decoder: Invalid magic number in compressed snapshot file: " << filepath << std::endl;
+  // Pre-allocate exact size for optimal memory usage
+  snapshots.resize(count);
+  
+  // Read snapshots directly
+  file.read(reinterpret_cast<char*>(snapshots.data()), count * sizeof(Snapshot));
+  
+  if (file.fail()) [[unlikely]] {
+    std::cerr << "L2 Decoder: Failed to read snapshot data: " << filepath << std::endl;
     return false;
   }
   
-  if (version != 1) [[unlikely]] {
-    std::cerr << "L2 Decoder: Unsupported compressed version " << version << " in file: " << filepath << std::endl;
-    return false;
-  }
-  
-  if (column_count != 18) [[unlikely]] {
-    std::cerr << "L2 Decoder: Expected 18 columns, found " << static_cast<int>(column_count) << " in file: " << filepath << std::endl;
-    return false;
-  }
-  
-  // Read column sizes table
-  std::vector<size_t> column_sizes(column_count);
-  for (size_t i = 0; i < column_count; ++i) {
-    file.read(reinterpret_cast<char*>(&column_sizes[i]), sizeof(column_sizes[i]));
-    if (file.fail()) [[unlikely]] {
-      std::cerr << "L2 Decoder: Failed to read column size " << i << ": " << filepath << std::endl;
-      return false;
-    }
-  }
-  
-  // Read compressed column data
-  compress::ColumnCompressor::CompressedSnapshot compressed_data;
-  for (size_t i = 0; i < column_count; ++i) {
-    size_t column_size = column_sizes[i];
-    compressed_data.column_data[i].resize(column_size);
+  // Decode deltas (reverse the delta encoding process)
+  if (use_delta && count > 1) {
+    std::cout << "L2 Decoder: Applying delta decoding to " << count << " snapshots..." << std::endl;
+    // Reuse pre-allocated member vectors for better performance
+    temp_hours.resize(count);
+    temp_minutes.resize(count);
+    temp_seconds.resize(count);
+    temp_highs.resize(count);
+    temp_lows.resize(count);
+    temp_closes.resize(count);
+    temp_all_bid_vwaps.resize(count);
+    temp_all_ask_vwaps.resize(count);
+    temp_all_bid_volumes.resize(count);
+    temp_all_ask_volumes.resize(count);
     
-    if (column_size > 0) {
-      file.read(reinterpret_cast<char*>(compressed_data.column_data[i].data()), column_size);
-      if (file.fail()) [[unlikely]] {
-        std::cerr << "L2 Decoder: Failed to read compressed column " << i << " data: " << filepath << std::endl;
-        return false;
+    for (size_t i = 0; i < 10; ++i) {
+      temp_bid_prices[i].resize(count);
+      temp_ask_prices[i].resize(count);
+    }
+    
+    // Extract delta-encoded data
+    for (size_t i = 0; i < count; ++i) {
+      temp_hours[i] = snapshots[i].hour;
+      temp_minutes[i] = snapshots[i].minute;
+      temp_seconds[i] = snapshots[i].second;
+      temp_highs[i] = snapshots[i].high;
+      temp_lows[i] = snapshots[i].low;
+      temp_closes[i] = snapshots[i].close;
+      temp_all_bid_vwaps[i] = snapshots[i].all_bid_vwap;
+      temp_all_ask_vwaps[i] = snapshots[i].all_ask_vwap;
+      temp_all_bid_volumes[i] = snapshots[i].all_bid_volume;
+      temp_all_ask_volumes[i] = snapshots[i].all_ask_volume;
+      
+      for (size_t j = 0; j < 10; ++j) {
+        temp_bid_prices[j][i] = snapshots[i].bid_price_ticks[j];
+        temp_ask_prices[j][i] = snapshots[i].ask_price_ticks[j];
+      }
+    }
+    
+    // Decode deltas where use_delta=true (reverse of encode_deltas)
+    DeltaUtils::decode_deltas(temp_hours.data(), count);
+    DeltaUtils::decode_deltas(temp_minutes.data(), count);
+    DeltaUtils::decode_deltas(temp_seconds.data(), count);
+    DeltaUtils::decode_deltas(temp_highs.data(), count);
+    DeltaUtils::decode_deltas(temp_lows.data(), count);
+    DeltaUtils::decode_deltas(temp_closes.data(), count);
+    DeltaUtils::decode_deltas(temp_all_bid_vwaps.data(), count);
+    DeltaUtils::decode_deltas(temp_all_ask_vwaps.data(), count);
+    DeltaUtils::decode_deltas(temp_all_bid_volumes.data(), count);
+    DeltaUtils::decode_deltas(temp_all_ask_volumes.data(), count);
+    
+    for (size_t j = 0; j < 10; ++j) {
+      DeltaUtils::decode_deltas(temp_bid_prices[j].data(), count);
+      DeltaUtils::decode_deltas(temp_ask_prices[j].data(), count);
+    }
+    
+    // Copy back decoded data
+    for (size_t i = 0; i < count; ++i) {
+      snapshots[i].hour = temp_hours[i];
+      snapshots[i].minute = temp_minutes[i];
+      snapshots[i].second = temp_seconds[i];
+      snapshots[i].high = temp_highs[i];
+      snapshots[i].low = temp_lows[i];
+      snapshots[i].close = temp_closes[i];
+      snapshots[i].all_bid_vwap = temp_all_bid_vwaps[i];
+      snapshots[i].all_ask_vwap = temp_all_ask_vwaps[i];
+      snapshots[i].all_bid_volume = temp_all_bid_volumes[i];
+      snapshots[i].all_ask_volume = temp_all_ask_volumes[i];
+      
+      for (size_t j = 0; j < 10; ++j) {
+        snapshots[i].bid_price_ticks[j] = temp_bid_prices[j][i];
+        snapshots[i].ask_price_ticks[j] = temp_ask_prices[j][i];
       }
     }
   }
   
-  // Decompress snapshots (extremely efficient column-wise decompression)
-  snapshots = compress::g_column_compressor.decompress_snapshots(compressed_data, count);
-  
-  std::cout << "L2 Decoder: Successfully decompressed " << snapshots.size() << " snapshots from " << filepath << std::endl;
+  std::cout << "L2 Decoder: Successfully decoded " << snapshots.size() <<" snapshots from " << filepath << std::endl;
   
   return true;
 }
 
-bool BinaryDecoder_L2::decode_orders_compressed(const std::string& filepath, std::vector<Order>& orders) {
+bool BinaryDecoder_L2::decode_orders(const std::string& filepath, std::vector<Order>& orders, bool use_delta) {
   std::ifstream file(filepath, std::ios::binary);
   if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Decoder: Failed to open compressed order file: " << filepath << std::endl;
+    std::cerr << "L2 Decoder: Failed to open order file: " << filepath << std::endl;
     return false;
   }
   
-  // Read and validate header
-  uint32_t magic;
-  uint16_t version;
+  // Read simple header: count
   size_t count;
-  uint8_t column_count;
-  
-  file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-  file.read(reinterpret_cast<char*>(&version), sizeof(version));
   file.read(reinterpret_cast<char*>(&count), sizeof(count));
-  file.read(reinterpret_cast<char*>(&column_count), sizeof(column_count));
   
   if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Decoder: Failed to read compressed header: " << filepath << std::endl;
+    std::cerr << "L2 Decoder: Failed to read header: " << filepath << std::endl;
     return false;
   }
   
-  if (magic != 0x4C32434F) [[unlikely]] { // "L2CO"
-    std::cerr << "L2 Decoder: Invalid magic number in compressed order file: " << filepath << std::endl;
+  // Pre-allocate exact size for optimal memory usage
+  orders.resize(count);
+  
+  // Read orders directly
+  file.read(reinterpret_cast<char*>(orders.data()), count * sizeof(Order));
+  
+  if (file.fail()) [[unlikely]] {
+    std::cerr << "L2 Decoder: Failed to read order data: " << filepath << std::endl;
     return false;
   }
   
-  if (version != 1) [[unlikely]] {
-    std::cerr << "L2 Decoder: Unsupported compressed version " << version << " in file: " << filepath << std::endl;
-    return false;
-  }
-  
-  if (column_count != 10) [[unlikely]] {
-    std::cerr << "L2 Decoder: Expected 10 columns, found " << static_cast<int>(column_count) << " in file: " << filepath << std::endl;
-    return false;
-  }
-  
-  // Read column sizes table
-  std::vector<size_t> column_sizes(column_count);
-  for (size_t i = 0; i < column_count; ++i) {
-    file.read(reinterpret_cast<char*>(&column_sizes[i]), sizeof(column_sizes[i]));
-    if (file.fail()) [[unlikely]] {
-      std::cerr << "L2 Decoder: Failed to read column size " << i << ": " << filepath << std::endl;
-      return false;
-    }
-  }
-  
-  // Read compressed column data
-  compress::ColumnCompressor::CompressedOrder compressed_data;
-  for (size_t i = 0; i < column_count; ++i) {
-    size_t column_size = column_sizes[i];
-    compressed_data.column_data[i].resize(column_size);
+  // Decode deltas (reverse the delta encoding process)
+  if (use_delta && count > 1) {
+    std::cout << "L2 Decoder: Applying delta decoding to " << count << " orders..." << std::endl;
+    // Reuse pre-allocated member vectors for better performance
+    temp_order_hours.resize(count);
+    temp_order_minutes.resize(count);
+    temp_order_seconds.resize(count);
+    temp_order_milliseconds.resize(count);
+    temp_order_prices.resize(count);
+    temp_bid_order_ids.resize(count);
+    temp_ask_order_ids.resize(count);
     
-    if (column_size > 0) {
-      file.read(reinterpret_cast<char*>(compressed_data.column_data[i].data()), column_size);
-      if (file.fail()) [[unlikely]] {
-        std::cerr << "L2 Decoder: Failed to read compressed column " << i << " data: " << filepath << std::endl;
-        return false;
-      }
+    // Extract delta-encoded data
+    for (size_t i = 0; i < count; ++i) {
+      temp_order_hours[i] = orders[i].hour;
+      temp_order_minutes[i] = orders[i].minute;
+      temp_order_seconds[i] = orders[i].second;
+      temp_order_milliseconds[i] = orders[i].millisecond;
+      temp_order_prices[i] = orders[i].price;
+      temp_bid_order_ids[i] = orders[i].bid_order_id;
+      temp_ask_order_ids[i] = orders[i].ask_order_id;
+    }
+    
+    // Decode deltas where use_delta=true (reverse of encode_deltas)
+    DeltaUtils::decode_deltas(temp_order_hours.data(), count);
+    DeltaUtils::decode_deltas(temp_order_minutes.data(), count);
+    DeltaUtils::decode_deltas(temp_order_seconds.data(), count);
+    DeltaUtils::decode_deltas(temp_order_milliseconds.data(), count);
+    DeltaUtils::decode_deltas(temp_order_prices.data(), count);
+    DeltaUtils::decode_deltas(temp_bid_order_ids.data(), count);
+    DeltaUtils::decode_deltas(temp_ask_order_ids.data(), count);
+    
+    // Copy back decoded data
+    for (size_t i = 0; i < count; ++i) {
+      orders[i].hour = temp_order_hours[i];
+      orders[i].minute = temp_order_minutes[i];
+      orders[i].second = temp_order_seconds[i];
+      orders[i].millisecond = temp_order_milliseconds[i];
+      orders[i].price = temp_order_prices[i];
+      orders[i].bid_order_id = temp_bid_order_ids[i];
+      orders[i].ask_order_id = temp_ask_order_ids[i];
     }
   }
   
-  // Decompress orders (extremely efficient column-wise decompression)
-  orders = compress::g_column_compressor.decompress_orders(compressed_data, count);
-  
-  std::cout << "L2 Decoder: Successfully decompressed " << orders.size() << " orders from " << filepath << std::endl;
+  std::cout << "L2 Decoder: Successfully decoded " << orders.size() << " orders from " << filepath << std::endl;
   
   return true;
 }

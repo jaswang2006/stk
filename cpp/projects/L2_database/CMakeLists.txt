@@ -37,7 +37,6 @@ set(L2_DATABASE_SOURCES
     ../../src/L2_database.cpp
     ../../src/codec/binary_encoder_L2.cpp
     ../../src/codec/binary_decoder_L2.cpp
-    ../../src/codec/compress_algo/compression.cpp
 )
 
 set(L2_DATABASE_HEADERS

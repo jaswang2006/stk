@@ -54,14 +54,12 @@ inline constexpr int millisecond_width() { return get_column_width("millisecond"
 
 class BinaryDecoder_L2 {
 public:
+  // Constructor with optional capacity hints for better memory allocation
+  BinaryDecoder_L2(size_t estimated_snapshots = 100000, size_t estimated_orders = 500000);
 
-  // decoder functions that extract count from filename
-  static bool decode_snapshots_from_binary(const std::string &filepath, std::vector<Snapshot> &snapshots);
-  static bool decode_orders_from_binary(const std::string &filepath, std::vector<Order> &orders);
-  
-  // compressed decoder functions
-  static bool decode_snapshots_compressed(const std::string &filepath, std::vector<Snapshot> &snapshots);
-  static bool decode_orders_compressed(const std::string &filepath, std::vector<Order> &orders);
+  // decoder functions
+  bool decode_snapshots(const std::string &filepath, std::vector<Snapshot> &snapshots, bool use_delta = ENABLE_DELTA_ENCODING);
+  bool decode_orders(const std::string &filepath, std::vector<Order> &orders, bool use_delta = ENABLE_DELTA_ENCODING);
 
   // Print snapshot in human-readable format
   static void print_snapshot(const Snapshot &snapshot, size_t index = 0);
@@ -88,6 +86,18 @@ public:
   static inline uint32_t volume_to_shares(uint16_t volume_100shares);
 
 private:
+  // Reusable vector tables for delta decoding (snapshots)
+  mutable std::vector<uint8_t> temp_hours, temp_minutes, temp_seconds;
+  mutable std::vector<uint16_t> temp_highs, temp_lows, temp_closes;
+  mutable std::vector<uint16_t> temp_bid_prices[10], temp_ask_prices[10];
+  mutable std::vector<uint16_t> temp_all_bid_vwaps, temp_all_ask_vwaps;
+  mutable std::vector<uint32_t> temp_all_bid_volumes, temp_all_ask_volumes;
+  
+  // Reusable vector tables for delta decoding (orders)
+  mutable std::vector<uint8_t> temp_order_hours, temp_order_minutes, temp_order_seconds, temp_order_milliseconds;
+  mutable std::vector<uint16_t> temp_order_prices;
+  mutable std::vector<uint32_t> temp_bid_order_ids, temp_ask_order_ids;
+
   // Helper function to extract count from filename
   static size_t extract_count_from_filename(const std::string &filepath);
 

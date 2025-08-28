@@ -6,17 +6,26 @@
 
 namespace L2 {
 
+// modern compression algo maynot benefit from delta encoding
+inline constexpr bool ENABLE_DELTA_ENCODING = false; // use Zstd for high compress ratio and fast decompress speed
+
+// | Compressor name     | Ratio | Compression | Decompress |
+// |---------------------|-------|-------------|------------|
+// | zstd 1.5.7 -1       | 2.896 | 510 MB/s    | 1550 MB/s  |
+// | brotli 1.1.0 -1     | 2.883 | 290 MB/s    | 425 MB/s   |
+// | zlib 1.3.1 -1       | 2.743 | 105 MB/s    | 390 MB/s   |
+// | zstd 1.5.7 --fast=1 | 2.439 | 545 MB/s    | 1850 MB/s  |
+// | quicklz 1.5.0 -1    | 2.238 | 520 MB/s    | 750 MB/s   |
+// | zstd 1.5.7 --fast=4 | 2.146 | 665 MB/s    | 2050 MB/s  |
+// | lzo1x 2.10 -1       | 2.106 | 650 MB/s    | 780 MB/s   |
+// | lz4 1.10.0          | 2.101 | 675 MB/s    | 3850 MB/s  |
+// | snappy 1.2.1        | 2.089 | 520 MB/s    | 1500 MB/s  |
+// | lzf 3.6 -1          | 2.077 | 410 MB/s    | 820 MB/s   |
+
 enum class DataType { INT,
                       FLOAT,
                       DOUBLE,
                       BOOL };
-enum class CompressionAlgo { NONE,
-                             RLE,             // 大量连续bit为0或1
-                             DICTIONARY,      // 字典压缩效率最高
-                             BITPACK_DYNAMIC, // 找到95%的数据需要几bit, 做bitpack, 其他用最大bit数做bitpack
-                             BITPACK_STATIC,  // 直接使用bit_width做bitpack
-                             CUSTOM
-};
 
 struct ColumnMeta {
   std::string_view column_name; // 列名
@@ -24,39 +33,38 @@ struct ColumnMeta {
   bool is_signed;               // 原始数据(或其增量数据)是否有符号
   uint8_t bit_width;            // 实际存储 bit 宽度
   bool use_delta;               // 是否存 delta 编码
-  CompressionAlgo algo;         // 压缩算法
 };
 
 // clang-format off
 constexpr ColumnMeta Snapshot_Schema[] = {
     // snapshot
-    {"hour",               DataType::INT,   true, 5,    true,  CompressionAlgo::BITPACK_DYNAMIC },// "取值范围 0-23，5bit 足够，取值连续, 先取delta, 再bitpack 最优"},
-    {"minute",             DataType::INT,   true, 6,    true,  CompressionAlgo::BITPACK_DYNAMIC },// "取值范围 0-59，6bit 足够，取值连续, 先取delta, 再bitpack 最优"},
-    {"second",             DataType::INT,   true, 6,    true,  CompressionAlgo::BITPACK_DYNAMIC },// "取值范围 0-59，6bit 足够，取值连续, 先取delta, 再bitpack 最优"},
-    {"trade_count",        DataType::INT,   false, 8,   false, CompressionAlgo::BITPACK_DYNAMIC },// "波动较大, 多数时候为0或小值, bitpack"},
-    {"volume",             DataType::INT,   false, 16,  false, CompressionAlgo::RLE             },// "波动较大，但也有大量0, 用RLE或bitpack"},
-    {"turnover",           DataType::INT,   false, 32,  false, CompressionAlgo::RLE             },// "波动较大，但也有大量0, 用RLE或bitpack"},
-    {"high",               DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续(0.01 RMB units)，先取delta, 再bitpack"},
-    {"low",                DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续(0.01 RMB units)，先取delta, 再bitpack"},
-    {"close",              DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续(0.01 RMB units)，先取delta, 再bitpack"},
-    {"bid_price_ticks[10]",DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单价长时间静态(0.01 RMB units)，局部跳变，delta+bitpack最优"},
-    {"bid_volumes[10]",    DataType::INT,   false, 14,  false, CompressionAlgo::BITPACK_DYNAMIC },// "订单量长时间静态，局部跳变，delta+bitpack最优"},
-    {"ask_price_ticks[10]",DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单价长时间静态(0.01 RMB units)，局部跳变，delta+bitpack最优"},
-    {"ask_volumes[10]",    DataType::INT,   false, 14,  false, CompressionAlgo::BITPACK_DYNAMIC },// "订单量长时间静态，局部跳变，delta+bitpack最优"},
-    {"direction",          DataType::BOOL,  false, 1,   false, CompressionAlgo::DICTIONARY      },// "仅买/卖两种值，字典压缩效率最高"},
-    {"all_bid_vwap",       DataType::INT,   true,  15,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "VWAP价格连续(0.001 RMB units)，先取delta, 再bitpack"},
-    {"all_ask_vwap",       DataType::INT,   true,  15,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "VWAP价格连续(0.001 RMB units)，先取delta, 再bitpack"},
-    {"all_bid_volume",     DataType::INT,   true, 22,   true,  CompressionAlgo::BITPACK_DYNAMIC },// "总量变化平滑，delta+bitpack 适合"},
-    {"all_ask_volume",     DataType::INT,   true, 22,   true,  CompressionAlgo::BITPACK_DYNAMIC },// "总量变化平滑，delta+bitpack 适合"},
+    {"hour",               DataType::INT,   true, 5,    true  },// "取值范围 0-23，5bit 足够，取值连续, 使用delta编码"},
+    {"minute",             DataType::INT,   true, 6,    true  },// "取值范围 0-59，6bit 足够，取值连续, 使用delta编码"},
+    {"second",             DataType::INT,   true, 6,    true  },// "取值范围 0-59，6bit 足够，取值连续, 使用delta编码"},
+    {"trade_count",        DataType::INT,   false, 8,   false },// "波动较大, 多数时候为0或小值, 直接存储"},
+    {"volume",             DataType::INT,   false, 16,  false },// "波动较大，但也有大量0, 直接存储"},
+    {"turnover",           DataType::INT,   false, 32,  false },// "波动较大，但也有大量0, 直接存储"},
+    {"high",               DataType::INT,   true,  14,  true  },// "价格连续(0.01 RMB units)，使用delta编码"},
+    {"low",                DataType::INT,   true,  14,  true  },// "价格连续(0.01 RMB units)，使用delta编码"},
+    {"close",              DataType::INT,   true,  14,  true  },// "价格连续(0.01 RMB units)，使用delta编码"},
+    {"bid_price_ticks[10]",DataType::INT,   true,  14,  true  },// "订单价长时间静态(0.01 RMB units)，局部跳变，使用delta编码"},
+    {"bid_volumes[10]",    DataType::INT,   false, 14,  false },// "订单量长时间静态，局部跳变，直接存储"},
+    {"ask_price_ticks[10]",DataType::INT,   true,  14,  true  },// "订单价长时间静态(0.01 RMB units)，局部跳变，使用delta编码"},
+    {"ask_volumes[10]",    DataType::INT,   false, 14,  false },// "订单量长时间静态，局部跳变，直接存储"},
+    {"direction",          DataType::BOOL,  false, 1,   false },// "仅买/卖两种值，直接存储"},
+    {"all_bid_vwap",       DataType::INT,   true,  15,  true  },// "VWAP价格连续(0.001 RMB units)，使用delta编码"},
+    {"all_ask_vwap",       DataType::INT,   true,  15,  true  },// "VWAP价格连续(0.001 RMB units)，使用delta编码"},
+    {"all_bid_volume",     DataType::INT,   true, 22,   true  },// "总量变化平滑，使用delta编码"},
+    {"all_ask_volume",     DataType::INT,   true, 22,   true  },// "总量变化平滑，使用delta编码"},
 
     // order
-    {"millisecond",        DataType::INT,   true, 7,    true,  CompressionAlgo::BITPACK_DYNAMIC },// "取值范围 0-127，7bit 足够，取值连续, 先取delta, 再bitpack 最优"},
-    {"order_type",         DataType::INT,   false, 2,   false, CompressionAlgo::DICTIONARY      },// "仅增删改成交四种值，字典压缩效率最高"},
-    {"order_dir",          DataType::BOOL,  false, 1,   false, CompressionAlgo::DICTIONARY      },// "仅bid ask 两种值，字典压缩效率最高"},
-    {"price",              DataType::INT,   true,  14,  true,  CompressionAlgo::BITPACK_DYNAMIC },// "价格连续(0.01 RMB units)，先取delta, 再bitpack"},
-    {"volume",             DataType::INT,   false, 16,  false, CompressionAlgo::BITPACK_DYNAMIC },// "大部分绝对值小，delta+bitpack最优"},
-    {"bid_order_id",       DataType::INT,   true, 32,   true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单id大部分递增，局部跳变，delta+bitpack最优"},
-    {"ask_order_id",       DataType::INT,   true, 32,   true,  CompressionAlgo::BITPACK_DYNAMIC },// "订单id大部分递增，局部跳变，delta+bitpack最优"},
+    {"millisecon",        DataType::INT,   true, 7,     true  },// "取值范围 0-127，7bit 足够，取值连续, 使用delta编码"},
+    {"order_type",         DataType::INT,   false, 2,   false },// "仅增删改成交四种值，直接存储"},
+    {"order_dir",          DataType::BOOL,  false, 1,   false },// "仅bid ask 两种值，直接存储"},
+    {"price",              DataType::INT,   true,  14,  true  },// "价格连续(0.01 RMB units)，使用delta编码"},
+    {"volume",             DataType::INT,   false, 16,  false },// "大部分绝对值小，直接存储"},
+    {"bid_order_id",       DataType::INT,   true, 32,   true  },// "订单id大部分递增，局部跳变，使用delta编码"},
+    {"ask_order_id",       DataType::INT,   true, 32,   true  },// "订单id大部分递增，局部跳变，使用delta编码"},
   };
 // clang-format on
 

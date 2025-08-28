@@ -66,6 +66,9 @@ struct CSVTrade {
 
 class BinaryEncoder_L2 {
 public:
+    // Constructor with optional capacity hints for better memory allocation
+    BinaryEncoder_L2(size_t estimated_snapshots = 100000, size_t estimated_orders = 500000);
+    
     // CSV parsing functions (hot path functions inlined)
     static std::vector<std::string> split_csv_line(const std::string& line);
     static uint32_t parse_time_to_ms(uint32_t time_int);
@@ -74,36 +77,41 @@ public:
     static inline uint32_t parse_volume_to_100shares(const std::string& volume_str);  // Convert shares to 100-share units
     static inline uint64_t parse_turnover_to_fen(const std::string& turnover_str);
     
-    static bool parse_snapshot_csv(const std::string& filepath, std::vector<CSVSnapshot>& snapshots);
-    static bool parse_order_csv(const std::string& filepath, std::vector<CSVOrder>& orders);
-    static bool parse_trade_csv(const std::string& filepath, std::vector<CSVTrade>& trades);
+    bool parse_snapshot_csv(const std::string& filepath, std::vector<CSVSnapshot>& snapshots);
+    bool parse_order_csv(const std::string& filepath, std::vector<CSVOrder>& orders);
+    bool parse_trade_csv(const std::string& filepath, std::vector<CSVTrade>& trades);
 
     // CSV to L2 conversion functions
     static Snapshot csv_to_snapshot(const CSVSnapshot& csv_snap);
     static Order csv_to_order(const CSVOrder& csv_order);
     static Order csv_to_trade(const CSVTrade& csv_trade);
     
-    // Binary encoding functions
-    static bool encode_snapshots_to_binary(const std::vector<Snapshot>& snapshots, 
-                                          const std::string& filepath);
-    static bool encode_orders_to_binary(const std::vector<Order>& orders,
-                                       const std::string& filepath);
-    
-    // Compressed binary encoding functions
-    static bool encode_snapshots_compressed(const std::vector<Snapshot>& snapshots, 
-                                           const std::string& filepath);
-    static bool encode_orders_compressed(const std::vector<Order>& orders,
-                                        const std::string& filepath);
+    // binary encoding functions
+    bool encode_snapshots(const std::vector<Snapshot>& snapshots, 
+                         const std::string& filepath, bool use_delta = true);
+    bool encode_orders(const std::vector<Order>& orders,
+                      const std::string& filepath, bool use_delta = true);
     
     // High-level processing functions
-    static bool process_stock_data(const std::string& stock_dir,
-                                  const std::string& output_dir,
-                                  const std::string& stock_code);
-    static bool process_stock_data_compressed(const std::string& stock_dir,
-                                             const std::string& output_dir,
-                                             const std::string& stock_code);
+    bool process_stock_data(const std::string& stock_dir,
+                           const std::string& output_dir,
+                           const std::string& stock_code,
+                           std::vector<Snapshot>* out_snapshots = nullptr,
+                           std::vector<Order>* out_orders = nullptr);
 
 private:
+    // Reusable vector tables for delta encoding (snapshots)
+    mutable std::vector<uint8_t> temp_hours, temp_minutes, temp_seconds;
+    mutable std::vector<uint16_t> temp_highs, temp_lows, temp_closes;
+    mutable std::vector<uint16_t> temp_bid_prices[10], temp_ask_prices[10];
+    mutable std::vector<uint16_t> temp_all_bid_vwaps, temp_all_ask_vwaps;
+    mutable std::vector<uint32_t> temp_all_bid_volumes, temp_all_ask_volumes;
+    
+    // Reusable vector tables for delta encoding (orders)
+    mutable std::vector<uint8_t> temp_order_hours, temp_order_minutes, temp_order_seconds, temp_order_milliseconds;
+    mutable std::vector<uint16_t> temp_order_prices;
+    mutable std::vector<uint32_t> temp_bid_order_ids, temp_ask_order_ids;
+    
     // Time conversion functions (inlined for performance)
     static inline uint8_t time_to_hour(uint32_t time_ms);
     static inline uint8_t time_to_minute(uint32_t time_ms);
