@@ -69,7 +69,7 @@ def main():
 
     try:
         if cfg_stk.profile:
-            subprocess.run([python, "-m", "viztracer", "--tracer_entries", "1000000", main], check=True)
+            subprocess.run([python, "-m", "viztracer", "--tracer_entries", "1000000", app], check=True)
         else:
             subprocess.run([python, app], check=True)
         print("app finished")

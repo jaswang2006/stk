@@ -1,4 +1,5 @@
 #include "codec/binary_decoder_L2.hpp"
+#include "codec/compress_algo/compression.hpp"
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -309,6 +310,149 @@ void BinaryDecoder_L2::print_all_orders(const std::vector<Order> &orders) {
               << std::setw(order_id_width()) << std::right << order.bid_order_id << " "
               << std::setw(order_id_width()) << std::right << order.ask_order_id << std::endl;
   }
+}
+
+// Compressed decoder functions
+bool BinaryDecoder_L2::decode_snapshots_compressed(const std::string& filepath, std::vector<Snapshot>& snapshots) {
+  std::ifstream file(filepath, std::ios::binary);
+  if (!file.is_open()) [[unlikely]] {
+    std::cerr << "L2 Decoder: Failed to open compressed snapshot file: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Read and validate header
+  uint32_t magic;
+  uint16_t version;
+  size_t count;
+  uint8_t column_count;
+  
+  file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+  file.read(reinterpret_cast<char*>(&version), sizeof(version));
+  file.read(reinterpret_cast<char*>(&count), sizeof(count));
+  file.read(reinterpret_cast<char*>(&column_count), sizeof(column_count));
+  
+  if (file.fail()) [[unlikely]] {
+    std::cerr << "L2 Decoder: Failed to read compressed header: " << filepath << std::endl;
+    return false;
+  }
+  
+  if (magic != 0x4C324353) [[unlikely]] { // "L2CS"
+    std::cerr << "L2 Decoder: Invalid magic number in compressed snapshot file: " << filepath << std::endl;
+    return false;
+  }
+  
+  if (version != 1) [[unlikely]] {
+    std::cerr << "L2 Decoder: Unsupported compressed version " << version << " in file: " << filepath << std::endl;
+    return false;
+  }
+  
+  if (column_count != 18) [[unlikely]] {
+    std::cerr << "L2 Decoder: Expected 18 columns, found " << static_cast<int>(column_count) << " in file: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Read column sizes table
+  std::vector<size_t> column_sizes(column_count);
+  for (size_t i = 0; i < column_count; ++i) {
+    file.read(reinterpret_cast<char*>(&column_sizes[i]), sizeof(column_sizes[i]));
+    if (file.fail()) [[unlikely]] {
+      std::cerr << "L2 Decoder: Failed to read column size " << i << ": " << filepath << std::endl;
+      return false;
+    }
+  }
+  
+  // Read compressed column data
+  compress::ColumnCompressor::CompressedSnapshot compressed_data;
+  for (size_t i = 0; i < column_count; ++i) {
+    size_t column_size = column_sizes[i];
+    compressed_data.column_data[i].resize(column_size);
+    
+    if (column_size > 0) {
+      file.read(reinterpret_cast<char*>(compressed_data.column_data[i].data()), column_size);
+      if (file.fail()) [[unlikely]] {
+        std::cerr << "L2 Decoder: Failed to read compressed column " << i << " data: " << filepath << std::endl;
+        return false;
+      }
+    }
+  }
+  
+  // Decompress snapshots (extremely efficient column-wise decompression)
+  snapshots = compress::g_column_compressor.decompress_snapshots(compressed_data, count);
+  
+  std::cout << "L2 Decoder: Successfully decompressed " << snapshots.size() << " snapshots from " << filepath << std::endl;
+  
+  return true;
+}
+
+bool BinaryDecoder_L2::decode_orders_compressed(const std::string& filepath, std::vector<Order>& orders) {
+  std::ifstream file(filepath, std::ios::binary);
+  if (!file.is_open()) [[unlikely]] {
+    std::cerr << "L2 Decoder: Failed to open compressed order file: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Read and validate header
+  uint32_t magic;
+  uint16_t version;
+  size_t count;
+  uint8_t column_count;
+  
+  file.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+  file.read(reinterpret_cast<char*>(&version), sizeof(version));
+  file.read(reinterpret_cast<char*>(&count), sizeof(count));
+  file.read(reinterpret_cast<char*>(&column_count), sizeof(column_count));
+  
+  if (file.fail()) [[unlikely]] {
+    std::cerr << "L2 Decoder: Failed to read compressed header: " << filepath << std::endl;
+    return false;
+  }
+  
+  if (magic != 0x4C32434F) [[unlikely]] { // "L2CO"
+    std::cerr << "L2 Decoder: Invalid magic number in compressed order file: " << filepath << std::endl;
+    return false;
+  }
+  
+  if (version != 1) [[unlikely]] {
+    std::cerr << "L2 Decoder: Unsupported compressed version " << version << " in file: " << filepath << std::endl;
+    return false;
+  }
+  
+  if (column_count != 10) [[unlikely]] {
+    std::cerr << "L2 Decoder: Expected 10 columns, found " << static_cast<int>(column_count) << " in file: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Read column sizes table
+  std::vector<size_t> column_sizes(column_count);
+  for (size_t i = 0; i < column_count; ++i) {
+    file.read(reinterpret_cast<char*>(&column_sizes[i]), sizeof(column_sizes[i]));
+    if (file.fail()) [[unlikely]] {
+      std::cerr << "L2 Decoder: Failed to read column size " << i << ": " << filepath << std::endl;
+      return false;
+    }
+  }
+  
+  // Read compressed column data
+  compress::ColumnCompressor::CompressedOrder compressed_data;
+  for (size_t i = 0; i < column_count; ++i) {
+    size_t column_size = column_sizes[i];
+    compressed_data.column_data[i].resize(column_size);
+    
+    if (column_size > 0) {
+      file.read(reinterpret_cast<char*>(compressed_data.column_data[i].data()), column_size);
+      if (file.fail()) [[unlikely]] {
+        std::cerr << "L2 Decoder: Failed to read compressed column " << i << " data: " << filepath << std::endl;
+        return false;
+      }
+    }
+  }
+  
+  // Decompress orders (extremely efficient column-wise decompression)
+  orders = compress::g_column_compressor.decompress_orders(compressed_data, count);
+  
+  std::cout << "L2 Decoder: Successfully decompressed " << orders.size() << " orders from " << filepath << std::endl;
+  
+  return true;
 }
 
 } // namespace L2

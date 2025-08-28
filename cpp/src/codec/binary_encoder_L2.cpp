@@ -1,9 +1,11 @@
 #include "codec/binary_encoder_L2.hpp"
+#include "codec/compress_algo/compression.hpp"
 #include <algorithm>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iomanip>
 
 namespace L2 {
 
@@ -549,6 +551,225 @@ bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
     }
   }
 
+  return true;
+}
+
+// Compressed encoding functions
+bool BinaryEncoder_L2::encode_snapshots_compressed(const std::vector<Snapshot>& snapshots, 
+                                                   const std::string& filepath) {
+  if (snapshots.empty()) {
+    std::cerr << "L2 Encoder: No snapshots to encode: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Compress snapshots column by column
+  auto compressed_data = compress::g_column_compressor.compress_snapshots(snapshots);
+  
+  // Print compression statistics
+  compress::g_column_compressor.print_snapshot_stats(compressed_data);
+  
+  // Write compressed data to file
+  std::ofstream file(filepath, std::ios::binary);
+  if (!file.is_open()) [[unlikely]] {
+    std::cerr << "L2 Encoder: Failed to open snapshot output file: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Write header: magic number, version, count, column count
+  uint32_t magic = 0x4C324353; // "L2CS" - L2 Compressed Snapshots
+  uint16_t version = 1;
+  size_t count = snapshots.size();
+  uint8_t column_count = 18;
+  
+  file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+  file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+  file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+  file.write(reinterpret_cast<const char*>(&column_count), sizeof(column_count));
+  
+  if (file.fail()) [[unlikely]] {
+    std::cerr << "L2 Encoder: Failed to write header: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Write column sizes table
+  for (size_t i = 0; i < column_count; ++i) {
+    size_t column_size = compressed_data.column_data[i].size();
+    file.write(reinterpret_cast<const char*>(&column_size), sizeof(column_size));
+  }
+  
+  if (file.fail()) [[unlikely]] {
+    std::cerr << "L2 Encoder: Failed to write column sizes: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Write compressed column data
+  for (size_t i = 0; i < column_count; ++i) {
+    const auto& column_data = compressed_data.column_data[i];
+    if (!column_data.empty()) {
+      file.write(reinterpret_cast<const char*>(column_data.data()), column_data.size());
+      if (file.fail()) [[unlikely]] {
+        std::cerr << "L2 Encoder: Failed to write column " << i << " data: " << filepath << std::endl;
+        return false;
+      }
+    }
+  }
+  
+  std::cout << "L2 Encoder: Successfully wrote " << count << " compressed snapshots to " << filepath << std::endl;
+  std::cout << "Overall compression ratio: " << std::fixed << std::setprecision(3) 
+            << compressed_data.overall_compression_ratio 
+            << " (saved " << std::setprecision(1) 
+            << ((1.0 - compressed_data.overall_compression_ratio) * 100.0) << "%)" << std::endl;
+  
+  return true;
+}
+
+bool BinaryEncoder_L2::encode_orders_compressed(const std::vector<Order>& orders,
+                                               const std::string& filepath) {
+  if (orders.empty()) {
+    std::cerr << "L2 Encoder: No orders to encode: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Compress orders column by column
+  auto compressed_data = compress::g_column_compressor.compress_orders(orders);
+  
+  // Print compression statistics
+  compress::g_column_compressor.print_order_stats(compressed_data);
+  
+  // Write compressed data to file
+  std::ofstream file(filepath, std::ios::binary);
+  if (!file.is_open()) [[unlikely]] {
+    std::cerr << "L2 Encoder: Failed to open order output file: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Write header: magic number, version, count, column count
+  uint32_t magic = 0x4C32434F; // "L2CO" - L2 Compressed Orders
+  uint16_t version = 1;
+  size_t count = orders.size();
+  uint8_t column_count = 10;
+  
+  file.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+  file.write(reinterpret_cast<const char*>(&version), sizeof(version));
+  file.write(reinterpret_cast<const char*>(&count), sizeof(count));
+  file.write(reinterpret_cast<const char*>(&column_count), sizeof(column_count));
+  
+  if (file.fail()) [[unlikely]] {
+    std::cerr << "L2 Encoder: Failed to write header: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Write column sizes table
+  for (size_t i = 0; i < column_count; ++i) {
+    size_t column_size = compressed_data.column_data[i].size();
+    file.write(reinterpret_cast<const char*>(&column_size), sizeof(column_size));
+  }
+  
+  if (file.fail()) [[unlikely]] {
+    std::cerr << "L2 Encoder: Failed to write column sizes: " << filepath << std::endl;
+    return false;
+  }
+  
+  // Write compressed column data
+  for (size_t i = 0; i < column_count; ++i) {
+    const auto& column_data = compressed_data.column_data[i];
+    if (!column_data.empty()) {
+      file.write(reinterpret_cast<const char*>(column_data.data()), column_data.size());
+      if (file.fail()) [[unlikely]] {
+        std::cerr << "L2 Encoder: Failed to write column " << i << " data: " << filepath << std::endl;
+        return false;
+      }
+    }
+  }
+  
+  std::cout << "L2 Encoder: Successfully wrote " << count << " compressed orders to " << filepath << std::endl;
+  std::cout << "Overall compression ratio: " << std::fixed << std::setprecision(3) 
+            << compressed_data.overall_compression_ratio 
+            << " (saved " << std::setprecision(1) 
+            << ((1.0 - compressed_data.overall_compression_ratio) * 100.0) << "%)" << std::endl;
+  
+  return true;
+}
+
+// Enhanced processing function with compression
+bool BinaryEncoder_L2::process_stock_data_compressed(const std::string& stock_dir,
+                                                     const std::string& output_dir,
+                                                     const std::string& stock_code) {
+  // Create output directory if it doesn't exist
+  std::filesystem::create_directories(output_dir);
+  
+  std::vector<CSVSnapshot> csv_snapshots;
+  std::vector<CSVOrder> csv_orders;
+  std::vector<CSVTrade> csv_trades;
+  
+  // Parse CSV files (using existing methods)
+  std::string snapshot_file = stock_dir + "/行情.csv";
+  std::string order_file = stock_dir + "/逐笔委托.csv";
+  std::string trade_file = stock_dir + "/逐笔成交.csv";
+  
+  // Parse snapshots
+  if (std::filesystem::exists(snapshot_file)) {
+    if (!parse_snapshot_csv(snapshot_file, csv_snapshots)) {
+      return false;
+    }
+  }
+  
+  // Parse orders
+  if (std::filesystem::exists(order_file)) {
+    if (!parse_order_csv(order_file, csv_orders)) {
+      return false;
+    }
+  }
+  
+  // Parse trades
+  if (std::filesystem::exists(trade_file)) {
+    if (!parse_trade_csv(trade_file, csv_trades)) {
+      return false;
+    }
+  }
+  
+  // Convert and encode snapshots with compression
+  if (!csv_snapshots.empty()) {
+    std::vector<Snapshot> snapshots;
+    snapshots.reserve(csv_snapshots.size());
+    for (const auto& csv_snap : csv_snapshots) {
+      snapshots.push_back(csv_to_snapshot(csv_snap));
+    }
+    
+    std::string output_file = output_dir + "/" + stock_code + "_snapshots_compressed_" + std::to_string(snapshots.size()) + ".bin";
+    if (!encode_snapshots_compressed(snapshots, output_file)) {
+      return false;
+    }
+  }
+  
+  // Convert and encode orders with compression
+  std::vector<Order> all_orders;
+  all_orders.reserve(csv_orders.size() + csv_trades.size());
+  
+  // Add orders
+  for (const auto& csv_order : csv_orders) {
+    all_orders.push_back(csv_to_order(csv_order));
+  }
+  
+  // Add trades as taker orders
+  for (const auto& csv_trade : csv_trades) {
+    all_orders.push_back(csv_to_trade(csv_trade));
+  }
+  
+  // Sort orders by time
+  std::sort(all_orders.begin(), all_orders.end(), [](const Order& a, const Order& b) -> bool {
+    uint32_t time_a = a.hour * 3600000 + a.minute * 60000 + a.second * 1000 + a.millisecond * 10;
+    uint32_t time_b = b.hour * 3600000 + b.minute * 60000 + b.second * 1000 + b.millisecond * 10;
+    return time_a < time_b;
+  });
+  
+  if (!all_orders.empty()) {
+    std::string output_file = output_dir + "/" + stock_code + "_orders_compressed_" + std::to_string(all_orders.size()) + ".bin";
+    if (!encode_orders_compressed(all_orders, output_file)) {
+      return false;
+    }
+  }
+  
   return true;
 }
 

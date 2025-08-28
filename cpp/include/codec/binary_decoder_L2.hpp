@@ -58,6 +58,10 @@ public:
   // decoder functions that extract count from filename
   static bool decode_snapshots_from_binary(const std::string &filepath, std::vector<Snapshot> &snapshots);
   static bool decode_orders_from_binary(const std::string &filepath, std::vector<Order> &orders);
+  
+  // compressed decoder functions
+  static bool decode_snapshots_compressed(const std::string &filepath, std::vector<Snapshot> &snapshots);
+  static bool decode_orders_compressed(const std::string &filepath, std::vector<Order> &orders);
 
   // Print snapshot in human-readable format
   static void print_snapshot(const Snapshot &snapshot, size_t index = 0);

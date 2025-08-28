@@ -89,10 +89,19 @@ public:
     static bool encode_orders_to_binary(const std::vector<Order>& orders,
                                        const std::string& filepath);
     
-    // High-level processing function
+    // Compressed binary encoding functions
+    static bool encode_snapshots_compressed(const std::vector<Snapshot>& snapshots, 
+                                           const std::string& filepath);
+    static bool encode_orders_compressed(const std::vector<Order>& orders,
+                                        const std::string& filepath);
+    
+    // High-level processing functions
     static bool process_stock_data(const std::string& stock_dir,
                                   const std::string& output_dir,
                                   const std::string& stock_code);
+    static bool process_stock_data_compressed(const std::string& stock_dir,
+                                             const std::string& output_dir,
+                                             const std::string& stock_code);
 
 private:
     // Time conversion functions (inlined for performance)

@@ -38,7 +38,7 @@ int main() {
             
             std::cout << "\nProcessing stock: " << stock_code << std::endl;
             
-            if (BinaryEncoder_L2::process_stock_data(stock_dir, output_dir, stock_code)) {
+            if (BinaryEncoder_L2::process_stock_data_compressed(stock_dir, output_dir, stock_code)) {
                 processed_stocks++;
                 std::cout << "Successfully processed " << stock_code << std::endl;
             } else {
@@ -68,18 +68,18 @@ int main() {
             
             std::cout << "\nProcessing file: " << filename << std::endl;
             
-            if (filename.find("_snapshots.bin") != std::string::npos) {
+            if (filename.find("_snapshots") != std::string::npos) {
                 // Decode snapshots
                 std::vector<Snapshot> snapshots;
-                if (BinaryDecoder_L2::decode_snapshots_from_binary(filepath, snapshots)) {
-                    // BinaryDecoder_L2::print_all_snapshots(snapshots);
+                if (BinaryDecoder_L2::decode_snapshots_compressed(filepath, snapshots)) {
+                    BinaryDecoder_L2::print_all_snapshots(snapshots);
                 } else {
                     std::cerr << "Failed to decode snapshots from " << filepath << std::endl;
                 }
-            } else if (filename.find("_orders.bin") != std::string::npos) {
+            } else if (filename.find("_orders") != std::string::npos) {
                 // Decode orders
                 std::vector<Order> orders;
-                if (BinaryDecoder_L2::decode_orders_from_binary(filepath, orders)) {
+                if (BinaryDecoder_L2::decode_orders_compressed(filepath, orders)) {
                     // BinaryDecoder_L2::print_all_orders(orders);
                 } else {
                     std::cerr << "Failed to decode orders from " << filepath << std::endl;
