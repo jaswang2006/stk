@@ -3,42 +3,6 @@
 #include <iomanip>
 #include <iostream>
 
-/*
- * Data Field Definitions for L2 Market Data Structures:
- *
- * Snapshot struct fields:
- * - hour: Time hour component (0-23, 5bit)
- * - minute: Time minute component (0-59, 6bit)
- * - second: Time second component (0-59, 6bit)
- * - trade_count: Number of trades in this snapshot (8bit)
- * - volume: Trading volume in units of 100 shares (16bit)
- * - turnover: Trading turnover in RMB (32bit)
- * - high: Highest price in 0.01 RMB units (14bit price ticks)
- * - low: Lowest price in 0.01 RMB units (14bit price ticks)
- * - close: Closing price in 0.01 RMB units (14bit price ticks)
- * - bid_price_ticks[10]: 10 bid price levels in 0.01 RMB units (14bit each)
- * - bid_volumes[10]: 10 bid volume levels in units of 100 shares (14bit each)
- * - ask_price_ticks[10]: 10 ask price levels in 0.01 RMB units (14bit each)
- * - ask_volumes[10]: 10 ask volume levels in units of 100 shares (14bit each)
- * - direction: Price movement direction (1bit: 0=buy, 1=sell)
- * - all_bid_vwap: Volume-weighted average price of all bid orders in 0.001 RMB units (15bit)
- * - all_ask_vwap: Volume-weighted average price of all ask orders in 0.001 RMB units (15bit)
- * - all_bid_volume: Total volume of all bid orders in units of 100 shares (14bit)
- * - all_ask_volume: Total volume of all ask orders in units of 100 shares (14bit)
- *
- * Order struct fields:
- * - hour: Time hour component (0-23, 5bit)
- * - minute: Time minute component (0-59, 6bit)
- * - second: Time second component (0-59, 6bit)
- * - millisecond: Time millisecond component in 10ms units (7bit)
- * - order_type: Order operation type (2bit: 0=maker, 1=cancel, 2=change, 3=taker)
- * - order_dir: Order direction (1bit: 0=bid, 1=ask)
- * - price: Order price in 0.01 RMB units (14bit price ticks)
- * - volume: Order volume in units of 100 shares (16bit)
- * - bid_order_id: Buy order identifier (32bit)
- * - ask_order_id: Sell order identifier (32bit)
- */
-
 namespace L2 {
 
 bool BinaryDecoder_L2::decode_snapshots_from_binary(const std::string &filepath,
@@ -161,7 +125,7 @@ void BinaryDecoder_L2::print_snapshot(const Snapshot &snapshot, size_t index) {
   std::cout << "Low: " << price_to_rmb(snapshot.low) << " RMB" << std::endl;
   std::cout << "Volume: " << volume_to_shares(snapshot.volume) << " shares" << std::endl;
   std::cout << "Turnover: " << snapshot.turnover << " fen" << std::endl;
-  std::cout << "Trade Count: " << static_cast<int>(snapshot.trade_count) << std::endl;
+  std::cout << "Trade Count (incremental): " << static_cast<int>(snapshot.trade_count) << std::endl;
 
   std::cout << "Bid Prices: ";
   for (int i = 0; i < 10; i++) {
@@ -223,7 +187,7 @@ void BinaryDecoder_L2::print_all_snapshots(const std::vector<Snapshot> &snapshot
 
   // bid_volumes[10] - using volume bit width from schema
   for (int i = 0; i < 10; i++) {
-    std::cout << std::setw(calc_width(Snapshot_Schema[11].bit_width)) << std::right << ("bv" + std::to_string(i)) << " ";
+    std::cout << std::setw(get_column_width("bid_volumes[10]")) << std::right << ("bv" + std::to_string(i)) << " ";
   }
 
   // ask_price_ticks[10] - using price bit width from schema
@@ -233,7 +197,7 @@ void BinaryDecoder_L2::print_all_snapshots(const std::vector<Snapshot> &snapshot
 
   // ask_volumes[10] - using volume bit width from schema
   for (int i = 0; i < 10; i++) {
-    std::cout << std::setw(calc_width(Snapshot_Schema[12].bit_width)) << std::right << ("av" + std::to_string(i)) << " ";
+    std::cout << std::setw(get_column_width("ask_volumes[10]")) << std::right << ("av" + std::to_string(i)) << " ";
   }
 
   std::cout << std::setw(direction_width()) << std::right << "d" << " "
@@ -261,7 +225,7 @@ void BinaryDecoder_L2::print_all_snapshots(const std::vector<Snapshot> &snapshot
 
     // Output bid_volumes[10] - using volume bit width from schema
     for (int i = 0; i < 10; i++) {
-      std::cout << std::setw(calc_width(Snapshot_Schema[11].bit_width)) << std::right << snapshot.bid_volumes[i] << " ";
+      std::cout << std::setw(get_column_width("bid_volumes[10]")) << std::right << snapshot.bid_volumes[i] << " ";
     }
 
     // Output ask_price_ticks[10] - using price bit width from schema
@@ -271,7 +235,7 @@ void BinaryDecoder_L2::print_all_snapshots(const std::vector<Snapshot> &snapshot
 
     // Output ask_volumes[10] - using volume bit width from schema
     for (int i = 0; i < 10; i++) {
-      std::cout << std::setw(calc_width(Snapshot_Schema[12].bit_width)) << std::right << snapshot.ask_volumes[i] << " ";
+      std::cout << std::setw(get_column_width("ask_volumes[10]")) << std::right << snapshot.ask_volumes[i] << " ";
     }
 
     std::cout << std::setw(direction_width()) << std::right << (snapshot.direction ? 1 : 0) << " "
@@ -283,6 +247,11 @@ void BinaryDecoder_L2::print_all_snapshots(const std::vector<Snapshot> &snapshot
 }
 
 void BinaryDecoder_L2::print_all_orders(const std::vector<Order> &orders) {
+
+  // hr mn sc  ms t d price   vol bid_ord_id ask_ord_id
+  // 9 15  0   2 0 0   601     1     137525          0
+  // 9 15  0   2 0 1   727     1          0     137524
+
   // Print aligned header using compile-time bit width calculations
   using namespace BitWidthFormat;
 

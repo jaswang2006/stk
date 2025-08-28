@@ -80,6 +80,8 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string& filepath, std::vect
         return false;
     }
     
+    uint32_t prev_trade_count = 0;  // Track previous trade count
+    
     while (std::getline(file, line)) {
         auto fields = split_csv_line(line);
         if (fields.size() < 65) { // Expected minimum number of fields
@@ -94,7 +96,12 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string& filepath, std::vect
         snapshot.price = parse_price_to_fen(fields[4]);
         snapshot.volume = parse_volume_to_100shares(fields[5]);
         snapshot.turnover = parse_turnover_to_fen(fields[6]);
-        snapshot.trade_count = parse_volume_to_100shares(fields[7]);
+        
+        // Calculate incremental trade count
+        uint32_t curr_trade_count = std::stoul(fields[7]);
+        assert(curr_trade_count >= prev_trade_count && "Trade count should never decrease");
+        snapshot.trade_count = curr_trade_count - prev_trade_count;
+        prev_trade_count = curr_trade_count;
         
         snapshot.high = parse_price_to_fen(fields[13]);
         snapshot.low = parse_price_to_fen(fields[14]);
@@ -161,18 +168,30 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string& filepath, std::vector<
         order.order_id = std::stoull(fields[4]);
         order.exchange_order_id = std::stoull(fields[5]);
         
-        // Handle order type
-        if (!fields[6].empty()) {
-            order.order_type = fields[6][0];
-        } else {
-            order.order_type = '0';
-        }
+        bool is_szse = is_szse_market(order.stock_code);
         
-        // Handle order side
-        if (!fields[7].empty()) {
-            order.order_side = fields[7][0];
+        if (is_szse) {
+            // SZSE: field[6] = 委托类型 (always '0', not used)
+            //       field[7] = 委托代码 (B/S for buy/sell)
+            order.order_type = '0';  // Always '0' for SZSE
+            if (!fields[7].empty()) {
+                order.order_side = fields[7][0];
+            } else {
+                order.order_side = ' ';
+            }
         } else {
-            order.order_side = ' ';
+            // SSE: field[6] = 委托类型 (A:add, D:delete) 
+            //      field[7] = 委托代码 (B/S for buy/sell)
+            if (!fields[6].empty()) {
+                order.order_type = fields[6][0];
+            } else {
+                order.order_type = 'A';  // Default to add for SSE
+            }
+            if (!fields[7].empty()) {
+                order.order_side = fields[7][0];
+            } else {
+                order.order_side = ' ';
+            }
         }
         
         order.price = parse_price_to_fen(fields[8]);
@@ -212,25 +231,36 @@ bool BinaryEncoder_L2::parse_trade_csv(const std::string& filepath, std::vector<
         trade.time = std::stoul(fields[3]);
         trade.trade_id = std::stoull(fields[4]);
         
-        // Handle trade code
-        if (!fields[5].empty()) {
-            trade.trade_code = fields[5][0];
-        } else {
-            trade.trade_code = '0';
-        }
+        bool is_szse = is_szse_market(trade.stock_code);
         
-        // Handle dummy code (field 6)
-        if (!fields[6].empty()) {
-            trade.dummy_code = fields[6][0];
+        if (is_szse) {
+            // SZSE: field[5] = 成交代码 (0:成交, C:撤单)
+            //       field[6] = 委托代码 (not used, always empty)
+            //       field[7] = BS标志 (B:buy, S:sell, empty:撤单)
+            if (!fields[5].empty()) {
+                trade.trade_code = fields[5][0];
+            } else {
+                trade.trade_code = '0';  // Default to trade
+            }
+            trade.dummy_code = ' ';  // Not used for SZSE
+            
+            if (!fields[7].empty()) {
+                trade.bs_flag = fields[7][0];
+            } else {
+                trade.bs_flag = ' ';  // Empty for cancel
+            }
         } else {
-            trade.dummy_code = ' ';
-        }
-        
-        // Handle BS flag
-        if (!fields[7].empty()) {
-            trade.bs_flag = fields[7][0];
-        } else {
-            trade.bs_flag = ' ';
+            // SSE: field[5] = 成交代码 (not used, always empty)
+            //      field[6] = 委托代码 (not used, always empty)  
+            //      field[7] = BS标志 (B:buy, S:sell)
+            trade.trade_code = '0';  // SSE doesn't use trade_code
+            trade.dummy_code = ' ';  // Not used for SSE
+            
+            if (!fields[7].empty()) {
+                trade.bs_flag = fields[7][0];
+            } else {
+                trade.bs_flag = ' ';
+            }
         }
         
         trade.price = parse_price_to_fen(fields[8]);
@@ -262,16 +292,39 @@ uint8_t BinaryEncoder_L2::time_to_millisecond_10ms(uint32_t time_ms) {
     return static_cast<uint8_t>((time_ms % 1000) / 10);
 }
 
-uint8_t BinaryEncoder_L2::determine_order_type(char csv_order_type, char /* csv_trade_code */, bool is_trade) {
+bool BinaryEncoder_L2::is_szse_market(const std::string& stock_code) {
+    // SZSE stocks end with .SZ, SSE stocks end with .SH
+    if (stock_code.find(".SZ") != std::string::npos) {
+        return true;  // SZSE market
+    }
+    if (stock_code.find(".SH") != std::string::npos) {
+        return false; // SSE market
+    }
+    assert(false && "Stock code must contain either .SZ or .SH");
+    return false; // Unreachable
+}
+
+uint8_t BinaryEncoder_L2::determine_order_type(char csv_order_type, char csv_trade_code, bool is_trade, bool is_szse) {
     if (is_trade) {
+        // For trades, check trade_code if available (SZSE uses it)
+        if (is_szse && csv_trade_code == 'C') {
+            return 1; // cancel (撤单)
+        }
         return 3; // taker (trade)
     }
     
     // For orders
-    if (csv_order_type == 'A' || csv_order_type == '0') {
+    if (is_szse) {
+        // SZSE: 委托类型 is always '0', not used for type determination
+        // Order type determined from context - default to maker
         return 0; // maker (order)
-    } else if (csv_order_type == 'D') {
-        return 1; // cancel
+    } else {
+        // SSE: 委托类型 field contains the actual type
+        if (csv_order_type == 'A') {
+            return 0; // maker (挂单)
+        } else if (csv_order_type == 'D') {
+            return 1; // cancel (撤单)
+        }
     }
     
     return 0; // default to maker
@@ -286,34 +339,34 @@ Snapshot BinaryEncoder_L2::csv_to_snapshot(const CSVSnapshot& csv_snap) {
     Snapshot snapshot = {};
     
     uint32_t time_ms = parse_time_to_ms(csv_snap.time);
-    snapshot.hour = time_to_hour(time_ms);
-    snapshot.minute = time_to_minute(time_ms);
-    snapshot.second = time_to_second(time_ms);
+    snapshot.hour = BitwidthBounds::clamp_to_bound(time_to_hour(time_ms), BitwidthBounds::HOUR_BOUND);
+    snapshot.minute = BitwidthBounds::clamp_to_bound(time_to_minute(time_ms), BitwidthBounds::MINUTE_BOUND);
+    snapshot.second = BitwidthBounds::clamp_to_bound(time_to_second(time_ms), BitwidthBounds::SECOND_BOUND);
     
-    snapshot.trade_count = static_cast<uint8_t>(std::min(csv_snap.trade_count, 255u));
-    snapshot.volume = static_cast<uint16_t>(std::min(csv_snap.volume, 65535u));
-    snapshot.turnover = static_cast<uint32_t>(std::min(csv_snap.turnover, static_cast<uint64_t>(4294967295ULL)));
+    snapshot.trade_count = BitwidthBounds::clamp_to_bound(csv_snap.trade_count, BitwidthBounds::TRADE_COUNT_BOUND);
+    snapshot.volume = BitwidthBounds::clamp_to_bound(csv_snap.volume, BitwidthBounds::VOLUME_BOUND);
+    snapshot.turnover = BitwidthBounds::clamp_to_bound(csv_snap.turnover, BitwidthBounds::TURNOVER_BOUND);
     
-    // Convert prices from fen to our format (RMB * 100)
-    snapshot.high = static_cast<uint16_t>(std::min(csv_snap.high, 65535u));
-    snapshot.low = static_cast<uint16_t>(std::min(csv_snap.low, 65535u));
-    snapshot.close = static_cast<uint16_t>(std::min(csv_snap.price, 65535u));
+    // Convert prices using 14-bit bounds
+    snapshot.high = BitwidthBounds::clamp_to_bound(csv_snap.high, BitwidthBounds::PRICE_BOUND);
+    snapshot.low = BitwidthBounds::clamp_to_bound(csv_snap.low, BitwidthBounds::PRICE_BOUND);
+    snapshot.close = BitwidthBounds::clamp_to_bound(csv_snap.price, BitwidthBounds::PRICE_BOUND);
     
-    // Copy bid/ask prices and volumes
+    // Copy bid/ask prices and volumes using bitwidth-based bounds
     for (int i = 0; i < 10; i++) {
-        snapshot.bid_price_ticks[i] = static_cast<uint16_t>(std::min(csv_snap.bid_prices[i], 65535u));
-        snapshot.bid_volumes[i] = static_cast<uint16_t>(std::min(csv_snap.bid_volumes[i], 65535u));
-        snapshot.ask_price_ticks[i] = static_cast<uint16_t>(std::min(csv_snap.ask_prices[i], 65535u));
-        snapshot.ask_volumes[i] = static_cast<uint16_t>(std::min(csv_snap.ask_volumes[i], 65535u));
+        snapshot.bid_price_ticks[i] = BitwidthBounds::clamp_to_bound(csv_snap.bid_prices[i], BitwidthBounds::PRICE_BOUND);
+        snapshot.bid_volumes[i] = BitwidthBounds::clamp_to_bound(csv_snap.bid_volumes[i], BitwidthBounds::ORDERBOOK_VOLUME_BOUND);
+        snapshot.ask_price_ticks[i] = BitwidthBounds::clamp_to_bound(csv_snap.ask_prices[i], BitwidthBounds::PRICE_BOUND);
+        snapshot.ask_volumes[i] = BitwidthBounds::clamp_to_bound(csv_snap.ask_volumes[i], BitwidthBounds::ORDERBOOK_VOLUME_BOUND);
     }
     
     // Determine direction based on price movement (simplified)
     snapshot.direction = false; // Default to buy direction
     
-    snapshot.all_bid_vwap = static_cast<uint16_t>(std::min(csv_snap.weighted_avg_bid_price, 65535u));
-    snapshot.all_ask_vwap = static_cast<uint16_t>(std::min(csv_snap.weighted_avg_ask_price, 65535u));
-    snapshot.all_bid_volume = static_cast<uint16_t>(std::min(csv_snap.total_bid_volume, 65535u));
-    snapshot.all_ask_volume = static_cast<uint16_t>(std::min(csv_snap.total_ask_volume, 65535u));
+    snapshot.all_bid_vwap = BitwidthBounds::clamp_to_bound(csv_snap.weighted_avg_bid_price, BitwidthBounds::VWAP_BOUND);
+    snapshot.all_ask_vwap = BitwidthBounds::clamp_to_bound(csv_snap.weighted_avg_ask_price, BitwidthBounds::VWAP_BOUND);
+    snapshot.all_bid_volume = BitwidthBounds::clamp_to_bound(csv_snap.total_bid_volume, BitwidthBounds::TOTAL_VOLUME_BOUND);
+    snapshot.all_ask_volume = BitwidthBounds::clamp_to_bound(csv_snap.total_ask_volume, BitwidthBounds::TOTAL_VOLUME_BOUND);
     
     return snapshot;
 }
@@ -322,45 +375,47 @@ Order BinaryEncoder_L2::csv_to_order(const CSVOrder& csv_order) {
     Order order = {};
     
     uint32_t time_ms = parse_time_to_ms(csv_order.time);
-    order.hour = time_to_hour(time_ms);
-    order.minute = time_to_minute(time_ms);
-    order.second = time_to_second(time_ms);
-    order.millisecond = time_to_millisecond_10ms(time_ms);
+    order.hour = BitwidthBounds::clamp_to_bound(time_to_hour(time_ms), BitwidthBounds::HOUR_BOUND);
+    order.minute = BitwidthBounds::clamp_to_bound(time_to_minute(time_ms), BitwidthBounds::MINUTE_BOUND);
+    order.second = BitwidthBounds::clamp_to_bound(time_to_second(time_ms), BitwidthBounds::SECOND_BOUND);
+    order.millisecond = BitwidthBounds::clamp_to_bound(time_to_millisecond_10ms(time_ms), BitwidthBounds::MILLISECOND_BOUND);
     
-    order.order_type = determine_order_type(csv_order.order_type, '0', false);
-    order.order_dir = determine_order_direction(csv_order.order_side);
-    order.price = static_cast<uint16_t>(std::min(csv_order.price, 65535u));
-    order.volume = static_cast<uint16_t>(std::min(csv_order.volume, 65535u));
+    bool is_szse = is_szse_market(csv_order.stock_code);
+    order.order_type = BitwidthBounds::clamp_to_bound(determine_order_type(csv_order.order_type, '0', false, is_szse), BitwidthBounds::ORDER_TYPE_BOUND);
+    order.order_dir = BitwidthBounds::clamp_to_bound(determine_order_direction(csv_order.order_side), BitwidthBounds::ORDER_DIR_BOUND);
+    order.price = BitwidthBounds::clamp_to_bound(csv_order.price, BitwidthBounds::PRICE_BOUND);
+    order.volume = BitwidthBounds::clamp_to_bound(csv_order.volume, BitwidthBounds::VOLUME_BOUND);
     
     // Set order IDs based on direction and type
     if (order.order_dir == 0) { // bid
-        order.bid_order_id = static_cast<uint32_t>(csv_order.order_id);
+        order.bid_order_id = BitwidthBounds::clamp_to_bound(csv_order.order_id, BitwidthBounds::ORDER_ID_BOUND);
         order.ask_order_id = 0;
     } else { // ask
         order.bid_order_id = 0;
-        order.ask_order_id = static_cast<uint32_t>(csv_order.order_id);
+        order.ask_order_id = BitwidthBounds::clamp_to_bound(csv_order.order_id, BitwidthBounds::ORDER_ID_BOUND);
     }
     
     return order;
 }
 
-Order BinaryEncoder_L2::csv_to_trade_order(const CSVTrade& csv_trade) {
+Order BinaryEncoder_L2::csv_to_trade(const CSVTrade& csv_trade) {
     Order order = {};
     
     uint32_t time_ms = parse_time_to_ms(csv_trade.time);
-    order.hour = time_to_hour(time_ms);
-    order.minute = time_to_minute(time_ms);
-    order.second = time_to_second(time_ms);
-    order.millisecond = time_to_millisecond_10ms(time_ms);
+    order.hour = BitwidthBounds::clamp_to_bound(time_to_hour(time_ms), BitwidthBounds::HOUR_BOUND);
+    order.minute = BitwidthBounds::clamp_to_bound(time_to_minute(time_ms), BitwidthBounds::MINUTE_BOUND);
+    order.second = BitwidthBounds::clamp_to_bound(time_to_second(time_ms), BitwidthBounds::SECOND_BOUND);
+    order.millisecond = BitwidthBounds::clamp_to_bound(time_to_millisecond_10ms(time_ms), BitwidthBounds::MILLISECOND_BOUND);
     
-    order.order_type = determine_order_type('0', csv_trade.trade_code, true);
-    order.order_dir = determine_order_direction(csv_trade.bs_flag);
-    order.price = static_cast<uint16_t>(std::min(csv_trade.price, 65535u));
-    order.volume = static_cast<uint16_t>(std::min(csv_trade.volume, 65535u));
+    bool is_szse = is_szse_market(csv_trade.stock_code);
+    order.order_type = BitwidthBounds::clamp_to_bound(determine_order_type('0', csv_trade.trade_code, true, is_szse), BitwidthBounds::ORDER_TYPE_BOUND);
+    order.order_dir = BitwidthBounds::clamp_to_bound(determine_order_direction(csv_trade.bs_flag), BitwidthBounds::ORDER_DIR_BOUND);
+    order.price = BitwidthBounds::clamp_to_bound(csv_trade.price, BitwidthBounds::PRICE_BOUND);
+    order.volume = BitwidthBounds::clamp_to_bound(csv_trade.volume, BitwidthBounds::VOLUME_BOUND);
     
     // For trades, set both order IDs
-    order.bid_order_id = static_cast<uint32_t>(csv_trade.bid_order_id);
-    order.ask_order_id = static_cast<uint32_t>(csv_trade.ask_order_id);
+    order.bid_order_id = BitwidthBounds::clamp_to_bound(csv_trade.bid_order_id, BitwidthBounds::ORDER_ID_BOUND);
+    order.ask_order_id = BitwidthBounds::clamp_to_bound(csv_trade.ask_order_id, BitwidthBounds::ORDER_ID_BOUND);
     
     return order;
 }
@@ -476,7 +531,7 @@ bool BinaryEncoder_L2::process_stock_data(const std::string& stock_dir,
     
     // Add trades as taker orders
     for (const auto& csv_trade : csv_trades) {
-        all_orders.push_back(csv_to_trade_order(csv_trade));
+        all_orders.push_back(csv_to_trade(csv_trade));
     }
     
     // Sort orders by time

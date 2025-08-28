@@ -81,7 +81,7 @@ public:
     // CSV to L2 conversion functions
     static Snapshot csv_to_snapshot(const CSVSnapshot& csv_snap);
     static Order csv_to_order(const CSVOrder& csv_order);
-    static Order csv_to_trade_order(const CSVTrade& csv_trade);
+    static Order csv_to_trade(const CSVTrade& csv_trade);
     
     // Binary encoding functions
     static bool encode_snapshots_to_binary(const std::vector<Snapshot>& snapshots, 
@@ -100,7 +100,10 @@ private:
     static uint8_t time_to_second(uint32_t time_ms);
     static uint8_t time_to_millisecond_10ms(uint32_t time_ms);
     
-    static uint8_t determine_order_type(char csv_order_type, char csv_trade_code, bool is_trade);
+    // Market detection
+    static bool is_szse_market(const std::string& stock_code);
+    
+    static uint8_t determine_order_type(char csv_order_type, char csv_trade_code, bool is_trade, bool is_szse);
     static bool determine_order_direction(char side_flag);
 };
 

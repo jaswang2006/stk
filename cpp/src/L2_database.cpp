@@ -72,8 +72,7 @@ int main() {
                 // Decode snapshots
                 std::vector<Snapshot> snapshots;
                 if (BinaryDecoder_L2::decode_snapshots_from_binary(filepath, snapshots)) {
-                    BinaryDecoder_L2::print_all_snapshots(snapshots);
-                    exit(0);
+                    // BinaryDecoder_L2::print_all_snapshots(snapshots);
                 } else {
                     std::cerr << "Failed to decode snapshots from " << filepath << std::endl;
                 }
