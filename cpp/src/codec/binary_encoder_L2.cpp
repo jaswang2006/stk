@@ -7,8 +7,26 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <sstream>
+#include <locale>
+#include <codecvt>
 
 namespace L2 {
+
+// Open file with GBK locale for direct reading
+static std::ifstream open_gbk_file(const std::string& filepath) {
+    std::ifstream file(filepath);
+    if (file.is_open()) {
+        // Set locale to handle GBK encoding properly
+        try {
+            file.imbue(std::locale("zh_CN.GBK"));
+        } catch (const std::exception&) {
+            // Fallback to default locale if GBK not available
+            // File will still work, just might have encoding issues with Chinese characters
+        }
+    }
+    return file;
+}
 
 // Constructor with capacity hints
 BinaryEncoder_L2::BinaryEncoder_L2(size_t estimated_snapshots, size_t estimated_orders) {
@@ -99,13 +117,15 @@ inline uint64_t BinaryEncoder_L2::parse_turnover_to_fen(const std::string &turno
 }
 
 bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, std::vector<CSVSnapshot> &snapshots) {
-  std::ifstream file(filepath);
+  // Open file with GBK locale
+  auto file = open_gbk_file(filepath);
   if (!file.is_open()) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to open snapshot CSV: " << filepath << std::endl;
     return false;
   }
 
   std::string line;
+  
   // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to read snapshot CSV header: " << filepath << std::endl;
@@ -168,18 +188,19 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, std::vect
     snapshots.push_back(snapshot);
   }
 
-  file.close();
   return true;
 }
 
 bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<CSVOrder> &orders) {
-  std::ifstream file(filepath);
+  // Open file with GBK locale
+  auto file = open_gbk_file(filepath);
   if (!file.is_open()) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to open order CSV: " << filepath << std::endl;
     return false;
   }
 
   std::string line;
+  
   // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to read order CSV header: " << filepath << std::endl;
@@ -232,18 +253,19 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<
     orders.push_back(order);
   }
 
-  file.close();
   return true;
 }
 
 bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, std::vector<CSVTrade> &trades) {
-  std::ifstream file(filepath);
+  // Open file with GBK locale
+  auto file = open_gbk_file(filepath);
   if (!file.is_open()) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to open trade CSV: " << filepath << std::endl;
     return false;
   }
 
   std::string line;
+  
   // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
     std::cerr << "L2 Encoder: Failed to read trade CSV header: " << filepath << std::endl;
@@ -303,7 +325,6 @@ bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, std::vector<
     trades.push_back(trade);
   }
 
-  file.close();
   return true;
 }
 

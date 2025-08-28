@@ -41,12 +41,16 @@ set(L2_DATABASE_SOURCES
     ../../src/L2_database.cpp
     ../../src/codec/binary_encoder_L2.cpp
     ../../src/codec/binary_decoder_L2.cpp
+    ../../src/codec/parallel/processing_types.cpp
+    ../../src/codec/parallel/workers.cpp
 )
 
 set(L2_DATABASE_HEADERS
     ../../include/codec/L2_DataType.hpp
     ../../include/codec/binary_encoder_L2.hpp
     ../../include/codec/binary_decoder_L2.hpp
+    ../../include/codec/parallel/processing_types.hpp
+    ../../include/codec/parallel/workers.hpp
 )
 
 # Create L2_database executable
