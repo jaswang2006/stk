@@ -8,7 +8,7 @@ extern "C" {
 #include "package/miniz/miniz.h"
 }
 
-namespace BinaryEncoder {
+namespace BinaryEncoder_L1 {
 
 // ============================================================================
 // CONSTRUCTOR AND DESTRUCTOR

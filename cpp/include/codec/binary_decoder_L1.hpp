@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-namespace BinaryDecoder {
+namespace BinaryDecoder_L1 {
 
 // ============================================================================
 // MAIN DECODER CLASS
@@ -80,4 +80,4 @@ private:
   std::unique_ptr<::TechnicalAnalysis> technical_analysis_;
 };
 
-} // namespace BinaryDecoder
+} // namespace BinaryDecoder_L1

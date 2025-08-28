@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-namespace BinaryEncoder {
+namespace BinaryEncoder_L1 {
 
 // ============================================================================
 // MAIN ENCODER CLASS
@@ -47,4 +47,4 @@ private:
     std::vector<uint8_t> buffer_;
 };
 
-} // namespace BinaryEncoder
+} // namespace BinaryEncoder_L1

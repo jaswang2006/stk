@@ -40,20 +40,20 @@ else
 fi
 
 # Move executable to root directory
-if [ -f "build/bin/l2_database" ]; then
+if [ -f "build/bin/app_L2_database" ]; then
     echo "Moving executable to root directory..."
-    mv "build/bin/l2_database" "../../l2_database"
-    echo "Executable moved to: ../../l2_database"
+    mv "build/bin/app_L2_database" "../../app_L2_database"
+    echo "Executable moved to: ../../app_L2_database"
 else
     echo "Warning: Executable not found at expected location"
 fi
 
 # Run the executable automatically
-if [ -f "../../l2_database" ]; then
-    echo "Running l2_database..."
-    ../../l2_database
+if [ -f "../../app_L2_database" ]; then
+    echo "Running app_L2_database..."
+    ../../app_L2_database
 else
-    echo "Error: l2_database not found in root directory"
+    echo "Error: app_L2_database not found in root directory"
 fi
 
 echo

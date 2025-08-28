@@ -21,7 +21,7 @@ extern "C" {
 #include "misc/misc.hpp"
 #endif
 
-namespace BinaryDecoder {
+namespace BinaryDecoder_L1 {
 
 // ============================================================================
 // FORWARD DECLARATIONS
@@ -357,4 +357,4 @@ void Decoder::ParseAsset(const std::string &asset_code,
 
 // Note: CSV output utilities moved to technical_analysis.cpp
 
-} // namespace BinaryDecoder
+} // namespace BinaryDecoder_L1

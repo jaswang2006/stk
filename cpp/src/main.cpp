@@ -34,7 +34,7 @@ void ProcessAsset(const std::string &asset_code,
     }
 
     // Create a decoder instance for this asset (no output file needed for lifespan parsing)
-    BinaryDecoder::Decoder decoder;
+    BinaryDecoder_L1::Decoder decoder;
 
     // Process the asset across its entire lifespan
     decoder.ParseAsset(asset_code, snapshot_dir, month_folders, output_dir);

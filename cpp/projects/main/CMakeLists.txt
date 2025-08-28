@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(BinaryParser VERSION 1.0.0 LANGUAGES CXX C)
+project(Main VERSION 1.0.0 LANGUAGES CXX C)
 
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 23)

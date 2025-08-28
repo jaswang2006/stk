@@ -79,6 +79,5 @@ def main():
         print("Error: Failed to start app")
         sys.exit(1)
 
-
 if __name__ == "__main__":
     main()
