@@ -1,10 +1,16 @@
 #include "codec/parallel/processing_types.hpp"
+#include "codec/parallel/processing_config.hpp"
 #include <chrono>
 #include <thread>
 #include <filesystem>
+#include <cstdlib>
+#include <iostream>
 
 namespace L2 {
 namespace Parallel {
+
+// Global configuration instance
+ProcessingConfig g_config;
 
 // TaskQueue implementation
 void TaskQueue::push(const EncodingTask& task) {
@@ -36,68 +42,96 @@ size_t TaskQueue::size() const {
     return tasks_.size();
 }
 
-// PingPongState implementation
-PingPongState::PingPongState(const std::string& temp_base) 
-    : temp_dir_a_(temp_base + "/temp_a"), temp_dir_b_(temp_base + "/temp_b") {
-    std::filesystem::create_directories(temp_dir_a_);
-    std::filesystem::create_directories(temp_dir_b_);
-}
-
-void PingPongState::signal_ready(bool is_dir_a) {
-    if (is_dir_a) {
-        a_is_ready_.store(true);
-    } else {
-        b_is_ready_.store(true);
-    }
-    cv_.notify_all();
-}
-
-std::string PingPongState::wait_for_ready_dir() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { 
-        return (a_is_ready_.load() && !a_in_use_.load()) || 
-               (b_is_ready_.load() && !b_in_use_.load()) || 
-               decompression_finished_.load(); 
-    });
+// MultiBufferState implementation
+MultiBufferState::MultiBufferState(const std::string& temp_base, uint32_t num_buffers) {
+    buffer_dirs_.reserve(num_buffers);
     
-    if (a_is_ready_.load() && !a_in_use_.load()) {
-        a_in_use_.store(true);
-        return temp_dir_a_;
-    } else if (b_is_ready_.load() && !b_in_use_.load()) {
-        b_in_use_.store(true);
-        return temp_dir_b_;
+    // Create buffer directories
+    for (uint32_t i = 0; i < num_buffers; ++i) {
+        std::string buffer_dir = temp_base + "/buffer_" + std::to_string(i);
+        buffer_dirs_.push_back(buffer_dir);
+        available_buffers_.insert(i);
+        std::filesystem::create_directories(buffer_dir);
     }
-    
-    return "";  // Decompression finished and no more work
 }
 
-void PingPongState::finish_with_dir(const std::string& dir) {
-    if (dir == temp_dir_a_) {
-        a_is_ready_.store(false);
-        a_in_use_.store(false);
-    } else if (dir == temp_dir_b_) {
-        b_is_ready_.store(false);
-        b_in_use_.store(false);
+MultiBufferState::~MultiBufferState() {
+    // Clean up buffer directories
+    for (const auto& dir : buffer_dirs_) {
+        if (std::filesystem::exists(dir)) {
+            std::filesystem::remove_all(dir);
+        }
     }
-    cv_.notify_all();
 }
 
-std::string PingPongState::get_available_decomp_dir() {
+std::string MultiBufferState::get_available_decomp_dir() {
     // Wait for a directory to be free
     while (true) {
-        if (!a_is_ready_.load() && !a_in_use_.load()) {
-            return temp_dir_a_;
-        }
-        if (!b_is_ready_.load() && !b_in_use_.load()) {
-            return temp_dir_b_;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!available_buffers_.empty()) {
+                size_t index = *available_buffers_.begin();
+                available_buffers_.erase(index);
+                return buffer_dirs_[index];
+            }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 }
 
-void PingPongState::signal_decompression_finished() {
+void MultiBufferState::signal_ready(const std::string& dir) {
+    size_t index = find_buffer_index(dir);
+    if (index < buffer_dirs_.size()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ready_buffers_.insert(index);
+        cv_.notify_all();
+    } else if (g_config.terminate_on_error) {
+        std::cerr << "FATAL ERROR: Invalid buffer directory in signal_ready: " << dir << std::endl;
+        std::exit(1);
+    }
+}
+
+std::string MultiBufferState::wait_for_ready_dir() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    cv_.wait(lock, [this] { 
+        return !ready_buffers_.empty() || decompression_finished_.load(); 
+    });
+    
+    if (!ready_buffers_.empty()) {
+        size_t index = *ready_buffers_.begin();
+        ready_buffers_.erase(index);
+        in_use_buffers_.insert(index);
+        return buffer_dirs_[index];
+    }
+    
+    return "";  // Decompression finished and no more work
+}
+
+void MultiBufferState::finish_with_dir(const std::string& dir) {
+    size_t index = find_buffer_index(dir);
+    if (index < buffer_dirs_.size()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        in_use_buffers_.erase(index);
+        available_buffers_.insert(index);
+        cv_.notify_all();
+    } else if (g_config.terminate_on_error) {
+        std::cerr << "FATAL ERROR: Invalid buffer directory in finish_with_dir: " << dir << std::endl;
+        std::exit(1);
+    }
+}
+
+void MultiBufferState::signal_decompression_finished() {
     decompression_finished_.store(true);
     cv_.notify_all();
+}
+
+size_t MultiBufferState::find_buffer_index(const std::string& dir) const {
+    for (size_t i = 0; i < buffer_dirs_.size(); ++i) {
+        if (buffer_dirs_[i] == dir) {
+            return i;
+        }
+    }
+    return buffer_dirs_.size(); // Invalid index
 }
 
 } // namespace Parallel

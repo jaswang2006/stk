@@ -1,6 +1,7 @@
 #pragma once
 
 #include "processing_types.hpp"
+#include "processing_config.hpp"
 #include <string>
 #include <vector>
 #include <atomic>
@@ -32,30 +33,32 @@ void encoding_worker(TaskQueue& task_queue,
                     std::atomic<int>& completed_tasks);
 
 /**
- * Enhanced encoding worker that respects ping-pong coordination
+ * Enhanced encoding worker that respects multi-buffer coordination
  * @param task_queue Queue to receive encoding tasks from
- * @param ping_pong Ping-pong state coordinator
+ * @param multi_buffer Multi-buffer state coordinator
  * @param core_id CPU core to bind this thread to
  * @param completed_tasks Counter for completed tasks
  */
-void encoding_worker_with_pingpong(TaskQueue& task_queue, 
-                                  PingPongState& ping_pong,
-                                  unsigned int core_id, 
-                                  std::atomic<int>& completed_tasks);
+void encoding_worker_with_multibuffer(TaskQueue& task_queue, 
+                                      MultiBufferState& multi_buffer,
+                                      unsigned int core_id, 
+                                      std::atomic<int>& completed_tasks);
 
 /**
  * Archive decompression worker function
- * @param all_archives Vector of archive file paths to process
- * @param ping_pong Ping-pong state coordinator
+ * @param archive_subset Vector of archive file paths for this worker to process
+ * @param multi_buffer Multi-buffer state coordinator
  * @param task_queue Queue to send encoding tasks to
  * @param output_base Base output directory
  * @param total_assets Counter for total assets discovered
+ * @param worker_id ID of this decompression worker thread
  */
-void decompression_worker(const std::vector<std::string>& all_archives, 
-                         PingPongState& ping_pong, 
+void decompression_worker(const std::vector<std::string>& archive_subset, 
+                         MultiBufferState& multi_buffer, 
                          TaskQueue& task_queue,
                          const std::string& output_base,
-                         std::atomic<int>& total_assets);
+                         std::atomic<int>& total_assets,
+                         unsigned int worker_id);
 
 /**
  * Decompress 7z file using system command

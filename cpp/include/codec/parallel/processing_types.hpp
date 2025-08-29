@@ -5,6 +5,8 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <vector>
+#include <unordered_set>
 
 namespace L2 {
 namespace Parallel {
@@ -37,39 +39,46 @@ public:
 };
 
 /**
- * Ping-pong state coordination for decompression and encoding pipeline
- * Manages two temporary directories in ping-pong fashion to overlap decompression and encoding
+ * Multi-buffer state coordination for decompression and encoding pipeline
+ * Manages multiple temporary directories to overlap decompression and encoding
+ * Supports configurable number of decompression threads and buffers
  */
-class PingPongState {
+class MultiBufferState {
 private:
     std::mutex mutex_;
     std::condition_variable cv_;
     std::atomic<bool> decompression_finished_{false};
     
+    // Buffer management
+    std::vector<std::string> buffer_dirs_;           // All buffer directory paths
+    std::unordered_set<size_t> ready_buffers_;       // Buffers ready for encoding
+    std::unordered_set<size_t> in_use_buffers_;      // Buffers currently being used by encoders
+    std::unordered_set<size_t> available_buffers_;   // Buffers available for decompression
+    
 public:
-    // Ping-pong directories
-    std::string temp_dir_a_;
-    std::string temp_dir_b_;
-    std::atomic<bool> a_is_ready_{false};   // true when temp_a has data ready for encoding
-    std::atomic<bool> b_is_ready_{false};   // true when temp_b has data ready for encoding
-    std::atomic<bool> a_in_use_{false};     // true when encoders are working on temp_a
-    std::atomic<bool> b_in_use_{false};     // true when encoders are working on temp_b
+    explicit MultiBufferState(const std::string& temp_base, uint32_t num_buffers);
+    ~MultiBufferState();
     
-    explicit PingPongState(const std::string& temp_base);
+    // Decompressor calls this to get next available directory for decompression
+    std::string get_available_decomp_dir();
     
-    // Decompressor calls this when a directory is ready
-    void signal_ready(bool is_dir_a);
+    // Decompressor calls this when a directory is ready for encoding
+    void signal_ready(const std::string& dir);
     
-    // Encoders call this to get next available directory
+    // Encoders call this to get next available directory for encoding
     std::string wait_for_ready_dir();
     
     // Encoders call this when done with a directory
     void finish_with_dir(const std::string& dir);
     
-    // Decompressor calls this to get next available directory for decompression
-    std::string get_available_decomp_dir();
-    
+    // Decompressor calls this when all decompression is finished
     void signal_decompression_finished();
+    
+    // Get buffer directory count
+    size_t get_buffer_count() const { return buffer_dirs_.size(); }
+    
+private:
+    size_t find_buffer_index(const std::string& dir) const;
 };
 
 } // namespace Parallel

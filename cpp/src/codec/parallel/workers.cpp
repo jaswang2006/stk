@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstring>
+#include <cstdlib>
 
 namespace L2 {
 namespace Parallel {
@@ -30,7 +31,10 @@ bool process_stock_data(const std::string& asset_dir,
     
     // Check if asset directory exists
     if (!std::filesystem::exists(asset_dir)) {
-        std::cerr << "Asset directory does not exist: " << asset_dir << std::endl;
+        std::cerr << "FATAL ERROR: Asset directory does not exist: " << asset_dir << std::endl;
+        if (g_config.terminate_on_error) {
+            std::exit(1);
+        }
         return false;
     }
     
@@ -43,24 +47,34 @@ bool process_stock_data(const std::string& asset_dir,
     std::string snapshot_file = asset_dir + "/行情.csv";
     if (std::filesystem::exists(snapshot_file)) {
         std::vector<L2::CSVSnapshot> csv_snapshots;
-        if (encoder.parse_snapshot_csv(snapshot_file, csv_snapshots)) {
-            snapshots.reserve(csv_snapshots.size());
-            for (const auto& csv_snap : csv_snapshots) {
-                snapshots.push_back(L2::BinaryEncoder_L2::csv_to_snapshot(csv_snap));
+        if (!encoder.parse_snapshot_csv(snapshot_file, csv_snapshots)) {
+            std::cerr << "FATAL ERROR: Failed to parse snapshot CSV: " << snapshot_file << std::endl;
+            if (g_config.terminate_on_error) {
+                std::exit(1);
             }
-            has_snapshots = !snapshots.empty();
+            return false;
         }
+        snapshots.reserve(csv_snapshots.size());
+        for (const auto& csv_snap : csv_snapshots) {
+            snapshots.push_back(L2::BinaryEncoder_L2::csv_to_snapshot(csv_snap));
+        }
+        has_snapshots = !snapshots.empty();
     }
     
     // Process orders from 委托队列.csv
     std::string order_file = asset_dir + "/委托队列.csv";
     if (std::filesystem::exists(order_file)) {
         std::vector<L2::CSVOrder> csv_orders;
-        if (encoder.parse_order_csv(order_file, csv_orders)) {
-            all_orders.reserve(csv_orders.size());
-            for (const auto& csv_order : csv_orders) {
-                all_orders.push_back(L2::BinaryEncoder_L2::csv_to_order(csv_order));
+        if (!encoder.parse_order_csv(order_file, csv_orders)) {
+            std::cerr << "FATAL ERROR: Failed to parse order CSV: " << order_file << std::endl;
+            if (g_config.terminate_on_error) {
+                std::exit(1);
             }
+            return false;
+        }
+        all_orders.reserve(csv_orders.size());
+        for (const auto& csv_order : csv_orders) {
+            all_orders.push_back(L2::BinaryEncoder_L2::csv_to_order(csv_order));
         }
     }
     
@@ -68,12 +82,17 @@ bool process_stock_data(const std::string& asset_dir,
     std::string trade_file = asset_dir + "/逐笔成交.csv";
     if (std::filesystem::exists(trade_file)) {
         std::vector<L2::CSVTrade> csv_trades;
-        if (encoder.parse_trade_csv(trade_file, csv_trades)) {
-            size_t original_size = all_orders.size();
-            all_orders.reserve(original_size + csv_trades.size());
-            for (const auto& csv_trade : csv_trades) {
-                all_orders.push_back(L2::BinaryEncoder_L2::csv_to_trade(csv_trade));
+        if (!encoder.parse_trade_csv(trade_file, csv_trades)) {
+            std::cerr << "FATAL ERROR: Failed to parse trade CSV: " << trade_file << std::endl;
+            if (g_config.terminate_on_error) {
+                std::exit(1);
             }
+            return false;
+        }
+        size_t original_size = all_orders.size();
+        all_orders.reserve(original_size + csv_trades.size());
+        for (const auto& csv_trade : csv_trades) {
+            all_orders.push_back(L2::BinaryEncoder_L2::csv_to_trade(csv_trade));
         }
     }
     
@@ -95,7 +114,10 @@ bool process_stock_data(const std::string& asset_dir,
         std::filesystem::create_directories(snapshots_dir);
         std::string output_file = snapshots_dir + "/snapshots_" + std::to_string(snapshots.size()) + ".bin";
         if (!encoder.encode_snapshots(snapshots, output_file, L2::ENABLE_DELTA_ENCODING)) {
-            std::cerr << "Failed to encode snapshots for " << asset_code << std::endl;
+            std::cerr << "FATAL ERROR: Failed to encode snapshots for " << asset_code << std::endl;
+            if (g_config.terminate_on_error) {
+                std::exit(1);
+            }
             return false;
         }
     }
@@ -105,7 +127,10 @@ bool process_stock_data(const std::string& asset_dir,
         std::filesystem::create_directories(orders_dir);
         std::string output_file = orders_dir + "/orders_" + std::to_string(all_orders.size()) + ".bin";
         if (!encoder.encode_orders(all_orders, output_file, L2::ENABLE_DELTA_ENCODING)) {
-            std::cerr << "Failed to encode orders for " << asset_code << std::endl;
+            std::cerr << "FATAL ERROR: Failed to encode orders for " << asset_code << std::endl;
+            if (g_config.terminate_on_error) {
+                std::exit(1);
+            }
             return false;
         }
     }
@@ -142,40 +167,65 @@ void encoding_worker(TaskQueue& task_queue, unsigned int core_id, std::atomic<in
 bool decompress_7z(const std::string& archive_path, const std::string& output_dir) {
     assert(!archive_path.empty());
     assert(!output_dir.empty());
-    assert(std::filesystem::exists(archive_path));
+    
+    if (!std::filesystem::exists(archive_path)) {
+        std::cerr << "FATAL ERROR: Archive file does not exist: " << archive_path << std::endl;
+        if (g_config.terminate_on_error) {
+            std::exit(1);
+        }
+        return false;
+    }
     
     // Create output directory
-    std::filesystem::create_directories(output_dir);
+    if (!std::filesystem::create_directories(output_dir) && !std::filesystem::exists(output_dir)) {
+        std::cerr << "FATAL ERROR: Failed to create output directory: " << output_dir << std::endl;
+        if (g_config.terminate_on_error) {
+            std::exit(1);
+        }
+        return false;
+    }
     
     // Use 7z command line tool for decompression
     std::string command = "7z x \"" + archive_path + "\" -o\"" + output_dir + "\" -y > /dev/null 2>&1";
     int result = std::system(command.c_str());
     
-    return result == 0;
+    if (result != 0) {
+        std::cerr << "FATAL ERROR: Failed to decompress archive: " << archive_path << " (exit code: " << result << ")" << std::endl;
+        if (g_config.terminate_on_error) {
+            std::exit(1);
+        }
+        return false;
+    }
+    
+    return true;
 }
 
-void decompression_worker(const std::vector<std::string>& all_archives, 
-                         PingPongState& ping_pong, 
+void decompression_worker(const std::vector<std::string>& archive_subset, 
+                         MultiBufferState& multi_buffer, 
                          TaskQueue& task_queue,
                          const std::string& output_base,
-                         std::atomic<int>& total_assets) {
-    assert(!all_archives.empty());
+                         std::atomic<int>& total_assets,
+                         unsigned int worker_id) {
+    assert(!archive_subset.empty());
     assert(!output_base.empty());
     
-    // Set thread affinity to core 0
-    if (misc::Affinity::supported()) {
-        if (!misc::Affinity::pin_to_core(0)) {
-            std::cerr << "Warning: Failed to set decompression thread affinity to core 0" << std::endl;
+    // Set thread affinity
+    if (misc::Affinity::supported() && g_config.use_core_affinity) {
+        unsigned int core_id = g_config.decompression_core_start + worker_id;
+        if (!misc::Affinity::pin_to_core(core_id)) {
+            std::cerr << "Warning: Failed to set decompression thread " << worker_id 
+                      << " affinity to core " << core_id << std::endl;
         }
     }
     
-    for (const std::string& archive_path : all_archives) {
+    for (const std::string& archive_path : archive_subset) {
         std::string archive_name = std::filesystem::path(archive_path).stem().string();
         
         // Get available directory for decompression
-        std::string decomp_dir = ping_pong.get_available_decomp_dir();
+        std::string decomp_dir = multi_buffer.get_available_decomp_dir();
         
-        std::cout << "Decompressing " << archive_name << ".7z to " << decomp_dir << "..." << std::endl;
+        std::cout << "Worker " << worker_id << " decompressing " << archive_name 
+                  << ".7z to " << decomp_dir << "..." << std::endl;
         
         // Clear and prepare directory
         if (std::filesystem::exists(decomp_dir)) {
@@ -183,16 +233,22 @@ void decompression_worker(const std::vector<std::string>& all_archives,
         }
         std::filesystem::create_directories(decomp_dir);
         
-        // Decompress archive
+        // Decompress archive - will terminate on failure if configured
         if (!decompress_7z(archive_path, decomp_dir)) {
-            std::cerr << "Failed to decompress " << archive_path << std::endl;
+            std::cerr << "FATAL ERROR: Worker " << worker_id << " failed to decompress " << archive_path << std::endl;
+            if (g_config.terminate_on_error) {
+                std::exit(1);
+            }
             continue;
         }
         
         // Find the date directory
         std::string date_dir = decomp_dir + "/" + archive_name;
         if (!std::filesystem::exists(date_dir)) {
-            std::cerr << "Date directory not found after decompression: " << date_dir << std::endl;
+            std::cerr << "FATAL ERROR: Date directory not found after decompression: " << date_dir << std::endl;
+            if (g_config.terminate_on_error) {
+                std::exit(1);
+            }
             continue;
         }
         
@@ -215,26 +271,26 @@ void decompression_worker(const std::vector<std::string>& all_archives,
             }
         }
         
-        std::cout << "Queued " << assets_this_archive << " assets from " << archive_name 
+        std::cout << "Worker " << worker_id << " queued " << assets_this_archive 
+                  << " assets from " << archive_name 
                   << " (total queued: " << total_assets.load() << ")" << std::endl;
         
         // Signal that this directory is ready for encoding
-        bool is_dir_a = (decomp_dir == ping_pong.temp_dir_a_);
-        ping_pong.signal_ready(is_dir_a);
+        multi_buffer.signal_ready(decomp_dir);
     }
     
-    ping_pong.signal_decompression_finished();
-    std::cout << "Decompression worker finished." << std::endl;
+    std::cout << "Decompression worker " << worker_id << " finished." << std::endl;
 }
 
-void encoding_worker_with_pingpong(TaskQueue& task_queue, 
-                                  PingPongState& ping_pong,
-                                  unsigned int core_id, 
-                                  std::atomic<int>& completed_tasks) {
+void encoding_worker_with_multibuffer(TaskQueue& task_queue, 
+                                      MultiBufferState& multi_buffer,
+                                      unsigned int core_id, 
+                                      std::atomic<int>& completed_tasks) {
     // Set thread affinity
-    if (misc::Affinity::supported()) {
-        if (!misc::Affinity::pin_to_core(core_id)) {
-            std::cerr << "Warning: Failed to set thread affinity for core " << core_id << std::endl;
+    if (misc::Affinity::supported() && g_config.use_core_affinity) {
+        unsigned int target_core = g_config.encoding_core_start + (core_id - 1);  // core_id starts from 1 for encoding
+        if (!misc::Affinity::pin_to_core(target_core)) {
+            std::cerr << "Warning: Failed to set thread affinity for encoding core " << target_core << std::endl;
         }
     }
     
@@ -246,11 +302,11 @@ void encoding_worker_with_pingpong(TaskQueue& task_queue,
         try {
             // Check if we need to switch to a new working directory
             std::string task_base_dir = task.asset_dir.substr(0, task.asset_dir.find_last_of('/'));
-            task_base_dir = task_base_dir.substr(0, task_base_dir.find_last_of('/'));  // Remove date dir to get temp dir
+            task_base_dir = task_base_dir.substr(0, task_base_dir.find_last_of('/'));  // Remove date dir to get buffer dir
             
             if (current_working_dir.empty()) {
                 // First task - wait for a ready directory
-                current_working_dir = ping_pong.wait_for_ready_dir();
+                current_working_dir = multi_buffer.wait_for_ready_dir();
                 if (current_working_dir.empty()) break;  // No more work
                 tasks_in_current_dir = 0;
             }
@@ -259,6 +315,9 @@ void encoding_worker_with_pingpong(TaskQueue& task_queue,
             if (task_base_dir == current_working_dir) {
                 if (process_stock_data(task.asset_dir, task.asset_code, task.date_str, task.output_base)) {
                     completed_tasks.fetch_add(1);
+                } else if (g_config.terminate_on_error) {
+                    std::cerr << "FATAL ERROR: Encoding failed for " << task.asset_code << std::endl;
+                    std::exit(1);
                 }
                 tasks_in_current_dir++;
             } else {
@@ -267,24 +326,27 @@ void encoding_worker_with_pingpong(TaskQueue& task_queue,
                 
                 // Finish with current directory
                 if (!current_working_dir.empty()) {
-                    ping_pong.finish_with_dir(current_working_dir);
+                    multi_buffer.finish_with_dir(current_working_dir);
                     std::cout << "Worker " << core_id << " finished processing " << tasks_in_current_dir 
                               << " tasks from " << current_working_dir << std::endl;
                 }
                 
                 // Wait for next ready directory
-                current_working_dir = ping_pong.wait_for_ready_dir();
+                current_working_dir = multi_buffer.wait_for_ready_dir();
                 if (current_working_dir.empty()) break;  // No more work
                 tasks_in_current_dir = 0;
             }
         } catch (const std::exception& e) {
-            std::cerr << "Error processing " << task.asset_code << ": " << e.what() << std::endl;
+            std::cerr << "FATAL ERROR processing " << task.asset_code << ": " << e.what() << std::endl;
+            if (g_config.terminate_on_error) {
+                std::exit(1);
+            }
         }
     }
     
     // Finish with current directory when exiting
     if (!current_working_dir.empty()) {
-        ping_pong.finish_with_dir(current_working_dir);
+        multi_buffer.finish_with_dir(current_working_dir);
         std::cout << "Worker " << core_id << " finished processing " << tasks_in_current_dir 
                   << " tasks from " << current_working_dir << std::endl;
     }
