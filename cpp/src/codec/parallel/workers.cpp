@@ -116,6 +116,14 @@
  * COMPLETION CONDITION:
  *   - A folder is complete when remaining hits zero (single-thread cleanup).
  *   - All encoders exit when producers_done == true and asset_queue is empty.
+ * 
+ * =============================================================================
+ * GRACEFUL SHUTDOWN:
+ * =============================================================================
+ * 
+ * - SIGINT/SIGTERM set g_shutdown_requested = true (atomic bool).
+ * - Workers check g_shutdown_requested in main loops and exit cleanly.
+ * - Temp folder cleanup happens automatically via the refcount system.
  */
 
 #include "codec/parallel/workers.hpp"
@@ -123,6 +131,7 @@
 #include "codec/parallel/processing_config.hpp"
 #include "codec/parallel/processing_types.hpp"
 #include "misc/affinity.hpp"
+#include "misc/misc.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -300,8 +309,8 @@ bool decompress_7z(const std::string &archive_path, const std::string &output_di
 
   std::filesystem::create_directories(output_dir);
 
-  // Use 7z decompression with error output visible
-  std::string command = "7z x \"" + archive_path + "\" -o\"" + output_dir + "\" -y";
+  // Use 7z decompression with hidden output
+  std::string command = "7z x \"" + archive_path + "\" -o\"" + output_dir + "\" -y > /dev/null 2>&1";
   int result = std::system(command.c_str());
   if (result != 0) {
     std::cerr << "[ERROR] Failed to decompress: " << archive_path << " (exit code: " << result << ")" << std::endl;
@@ -404,6 +413,7 @@ void decompression_worker(unsigned int worker_id) {
       while (!asset_queue.try_push(item) && !g_shutdown_requested.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
       }
+      if (g_shutdown_requested.load()) break;
     }
 
     log_decomp("Decompression Worker " + std::to_string(worker_id) + " Completed: " + archive_name + 
@@ -445,19 +455,10 @@ void encoding_worker(unsigned int core_id) {
         if (it != folder_meta.end()) {
           processed_count = it->second.processed.fetch_add(1) + 1;
           int total = it->second.total;
-          // Optionally print progress line using folder_meta
-          if (processed_count % 10 == 0 || processed_count == total) { // show every 10th or final
-            int percent = (processed_count * 100) / total;
-            std::string progress_bar;
-            int bar_width = 40;
-            int filled = (percent * bar_width) / 100;
-            progress_bar = "[" + std::string(filled, '=') + (filled < bar_width ? ">" : "") + 
-                          std::string(bar_width - filled - (filled < bar_width ? 1 : 0), ' ') + "]";
-            std::cout << progress_bar << " " << std::setw(3) << percent << "% (" 
-                     << processed_count << "/" << total << ") " << item.date_str << " " 
-                     << item.asset_code << " (" << std::fixed << std::setprecision(1) 
-                     << compression_ratio << "x)" << std::endl;
-          }
+          // Print progress using misc utility (tqdm-like)
+          std::ostringstream message;
+          message << item.date_str << " " << item.asset_code << " (" << std::fixed << std::setprecision(1) << compression_ratio << "x)";
+          misc::print_progress(processed_count, total, message.str());
         }
       }
     }
