@@ -9,8 +9,10 @@ def kill_python_processes_windows(current_pid):
     """Kill all running Python processes in Windows, except this script."""
     print("Terminating Windows Python processes...")
     try:
-        tasklist = subprocess.check_output("tasklist", shell=True, encoding='cp1252')
-        pids = [line.split()[1] for line in tasklist.splitlines() if 'python' in line.lower() and line.split()[1] != str(current_pid)]
+        tasklist = subprocess.check_output(
+            "tasklist", shell=True, encoding='cp1252')
+        pids = [line.split()[1] for line in tasklist.splitlines(
+        ) if 'python' in line.lower() and line.split()[1] != str(current_pid)]
         for pid in pids:
             subprocess.run(["taskkill", "/F", "/PID", pid], check=True)
     except subprocess.CalledProcessError as e:
@@ -24,7 +26,8 @@ def kill_python_processes_unix(current_pid):
     print("Terminating Unix-like Python processes...")
     try:
         ps_output = subprocess.check_output("ps aux", shell=True).decode()
-        pids = [line.split()[1] for line in ps_output.splitlines() if 'python' in line and 'grep' not in line and line.split()[1] != str(current_pid)]
+        pids = [line.split()[1] for line in ps_output.splitlines(
+        ) if 'python' in line and 'grep' not in line and line.split()[1] != str(current_pid)]
         for pid in pids:
             subprocess.run(["kill", "-9", pid], check=True)
     except subprocess.CalledProcessError as e:
@@ -61,15 +64,16 @@ def main():
     # app_name = "L1_database"
     app_name = "L2_database"
     app = f"./py/{app_name}.py"
-    
+
     print(f"Starting {app_name}...")
 
     # Use the virtual environment Python interpreter
-    python = "/home/chuyin/work/py3_12_3/bin/python"
+    python = "/usr/bin/python"
 
     try:
         if cfg_stk.profile:
-            subprocess.run([python, "-m", "viztracer", "--tracer_entries", "1000000", app], check=True)
+            subprocess.run([python, "-m", "viztracer",
+                           "--tracer_entries", "1000000", app], check=True)
         else:
             subprocess.run([python, app], check=True)
         print("app finished")
@@ -78,6 +82,7 @@ def main():
     except subprocess.CalledProcessError:
         print("Error: Failed to start app")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

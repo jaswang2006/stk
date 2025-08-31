@@ -131,11 +131,13 @@
  */
 
 #include "codec/parallel/workers.hpp"
+#include "codec/binary_decoder_L2.hpp"
 #include "codec/binary_encoder_L2.hpp"
 #include "codec/parallel/processing_config.hpp"
 #include "codec/parallel/processing_types.hpp"
 #include "misc/affinity.hpp"
 #include "misc/misc.hpp"
+#include "misc/logging.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -143,7 +145,6 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
@@ -155,40 +156,7 @@ extern std::atomic<bool> g_shutdown_requested;
 namespace L2 {
 namespace Parallel {
 
-// Decompression logging
-static std::ofstream decomp_log;
-static std::mutex decomp_log_mutex;
 
-// Initialize decompression logging
-static void init_decomp_log() {
-  std::filesystem::path log_path = std::filesystem::absolute(g_config.temp_base) / "decompression.log";
-  std::filesystem::create_directories(log_path.parent_path());
-
-  decomp_log.open(log_path);
-  if (decomp_log.is_open()) {
-    decomp_log << "Decompression Log Started at: " << log_path << std::endl;
-    std::cout << "Decompression log: " << log_path << std::endl;
-  } else {
-    std::cerr << "Failed to create decompression log at: " << log_path << std::endl;
-  }
-}
-
-// Close decompression logging
-static void close_decomp_log() {
-  if (decomp_log.is_open()) {
-    decomp_log << "Decompression Log Ended" << std::endl;
-    decomp_log.close();
-  }
-}
-
-// Log to decompression file
-static void log_decomp(const std::string &message) {
-  std::lock_guard<std::mutex> lock(decomp_log_mutex);
-  if (decomp_log.is_open()) {
-    decomp_log << message << std::endl;
-    decomp_log.flush();
-  }
-}
 
 bool process_stock_data(const std::string &asset_dir,
                         const std::string &asset_code,
@@ -222,11 +190,11 @@ bool process_stock_data(const std::string &asset_dir,
     }
   }
 
-  // Asset must have snapshots (market data) - fail immediately if missing
-  if (snapshots.empty()) {
-    std::cerr << "[ERROR] " << asset_code << " (" << date_str << ") - no snapshot data found, terminating" << std::endl;
-    std::exit(1);
-  }
+  // // Asset must have snapshots (market data) - fail immediately if missing
+  // if (snapshots.empty()) {
+  //   std::cerr << "[ERROR] " << asset_code << " (" << date_str << ") - no snapshot data found, terminating" << std::endl;
+  //   std::exit(1);
+  // }
 
   // Process orders from 逐笔委托.csv
   std::string order_file = asset_dir + "/逐笔委托.csv";
@@ -297,7 +265,7 @@ bool decompress_7z(const std::string &archive_path, const std::string &output_di
 }
 
 void decompression_worker(unsigned int worker_id) {
-  log_decomp("Decompression Worker " + std::to_string(worker_id) + " Started");
+  Logger::log_decomp("Decompression Worker " + std::to_string(worker_id) + " Started");
 
   while (!g_shutdown_requested.load()) {
     // STEP 2: TAKE NEXT ARCHIVE
@@ -322,7 +290,7 @@ void decompression_worker(unsigned int worker_id) {
     // Construct folder_token early for RAII (will cleanup on any failure)
     FolderToken folder_token(temp_root);
 
-    log_decomp("Decompression Worker " + std::to_string(worker_id) + " Processing: " + archive_name);
+    Logger::log_decomp("Decompression Worker " + std::to_string(worker_id) + " Processing: " + archive_name);
 
     // STEP 3: DECOMPRESS
     if (!decompress_7z(archive_path, temp_root)) {
@@ -347,7 +315,10 @@ void decompression_worker(unsigned int worker_id) {
     try {
       for (const auto &asset_entry : std::filesystem::directory_iterator(assets_folder)) {
         if (asset_entry.is_directory()) {
-          asset_list.emplace_back(asset_entry.path().string(), asset_entry.path().filename().string());
+          std::string asset_code = asset_entry.path().filename().string();
+          if (L2::BinaryDecoder_L2::is_valid_market_asset(asset_code)) {
+            asset_list.emplace_back(asset_entry.path().string(), asset_code);
+          }
         }
       }
     } catch (const std::exception &e) {
@@ -372,11 +343,11 @@ void decompression_worker(unsigned int worker_id) {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
-    log_decomp("Decompression Worker " + std::to_string(worker_id) + " Completed: " + archive_name +
+    Logger::log_decomp("Decompression Worker " + std::to_string(worker_id) + " Completed: " + archive_name +
                " (" + std::to_string(asset_count) + " assets)");
   }
 
-  log_decomp("Decompression Worker " + std::to_string(worker_id) + " Finished");
+  Logger::log_decomp("Decompression Worker " + std::to_string(worker_id) + " Finished");
 }
 
 void encoding_worker(unsigned int core_id) {
@@ -463,11 +434,11 @@ void encoding_worker(unsigned int core_id) {
 }
 
 void init_decompression_logging() {
-  init_decomp_log();
+  Logger::init(g_config.temp_base);
 }
 
 void close_decompression_logging() {
-  close_decomp_log();
+  Logger::close();
 }
 
 } // namespace Parallel

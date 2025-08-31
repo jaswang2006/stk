@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-// Zstandard compression library  
+// Zstandard compression library
 #include "../../package/zstd-1.5.7/zstd.h"
 
 namespace L2 {
@@ -63,9 +63,9 @@ public:
   // decoder functions
   bool decode_snapshots(const std::string &filepath, std::vector<Snapshot> &snapshots, bool use_delta = ENABLE_DELTA_ENCODING);
   bool decode_orders(const std::string &filepath, std::vector<Order> &orders, bool use_delta = ENABLE_DELTA_ENCODING);
-  
+
   // Zstandard decompression helper functions (pure standard decompression)
-  static bool read_and_decompress_data(const std::string& filepath, void* data, size_t expected_size, size_t& actual_size);
+  static bool read_and_decompress_data(const std::string &filepath, void *data, size_t expected_size, size_t &actual_size);
 
   // Print snapshot in human-readable format
   static void print_snapshot(const Snapshot &snapshot, size_t index = 0);
@@ -94,6 +94,9 @@ public:
   // Helper function to extract count from filename (used by dictionary compression)
   static size_t extract_count_from_filename(const std::string &filepath);
 
+  // Asset market validation - check if asset belongs to valid stock markets (not index)
+  static bool is_valid_market_asset(const std::string &asset_code);
+
 private:
   // Reusable vector tables for delta decoding (snapshots)
   mutable std::vector<uint8_t> temp_hours, temp_minutes, temp_seconds;
@@ -101,7 +104,7 @@ private:
   mutable std::vector<uint16_t> temp_bid_prices[10], temp_ask_prices[10];
   mutable std::vector<uint16_t> temp_all_bid_vwaps, temp_all_ask_vwaps;
   mutable std::vector<uint32_t> temp_all_bid_volumes, temp_all_ask_volumes;
-  
+
   // Reusable vector tables for delta decoding (orders)
   mutable std::vector<uint8_t> temp_order_hours, temp_order_minutes, temp_order_seconds, temp_order_milliseconds;
   mutable std::vector<uint16_t> temp_order_prices;

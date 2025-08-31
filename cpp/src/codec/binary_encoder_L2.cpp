@@ -1,10 +1,12 @@
 #include "codec/binary_encoder_L2.hpp"
 #include "codec/delta_encoding.hpp"
+#include "misc/logging.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iomanip>
+
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -119,7 +121,7 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, std::vect
   // Open file with GBK locale
   auto file = open_gbk_file(filepath);
   if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to open snapshot CSV: " << filepath << std::endl;
+    Logger::log_parsing_error("Failed to open snapshot CSV: " + filepath);
     return false;
   }
 
@@ -127,8 +129,8 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, std::vect
   
   // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to read snapshot CSV header: " << filepath << std::endl;
-    return false;
+    Logger::log_parsing_error("Failed to read snapshot CSV header: " + filepath);
+    return true;
   }
 
   uint32_t prev_trade_count = 0; // Track previous trade count
@@ -139,52 +141,57 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, std::vect
       continue;
     }
 
-    CSVSnapshot snapshot = {};
-    snapshot.stock_code = fields[0];
-    snapshot.exchange_code = fields[1];
-    snapshot.date = std::stoul(fields[2]);
-    snapshot.time = std::stoul(fields[3]);
-    snapshot.price = parse_price_to_fen(fields[4]);
-    snapshot.volume = parse_volume_to_100shares(fields[5]);
-    snapshot.turnover = parse_turnover_to_fen(fields[6]);
+    try {
+      CSVSnapshot snapshot = {};
+      snapshot.stock_code = fields[0];
+      snapshot.exchange_code = fields[1];
+      snapshot.date = std::stoul(fields[2]);
+      snapshot.time = std::stoul(fields[3]);
+      snapshot.price = parse_price_to_fen(fields[4]);
+      snapshot.volume = parse_volume_to_100shares(fields[5]);
+      snapshot.turnover = parse_turnover_to_fen(fields[6]);
 
-    // Calculate incremental trade count
-    uint32_t curr_trade_count = std::stoul(fields[7]);
-    assert(curr_trade_count >= prev_trade_count && "Trade count should never decrease");
-    snapshot.trade_count = curr_trade_count - prev_trade_count;
-    prev_trade_count = curr_trade_count;
+      // Calculate incremental trade count
+      uint32_t curr_trade_count = std::stoul(fields[7]);
+      assert(curr_trade_count >= prev_trade_count && "Trade count should never decrease");
+      snapshot.trade_count = curr_trade_count - prev_trade_count;
+      prev_trade_count = curr_trade_count;
 
-    snapshot.high = parse_price_to_fen(fields[13]);
-    snapshot.low = parse_price_to_fen(fields[14]);
-    snapshot.open = parse_price_to_fen(fields[15]);
-    snapshot.prev_close = parse_price_to_fen(fields[16]);
+      snapshot.high = parse_price_to_fen(fields[13]);
+      snapshot.low = parse_price_to_fen(fields[14]);
+      snapshot.open = parse_price_to_fen(fields[15]);
+      snapshot.prev_close = parse_price_to_fen(fields[16]);
 
-    // Parse ask prices (申卖价1-10: fields 17-26)
-    for (int i = 0; i < 10; i++) {
-      snapshot.ask_prices[i] = parse_price_to_fen(fields[17 + i]);
+      // Parse ask prices (申卖价1-10: fields 17-26)
+      for (int i = 0; i < 10; i++) {
+        snapshot.ask_prices[i] = parse_price_to_fen(fields[17 + i]);
+      }
+
+      // Parse ask volumes (申卖量1-10: fields 27-36)
+      for (int i = 0; i < 10; i++) {
+        snapshot.ask_volumes[i] = parse_volume_to_100shares(fields[27 + i]);
+      }
+
+      // Parse bid prices (申买价1-10: fields 37-46)
+      for (int i = 0; i < 10; i++) {
+        snapshot.bid_prices[i] = parse_price_to_fen(fields[37 + i]);
+      }
+
+      // Parse bid volumes (申买量1-10: fields 47-56)
+      for (int i = 0; i < 10; i++) {
+        snapshot.bid_volumes[i] = parse_volume_to_100shares(fields[47 + i]);
+      }
+
+      snapshot.weighted_avg_ask_price = parse_vwap_price(fields[57]);
+      snapshot.weighted_avg_bid_price = parse_vwap_price(fields[58]);
+      snapshot.total_ask_volume = parse_volume_to_100shares(fields[59]);
+      snapshot.total_bid_volume = parse_volume_to_100shares(fields[60]);
+
+      snapshots.push_back(snapshot);
+    } catch (const std::exception& e) {
+      Logger::log_parsing_error("Error parsing snapshot line in " + filepath + ": " + e.what());
+      continue;
     }
-
-    // Parse ask volumes (申卖量1-10: fields 27-36)
-    for (int i = 0; i < 10; i++) {
-      snapshot.ask_volumes[i] = parse_volume_to_100shares(fields[27 + i]);
-    }
-
-    // Parse bid prices (申买价1-10: fields 37-46)
-    for (int i = 0; i < 10; i++) {
-      snapshot.bid_prices[i] = parse_price_to_fen(fields[37 + i]);
-    }
-
-    // Parse bid volumes (申买量1-10: fields 47-56)
-    for (int i = 0; i < 10; i++) {
-      snapshot.bid_volumes[i] = parse_volume_to_100shares(fields[47 + i]);
-    }
-
-    snapshot.weighted_avg_ask_price = parse_vwap_price(fields[57]);
-    snapshot.weighted_avg_bid_price = parse_vwap_price(fields[58]);
-    snapshot.total_ask_volume = parse_volume_to_100shares(fields[59]);
-    snapshot.total_bid_volume = parse_volume_to_100shares(fields[60]);
-
-    snapshots.push_back(snapshot);
   }
 
   return true;
@@ -194,7 +201,7 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<
   // Open file with GBK locale
   auto file = open_gbk_file(filepath);
   if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to open order CSV: " << filepath << std::endl;
+    Logger::log_parsing_error("Failed to open order CSV: " + filepath);
     return false;
   }
 
@@ -202,8 +209,8 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<
   
   // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to read order CSV header: " << filepath << std::endl;
-    return false;
+    Logger::log_parsing_error("Failed to read order CSV header: " + filepath);
+    return true;
   }
 
   while (std::getline(file, line)) {
@@ -212,44 +219,49 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<
       continue;
     }
 
-    CSVOrder order = {};
-    order.stock_code = fields[0];
-    order.exchange_code = fields[1];
-    order.date = std::stoul(fields[2]);
-    order.time = std::stoul(fields[3]);
-    order.order_id = std::stoull(fields[4]);
-    order.exchange_order_id = std::stoull(fields[5]);
+    try {
+      CSVOrder order = {};
+      order.stock_code = fields[0];
+      order.exchange_code = fields[1];
+      order.date = std::stoul(fields[2]);
+      order.time = std::stoul(fields[3]);
+      order.order_id = std::stoull(fields[4]);
+      order.exchange_order_id = std::stoull(fields[5]);
 
-    bool is_szse = is_szse_market(order.stock_code);
+      bool is_szse = is_szse_market(order.stock_code);
 
-    if (is_szse) {
-      // SZSE: field[6] = 委托类型 (always '0', not used)
-      //       field[7] = 委托代码 (B/S for buy/sell)
-      order.order_type = '0'; // Always '0' for SZSE
-      if (!fields[7].empty()) {
-        order.order_side = fields[7][0];
+      if (is_szse) {
+        // SZSE: field[6] = 委托类型 (always '0', not used)
+        //       field[7] = 委托代码 (B/S for buy/sell)
+        order.order_type = '0'; // Always '0' for SZSE
+        if (!fields[7].empty()) {
+          order.order_side = fields[7][0];
+        } else {
+          order.order_side = ' ';
+        }
       } else {
-        order.order_side = ' ';
+        // SSE: field[6] = 委托类型 (A:add, D:delete)
+        //      field[7] = 委托代码 (B/S for buy/sell)
+        if (!fields[6].empty()) {
+          order.order_type = fields[6][0];
+        } else {
+          order.order_type = 'A'; // Default to add for SSE
+        }
+        if (!fields[7].empty()) {
+          order.order_side = fields[7][0];
+        } else {
+          order.order_side = ' ';
+        }
       }
-    } else {
-      // SSE: field[6] = 委托类型 (A:add, D:delete)
-      //      field[7] = 委托代码 (B/S for buy/sell)
-      if (!fields[6].empty()) {
-        order.order_type = fields[6][0];
-      } else {
-        order.order_type = 'A'; // Default to add for SSE
-      }
-      if (!fields[7].empty()) {
-        order.order_side = fields[7][0];
-      } else {
-        order.order_side = ' ';
-      }
+
+      order.price = parse_price_to_fen(fields[8]);
+      order.volume = parse_volume_to_100shares(fields[9]);
+
+      orders.push_back(order);
+    } catch (const std::exception& e) {
+      Logger::log_parsing_error("Error parsing order line in " + filepath + ": " + e.what());
+      continue;
     }
-
-    order.price = parse_price_to_fen(fields[8]);
-    order.volume = parse_volume_to_100shares(fields[9]);
-
-    orders.push_back(order);
   }
 
   return true;
@@ -259,7 +271,7 @@ bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, std::vector<
   // Open file with GBK locale
   auto file = open_gbk_file(filepath);
   if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to open trade CSV: " << filepath << std::endl;
+    Logger::log_parsing_error("Failed to open trade CSV: " + filepath);
     return false;
   }
 
@@ -267,8 +279,8 @@ bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, std::vector<
   
   // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to read trade CSV header: " << filepath << std::endl;
-    return false;
+    Logger::log_parsing_error("Failed to read trade CSV header: " + filepath);
+    return true;
   }
 
   while (std::getline(file, line)) {
@@ -277,51 +289,56 @@ bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, std::vector<
       continue;
     }
 
-    CSVTrade trade = {};
-    trade.stock_code = fields[0];
-    trade.exchange_code = fields[1];
-    trade.date = std::stoul(fields[2]);
-    trade.time = std::stoul(fields[3]);
-    trade.trade_id = std::stoull(fields[4]);
+    try {
+      CSVTrade trade = {};
+      trade.stock_code = fields[0];
+      trade.exchange_code = fields[1];
+      trade.date = std::stoul(fields[2]);
+      trade.time = std::stoul(fields[3]);
+      trade.trade_id = std::stoull(fields[4]);
 
-    bool is_szse = is_szse_market(trade.stock_code);
+      bool is_szse = is_szse_market(trade.stock_code);
 
-    if (is_szse) {
-      // SZSE: field[5] = 成交代码 (0:成交, C:撤单)
-      //       field[6] = 委托代码 (not used, always empty)
-      //       field[7] = BS标志 (B:buy, S:sell, empty:撤单)
-      if (!fields[5].empty()) {
-        trade.trade_code = fields[5][0];
+      if (is_szse) {
+        // SZSE: field[5] = 成交代码 (0:成交, C:撤单)
+        //       field[6] = 委托代码 (not used, always empty)
+        //       field[7] = BS标志 (B:buy, S:sell, empty:撤单)
+        if (!fields[5].empty()) {
+          trade.trade_code = fields[5][0];
+        } else {
+          trade.trade_code = '0'; // Default to trade
+        }
+        trade.dummy_code = ' '; // Not used for SZSE
+
+        if (!fields[7].empty()) {
+          trade.bs_flag = fields[7][0];
+        } else {
+          trade.bs_flag = ' '; // Empty for cancel
+        }
       } else {
-        trade.trade_code = '0'; // Default to trade
-      }
-      trade.dummy_code = ' '; // Not used for SZSE
+        // SSE: field[5] = 成交代码 (not used, always empty)
+        //      field[6] = 委托代码 (not used, always empty)
+        //      field[7] = BS标志 (B:buy, S:sell)
+        trade.trade_code = '0'; // SSE doesn't use trade_code
+        trade.dummy_code = ' '; // Not used for SSE
 
-      if (!fields[7].empty()) {
-        trade.bs_flag = fields[7][0];
-      } else {
-        trade.bs_flag = ' '; // Empty for cancel
+        if (!fields[7].empty()) {
+          trade.bs_flag = fields[7][0];
+        } else {
+          trade.bs_flag = ' ';
+        }
       }
-    } else {
-      // SSE: field[5] = 成交代码 (not used, always empty)
-      //      field[6] = 委托代码 (not used, always empty)
-      //      field[7] = BS标志 (B:buy, S:sell)
-      trade.trade_code = '0'; // SSE doesn't use trade_code
-      trade.dummy_code = ' '; // Not used for SSE
 
-      if (!fields[7].empty()) {
-        trade.bs_flag = fields[7][0];
-      } else {
-        trade.bs_flag = ' ';
-      }
+      trade.price = parse_price_to_fen(fields[8]);
+      trade.volume = parse_volume_to_100shares(fields[9]);
+      trade.ask_order_id = std::stoull(fields[10]);
+      trade.bid_order_id = std::stoull(fields[11]);
+
+      trades.push_back(trade);
+    } catch (const std::exception& e) {
+      Logger::log_parsing_error("Error parsing trade line in " + filepath + ": " + e.what());
+      continue;
     }
-
-    trade.price = parse_price_to_fen(fields[8]);
-    trade.volume = parse_volume_to_100shares(fields[9]);
-    trade.ask_order_id = std::stoull(fields[10]);
-    trade.bid_order_id = std::stoull(fields[11]);
-
-    trades.push_back(trade);
   }
 
   return true;
@@ -345,15 +362,17 @@ inline uint8_t BinaryEncoder_L2::time_to_millisecond_10ms(uint32_t time_ms) {
 }
 
 inline bool BinaryEncoder_L2::is_szse_market(const std::string &stock_code) {
-  // Optimized: check last 3 characters directly for better performance
+  // Optimized: check last 3 characters directly for better performance (case-insensitive)
   if (stock_code.size() >= 3) {
-    const std::string suffix = stock_code.substr(stock_code.size() - 3);
+    std::string suffix = stock_code.substr(stock_code.size() - 3);
+    // Convert to uppercase for case-insensitive comparison
+    std::transform(suffix.begin(), suffix.end(), suffix.begin(), ::toupper);
     if (suffix == ".SZ")
       return true;
     if (suffix == ".SH")
       return false;
   }
-  assert(false && "Stock code must contain either .SZ or .SH");
+  assert(false && "Stock code must contain either .SZ/.sz or .SH/.sh");
   return false; // Unreachable
 }
 
@@ -469,8 +488,8 @@ Order BinaryEncoder_L2::csv_to_trade(const CSVTrade &csv_trade) {
 bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot>& snapshots, 
                                         const std::string& filepath, bool use_delta) {
   if (snapshots.empty()) {
-    std::cerr << "L2 Encoder: No snapshots to encode: " << filepath << std::endl;
-    return false;
+    Logger::log_parsing_error("No snapshots to encode: " + filepath);
+    return true;
   }
   
   // Create local copies for delta encoding (based on schema use_delta flags)
@@ -585,7 +604,7 @@ bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot>& snapshots,
 bool BinaryEncoder_L2::encode_orders(const std::vector<Order>& orders,
                                     const std::string& filepath, bool use_delta) {
   if (orders.empty()) {
-    std::cerr << "L2 Encoder: No orders to encode: " << filepath << std::endl;
+    Logger::log_parsing_error("No orders to encode: " + filepath);
     return false;
   }
   
@@ -768,7 +787,7 @@ size_t BinaryEncoder_L2::calculate_compression_bound(size_t data_size) {
 bool BinaryEncoder_L2::compress_and_write_data(const std::string& filepath, const void* data, size_t data_size) {
   std::ofstream file(filepath, std::ios::binary);
   if (!file.is_open()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to open file for compression: " << filepath << std::endl;
+    Logger::log_parsing_error("Failed to open file for compression: " + filepath);
     return false;
   }
 
@@ -784,7 +803,7 @@ bool BinaryEncoder_L2::compress_and_write_data(const std::string& filepath, cons
   );
 
   if (ZSTD_isError(compressed_size)) [[unlikely]] {
-    std::cerr << "L2 Encoder: Compression failed: " << ZSTD_getErrorName(compressed_size) << std::endl;
+    Logger::log_parsing_error("Compression failed: " + std::string(ZSTD_getErrorName(compressed_size)));
     return false;
   }
 
@@ -793,7 +812,7 @@ bool BinaryEncoder_L2::compress_and_write_data(const std::string& filepath, cons
   file.write(reinterpret_cast<const char*>(&compressed_size), sizeof(compressed_size));
   
   if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to write compression header: " << filepath << std::endl;
+    Logger::log_parsing_error("Failed to write compression header: " + filepath);
     return false;
   }
 
@@ -801,7 +820,7 @@ bool BinaryEncoder_L2::compress_and_write_data(const std::string& filepath, cons
   file.write(compressed_buffer.get(), compressed_size);
   
   if (file.fail()) [[unlikely]] {
-    std::cerr << "L2 Encoder: Failed to write compressed data: " << filepath << std::endl;
+    Logger::log_parsing_error("Failed to write compressed data: " + filepath);
     return false;
   }
 

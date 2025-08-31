@@ -12,31 +12,31 @@ namespace L2 {
 
 // Constructor with capacity hints
 BinaryDecoder_L2::BinaryDecoder_L2(size_t estimated_snapshots, size_t estimated_orders) {
-    // Pre-reserve space for snapshot vectors
-    temp_hours.reserve(estimated_snapshots);
-    temp_minutes.reserve(estimated_snapshots);
-    temp_seconds.reserve(estimated_snapshots);
-    temp_highs.reserve(estimated_snapshots);
-    temp_lows.reserve(estimated_snapshots);
-    temp_closes.reserve(estimated_snapshots);
-    temp_all_bid_vwaps.reserve(estimated_snapshots);
-    temp_all_ask_vwaps.reserve(estimated_snapshots);
-    temp_all_bid_volumes.reserve(estimated_snapshots);
-    temp_all_ask_volumes.reserve(estimated_snapshots);
-    
-    for (size_t i = 0; i < 10; ++i) {
-        temp_bid_prices[i].reserve(estimated_snapshots);
-        temp_ask_prices[i].reserve(estimated_snapshots);
-    }
-    
-    // Pre-reserve space for order vectors
-    temp_order_hours.reserve(estimated_orders);
-    temp_order_minutes.reserve(estimated_orders);
-    temp_order_seconds.reserve(estimated_orders);
-    temp_order_milliseconds.reserve(estimated_orders);
-    temp_order_prices.reserve(estimated_orders);
-    temp_bid_order_ids.reserve(estimated_orders);
-    temp_ask_order_ids.reserve(estimated_orders);
+  // Pre-reserve space for snapshot vectors
+  temp_hours.reserve(estimated_snapshots);
+  temp_minutes.reserve(estimated_snapshots);
+  temp_seconds.reserve(estimated_snapshots);
+  temp_highs.reserve(estimated_snapshots);
+  temp_lows.reserve(estimated_snapshots);
+  temp_closes.reserve(estimated_snapshots);
+  temp_all_bid_vwaps.reserve(estimated_snapshots);
+  temp_all_ask_vwaps.reserve(estimated_snapshots);
+  temp_all_bid_volumes.reserve(estimated_snapshots);
+  temp_all_ask_volumes.reserve(estimated_snapshots);
+
+  for (size_t i = 0; i < 10; ++i) {
+    temp_bid_prices[i].reserve(estimated_snapshots);
+    temp_ask_prices[i].reserve(estimated_snapshots);
+  }
+
+  // Pre-reserve space for order vectors
+  temp_order_hours.reserve(estimated_orders);
+  temp_order_minutes.reserve(estimated_orders);
+  temp_order_seconds.reserve(estimated_orders);
+  temp_order_milliseconds.reserve(estimated_orders);
+  temp_order_prices.reserve(estimated_orders);
+  temp_bid_order_ids.reserve(estimated_orders);
+  temp_ask_order_ids.reserve(estimated_orders);
 }
 
 size_t BinaryDecoder_L2::extract_count_from_filename(const std::string &filepath) {
@@ -55,7 +55,46 @@ size_t BinaryDecoder_L2::extract_count_from_filename(const std::string &filepath
   return 0; // Return 0 if count cannot be extracted
 }
 
+bool BinaryDecoder_L2::is_valid_market_asset(const std::string &asset_code) {
+  if (asset_code.length() < 6)
+    return false;
 
+  std::string code_prefix = asset_code.substr(0, 3);
+
+  // Shanghai Stock Exchange (SSE)
+  if (code_prefix == "600" || code_prefix == "601" || code_prefix == "603" || code_prefix == "605" || // 沪市主板
+      // code_prefix == "900" ||                                                                         // 沪市B股
+      code_prefix == "688" ||                                                                         // 科创板
+      code_prefix == "689") {                                                                         // 科创板存托凭证
+    return true;
+  }
+
+  // Shenzhen Stock Exchange (SZSE)
+  if (code_prefix == "000" || code_prefix == "001" ||                         // 深市主板
+      code_prefix == "002" || code_prefix == "003" || code_prefix == "004" || // 深市中小板
+      //  code_prefix == "200" || code_prefix == "201" ||                         // 深市B股
+      code_prefix == "300" || code_prefix == "301" || code_prefix == "302" || // 创业板
+      code_prefix == "309") {                                                 // 创业板存托凭证
+    return true;
+  }
+
+  // NEEQ/Beijing Stock Exchange
+  if (code_prefix == "400" || code_prefix == "420" || code_prefix == "430") { // 新三板基础
+    return true;
+  }
+
+  // Check for 2-digit prefixes for NEEQ
+  if (asset_code.length() >= 2) {
+    std::string code_prefix_2 = asset_code.substr(0, 2);
+    if (code_prefix_2 == "82" || code_prefix_2 == "83" || // 新三板创新层
+        code_prefix_2 == "87" || code_prefix_2 == "88" || // 北交所精选层
+        code_prefix_2 == "92") {                          // 北交所
+      return true;
+    }
+  }
+
+  return false; // Not a valid market asset (likely an index or other instrument)
+}
 
 std::string BinaryDecoder_L2::time_to_string(uint8_t hour, uint8_t minute, uint8_t second, uint8_t millisecond_10ms) {
   std::ostringstream oss;
@@ -266,43 +305,43 @@ void BinaryDecoder_L2::print_all_orders(const std::vector<Order> &orders) {
 }
 
 // decoder functions
-bool BinaryDecoder_L2::decode_snapshots(const std::string& filepath, std::vector<Snapshot>& snapshots, bool use_delta) {
+bool BinaryDecoder_L2::decode_snapshots(const std::string &filepath, std::vector<Snapshot> &snapshots, bool use_delta) {
   // First extract count from filename to estimate required size
   size_t estimated_count = extract_count_from_filename(filepath);
   if (estimated_count == 0) {
     std::cerr << "L2 Decoder: Could not extract count from filename: " << filepath << std::endl;
     return false;
   }
-  
+
   // Calculate expected decompressed size
-  size_t header_size = sizeof(size_t);  // size_t count
+  size_t header_size = sizeof(size_t); // size_t count
   size_t snapshots_size = estimated_count * sizeof(Snapshot);
   size_t expected_size = header_size + snapshots_size;
-  
+
   // Allocate buffer for decompressed data
   auto data_buffer = std::make_unique<char[]>(expected_size);
-  
+
   // Read and decompress data
   size_t actual_size;
   if (!read_and_decompress_data(filepath, data_buffer.get(), expected_size, actual_size)) {
     return false;
   }
-  
+
   // Extract count from decompressed data
   size_t count;
   std::memcpy(&count, data_buffer.get(), header_size);
-  
+
   // Verify count matches filename
   if (count != estimated_count) {
-    std::cerr << "L2 Decoder: Count mismatch - filename says " << estimated_count 
+    std::cerr << "L2 Decoder: Count mismatch - filename says " << estimated_count
               << " but data says " << count << std::endl;
     return false;
   }
-  
+
   // Extract snapshots from decompressed data
   snapshots.resize(count);
   std::memcpy(snapshots.data(), data_buffer.get() + header_size, snapshots_size);
-  
+
   // Decode deltas (reverse the delta encoding process)
   if (use_delta && count > 1) {
     std::cout << "L2 Decoder: Applying delta decoding to " << count << " snapshots..." << std::endl;
@@ -317,12 +356,12 @@ bool BinaryDecoder_L2::decode_snapshots(const std::string& filepath, std::vector
     temp_all_ask_vwaps.resize(count);
     temp_all_bid_volumes.resize(count);
     temp_all_ask_volumes.resize(count);
-    
+
     for (size_t i = 0; i < 10; ++i) {
       temp_bid_prices[i].resize(count);
       temp_ask_prices[i].resize(count);
     }
-    
+
     // Extract delta-encoded data
     for (size_t i = 0; i < count; ++i) {
       temp_hours[i] = snapshots[i].hour;
@@ -335,13 +374,13 @@ bool BinaryDecoder_L2::decode_snapshots(const std::string& filepath, std::vector
       temp_all_ask_vwaps[i] = snapshots[i].all_ask_vwap;
       temp_all_bid_volumes[i] = snapshots[i].all_bid_volume;
       temp_all_ask_volumes[i] = snapshots[i].all_ask_volume;
-      
+
       for (size_t j = 0; j < 10; ++j) {
         temp_bid_prices[j][i] = snapshots[i].bid_price_ticks[j];
         temp_ask_prices[j][i] = snapshots[i].ask_price_ticks[j];
       }
     }
-    
+
     // Decode deltas where use_delta=true (reverse of encode_deltas)
     DeltaUtils::decode_deltas(temp_hours.data(), count);
     DeltaUtils::decode_deltas(temp_minutes.data(), count);
@@ -353,12 +392,12 @@ bool BinaryDecoder_L2::decode_snapshots(const std::string& filepath, std::vector
     DeltaUtils::decode_deltas(temp_all_ask_vwaps.data(), count);
     DeltaUtils::decode_deltas(temp_all_bid_volumes.data(), count);
     DeltaUtils::decode_deltas(temp_all_ask_volumes.data(), count);
-    
+
     for (size_t j = 0; j < 10; ++j) {
       DeltaUtils::decode_deltas(temp_bid_prices[j].data(), count);
       DeltaUtils::decode_deltas(temp_ask_prices[j].data(), count);
     }
-    
+
     // Copy back decoded data
     for (size_t i = 0; i < count; ++i) {
       snapshots[i].hour = temp_hours[i];
@@ -371,56 +410,56 @@ bool BinaryDecoder_L2::decode_snapshots(const std::string& filepath, std::vector
       snapshots[i].all_ask_vwap = temp_all_ask_vwaps[i];
       snapshots[i].all_bid_volume = temp_all_bid_volumes[i];
       snapshots[i].all_ask_volume = temp_all_ask_volumes[i];
-      
+
       for (size_t j = 0; j < 10; ++j) {
         snapshots[i].bid_price_ticks[j] = temp_bid_prices[j][i];
         snapshots[i].ask_price_ticks[j] = temp_ask_prices[j][i];
       }
     }
   }
-  
-  std::cout << "L2 Decoder: Successfully decoded " << snapshots.size() <<" snapshots from " << filepath << std::endl;
-  
+
+  std::cout << "L2 Decoder: Successfully decoded " << snapshots.size() << " snapshots from " << filepath << std::endl;
+
   return true;
 }
 
-bool BinaryDecoder_L2::decode_orders(const std::string& filepath, std::vector<Order>& orders, bool use_delta) {
+bool BinaryDecoder_L2::decode_orders(const std::string &filepath, std::vector<Order> &orders, bool use_delta) {
   // First extract count from filename to estimate required size
   size_t estimated_count = extract_count_from_filename(filepath);
   if (estimated_count == 0) {
     std::cerr << "L2 Decoder: Could not extract count from filename: " << filepath << std::endl;
     return false;
   }
-  
+
   // Calculate expected decompressed size
-  size_t header_size = sizeof(size_t);  // size_t count
+  size_t header_size = sizeof(size_t); // size_t count
   size_t orders_size = estimated_count * sizeof(Order);
   size_t expected_size = header_size + orders_size;
-  
+
   // Allocate buffer for decompressed data
   auto data_buffer = std::make_unique<char[]>(expected_size);
-  
+
   // Read and decompress data
   size_t actual_size;
   if (!read_and_decompress_data(filepath, data_buffer.get(), expected_size, actual_size)) {
     return false;
   }
-  
+
   // Extract count from decompressed data
   size_t count;
   std::memcpy(&count, data_buffer.get(), header_size);
-  
+
   // Verify count matches filename
   if (count != estimated_count) {
-    std::cerr << "L2 Decoder: Count mismatch - filename says " << estimated_count 
+    std::cerr << "L2 Decoder: Count mismatch - filename says " << estimated_count
               << " but data says " << count << std::endl;
     return false;
   }
-  
+
   // Extract orders from decompressed data
   orders.resize(count);
   std::memcpy(orders.data(), data_buffer.get() + header_size, orders_size);
-  
+
   // Decode deltas (reverse the delta encoding process)
   if (use_delta && count > 1) {
     std::cout << "L2 Decoder: Applying delta decoding to " << count << " orders..." << std::endl;
@@ -432,7 +471,7 @@ bool BinaryDecoder_L2::decode_orders(const std::string& filepath, std::vector<Or
     temp_order_prices.resize(count);
     temp_bid_order_ids.resize(count);
     temp_ask_order_ids.resize(count);
-    
+
     // Extract delta-encoded data
     for (size_t i = 0; i < count; ++i) {
       temp_order_hours[i] = orders[i].hour;
@@ -443,7 +482,7 @@ bool BinaryDecoder_L2::decode_orders(const std::string& filepath, std::vector<Or
       temp_bid_order_ids[i] = orders[i].bid_order_id;
       temp_ask_order_ids[i] = orders[i].ask_order_id;
     }
-    
+
     // Decode deltas where use_delta=true (reverse of encode_deltas)
     DeltaUtils::decode_deltas(temp_order_hours.data(), count);
     DeltaUtils::decode_deltas(temp_order_minutes.data(), count);
@@ -452,7 +491,7 @@ bool BinaryDecoder_L2::decode_orders(const std::string& filepath, std::vector<Or
     DeltaUtils::decode_deltas(temp_order_prices.data(), count);
     DeltaUtils::decode_deltas(temp_bid_order_ids.data(), count);
     DeltaUtils::decode_deltas(temp_ask_order_ids.data(), count);
-    
+
     // Copy back decoded data
     for (size_t i = 0; i < count; ++i) {
       orders[i].hour = temp_order_hours[i];
@@ -464,14 +503,14 @@ bool BinaryDecoder_L2::decode_orders(const std::string& filepath, std::vector<Or
       orders[i].ask_order_id = temp_ask_order_ids[i];
     }
   }
-  
+
   std::cout << "L2 Decoder: Successfully decoded " << orders.size() << " orders from " << filepath << std::endl;
-  
+
   return true;
 }
 
 // Zstandard decompression helper function (pure standard decompression)
-bool BinaryDecoder_L2::read_and_decompress_data(const std::string& filepath, void* data, size_t expected_size, size_t& actual_size) {
+bool BinaryDecoder_L2::read_and_decompress_data(const std::string &filepath, void *data, size_t expected_size, size_t &actual_size) {
   std::ifstream file(filepath, std::ios::binary);
   if (!file.is_open()) [[unlikely]] {
     std::cerr << "L2 Decoder: Failed to open file for decompression: " << filepath << std::endl;
@@ -480,9 +519,9 @@ bool BinaryDecoder_L2::read_and_decompress_data(const std::string& filepath, voi
 
   // Read header: original size and compressed size
   size_t original_size, compressed_size;
-  file.read(reinterpret_cast<char*>(&original_size), sizeof(original_size));
-  file.read(reinterpret_cast<char*>(&compressed_size), sizeof(compressed_size));
-  
+  file.read(reinterpret_cast<char *>(&original_size), sizeof(original_size));
+  file.read(reinterpret_cast<char *>(&compressed_size), sizeof(compressed_size));
+
   if (file.fail()) [[unlikely]] {
     std::cerr << "L2 Decoder: Failed to read compression header: " << filepath << std::endl;
     return false;
@@ -490,7 +529,7 @@ bool BinaryDecoder_L2::read_and_decompress_data(const std::string& filepath, voi
 
   // Verify expected size matches
   if (original_size != expected_size) [[unlikely]] {
-    std::cerr << "L2 Decoder: Size mismatch - expected " << expected_size 
+    std::cerr << "L2 Decoder: Size mismatch - expected " << expected_size
               << " but header says " << original_size << std::endl;
     return false;
   }
@@ -498,7 +537,7 @@ bool BinaryDecoder_L2::read_and_decompress_data(const std::string& filepath, voi
   // Read compressed data
   auto compressed_buffer = std::make_unique<char[]>(compressed_size);
   file.read(compressed_buffer.get(), compressed_size);
-  
+
   if (file.fail()) [[unlikely]] {
     std::cerr << "L2 Decoder: Failed to read compressed data: " << filepath << std::endl;
     return false;
@@ -506,9 +545,8 @@ bool BinaryDecoder_L2::read_and_decompress_data(const std::string& filepath, voi
 
   // Standard Zstandard decompression
   size_t decompressed_size = ZSTD_decompress(
-    data, expected_size,
-    compressed_buffer.get(), compressed_size
-  );
+      data, expected_size,
+      compressed_buffer.get(), compressed_size);
 
   if (ZSTD_isError(decompressed_size)) [[unlikely]] {
     std::cerr << "L2 Decoder: Decompression failed: " << ZSTD_getErrorName(decompressed_size) << std::endl;
@@ -516,16 +554,16 @@ bool BinaryDecoder_L2::read_and_decompress_data(const std::string& filepath, voi
   }
 
   if (decompressed_size != expected_size) [[unlikely]] {
-    std::cerr << "L2 Decoder: Decompressed size mismatch - expected " << expected_size 
+    std::cerr << "L2 Decoder: Decompressed size mismatch - expected " << expected_size
               << " but got " << decompressed_size << std::endl;
     return false;
   }
 
   actual_size = decompressed_size;
-  
+
   // Print decompression statistics
   double compression_ratio = static_cast<double>(original_size) / static_cast<double>(compressed_size);
-  std::cout << "L2 Decoder: Decompressed " << compressed_size << " bytes to " << original_size 
+  std::cout << "L2 Decoder: Decompressed " << compressed_size << " bytes to " << original_size
             << " bytes (ratio: " << std::fixed << std::setprecision(2) << compression_ratio << "x)" << std::endl;
 
   return true;
