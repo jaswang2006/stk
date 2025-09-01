@@ -2,9 +2,34 @@
 
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <string_view>
 
+// https://zhuanlan.zhihu.com/p/649040063 深交所orderbook重建
+// https://zhuanlan.zhihu.com/p/649400934 上交所orderbook重建
+// https://zhuanlan.zhihu.com/p/662438311 沪市level2数据重建
+// https://zhuanlan.zhihu.com/p/665919675 实时重建沪市level2数据
+// https://zhuanlan.zhihu.com/p/708215930 订单簿成像股价走势预测
+// https://zhuanlan.zhihu.com/p/640661128?utm_psn=1695903862567976960 Weighted Mid Price定价模型的改进
+// https://zhuanlan.zhihu.com/p/660995304 浅谈深层订单簿建模问题之复杂性（上）
+// https://zhuanlan.zhihu.com/p/672245189 浅谈深层订单簿建模之复杂性（下）
+// https://zhuanlan.zhihu.com/p/678879213 订单簿的一些性质
+// https://zhuanlan.zhihu.com/p/680914693 低价股的订单簿单队列建模
+// https://zhuanlan.zhihu.com/p/518906022 Santa Fe Model and Hawkes Process
+
 namespace L2 {
+
+// Processing configuration constants
+inline const uint32_t decompression_threads = 8;
+inline const uint32_t max_temp_folders = 16; // disk backpressure limit
+// inline const char *input_base = "/media/chuyin/48ac8067-d3b7-4332-b652-45e367a1ebcc/A_stock/L2";
+// inline const char *output_base = "/home/chuyin/work/L2_binary";
+// inline const char *temp_base = "../../../output/tmp";
+inline const char *input_base = "/mnt/dev/sde/A_stock/L2/";
+inline const char *output_base = "../../../output/tmp/L2_binary";
+inline const char *temp_base = "../../../output/tmp";
+// Debug option to skip decompression and encode directly from input_base
+inline bool skip_decompression = false;
 
 // modern compression algo maynot benefit from delta encoding
 inline constexpr bool ENABLE_DELTA_ENCODING = false; // use Zstd for high compress ratio and fast decompress speed
@@ -21,6 +46,69 @@ inline constexpr bool ENABLE_DELTA_ENCODING = false; // use Zstd for high compre
 // | lz4 1.10.0          | 2.101 | 675 MB/s    | 3850 MB/s  |
 // | snappy 1.2.1        | 2.089 | 520 MB/s    | 1500 MB/s  |
 // | lzf 3.6 -1          | 2.077 | 410 MB/s    | 820 MB/s   |
+
+// Market asset validation function
+inline bool is_valid_market_asset(const std::string &asset_code) {
+  if (asset_code.length() < 6)
+    return false;
+
+  // Check for specific ranges first: 600000-600020 and 300000-300020
+  if (asset_code.substr(0, 3) == "600") {
+    try {
+      int code_num = std::stoi(asset_code.substr(3));
+      if (code_num >= 0 && code_num <= 20) {
+        return true;
+      }
+    } catch (...) {
+      // Fall through to original logic
+    }
+  } else if (asset_code.substr(0, 3) == "300") {
+    try {
+      int code_num = std::stoi(asset_code.substr(3));
+      if (code_num >= 0 && code_num <= 20) {
+        return true;
+      }
+    } catch (...) {
+      // Fall through to original logic
+    }
+  }
+
+  std::string code_prefix = asset_code.substr(0, 3);
+
+  // Shanghai Stock Exchange (SSE)
+  if (code_prefix == "600" || code_prefix == "601" || code_prefix == "603" || code_prefix == "605" || // 沪市主板
+      // code_prefix == "900" ||                                                                         // 沪市B股
+      code_prefix == "688" ||                                                                         // 科创板
+      code_prefix == "689") {                                                                         // 科创板存托凭证
+    return false;
+  }
+
+  // Shenzhen Stock Exchange (SZSE)
+  if (code_prefix == "000" || code_prefix == "001" ||                         // 深市主板
+      code_prefix == "002" || code_prefix == "003" || code_prefix == "004" || // 深市中小板
+      // code_prefix == "200" || code_prefix == "201" ||                         // 深市B股
+      code_prefix == "300" || code_prefix == "301" || code_prefix == "302" || // 创业板
+      code_prefix == "309") {                                                 // 创业板存托凭证
+    return false;
+  }
+
+  // NEEQ/Beijing Stock Exchange
+  if (code_prefix == "400" || code_prefix == "420" || code_prefix == "430") { // 新三板基础
+    return false;
+  }
+
+  // Check for 2-digit prefixes for NEEQ
+  if (asset_code.length() >= 2) {
+    std::string code_prefix_2 = asset_code.substr(0, 2);
+    if (code_prefix_2 == "82" || code_prefix_2 == "83" || // 新三板创新层
+        code_prefix_2 == "87" || code_prefix_2 == "88" || // 北交所精选层
+        code_prefix_2 == "92") {                          // 北交所
+      return false;
+    }
+  }
+
+  return false; // Not a valid market asset (likely an index or other instrument)
+}
 
 enum class DataType { INT,
                       FLOAT,

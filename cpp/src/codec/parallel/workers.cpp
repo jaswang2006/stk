@@ -131,9 +131,8 @@
  */
 
 #include "codec/parallel/workers.hpp"
-#include "codec/binary_decoder_L2.hpp"
 #include "codec/binary_encoder_L2.hpp"
-#include "codec/parallel/processing_config.hpp"
+#include "codec/L2_DataType.hpp"
 #include "codec/parallel/processing_types.hpp"
 #include "misc/affinity.hpp"
 #include "misc/misc.hpp"
@@ -284,7 +283,7 @@ void decompression_worker(unsigned int worker_id) {
 
     // Create unique temp_root for this archive (per-day folder)
     std::string archive_name = std::filesystem::path(archive_path).stem().string();
-    std::string temp_root = std::string(g_config.temp_base) + "/" + archive_name + "_" +
+    std::string temp_root = std::string(L2::temp_base) + "/" + archive_name + "_" +
                             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
 
     // Construct folder_token early for RAII (will cleanup on any failure)
@@ -316,7 +315,7 @@ void decompression_worker(unsigned int worker_id) {
       for (const auto &asset_entry : std::filesystem::directory_iterator(assets_folder)) {
         if (asset_entry.is_directory()) {
           std::string asset_code = asset_entry.path().filename().string();
-          if (L2::BinaryDecoder_L2::is_valid_market_asset(asset_code)) {
+          if (L2::is_valid_market_asset(asset_code)) {
             asset_list.emplace_back(asset_entry.path().string(), asset_code);
           }
         }
@@ -418,7 +417,7 @@ void encoding_worker(unsigned int core_id) {
 
     // Process the asset
     double compression_ratio = 1.0;
-    if (process_stock_data(asset_dir, asset_code, date_str, g_config.output_base, compression_ratio)) {
+    if (process_stock_data(asset_dir, asset_code, date_str, L2::output_base, compression_ratio)) {
       // Update progress: processed++
       std::lock_guard<std::mutex> lock(active_folder_mutex);
       if (active_folder) {
@@ -434,7 +433,7 @@ void encoding_worker(unsigned int core_id) {
 }
 
 void init_decompression_logging() {
-  Logger::init(g_config.temp_base);
+  Logger::init(L2::temp_base);
 }
 
 void close_decompression_logging() {

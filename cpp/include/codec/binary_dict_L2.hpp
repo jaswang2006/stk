@@ -1,10 +1,7 @@
 #pragma once
 
-#include "binary_encoder_L2.hpp"
-#include "binary_decoder_L2.hpp"
 #include <string>
 #include <vector>
-#include <filesystem>
 
 // Zstandard dictionary training and compression
 #include "../../package/zstd-1.5.7/zstd.h"

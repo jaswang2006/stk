@@ -60,9 +60,9 @@ def main():
     # Remove old files
     remove_old_files()
 
-    # app_name = "main"
+    app_name = "main"
     # app_name = "L1_database"
-    app_name = "L2_database"
+    # app_name = "L2_database"
     app = f"./py/{app_name}.py"
 
     print(f"Starting {app_name}...")

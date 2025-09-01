@@ -94,8 +94,7 @@ public:
   // Helper function to extract count from filename (used by dictionary compression)
   static size_t extract_count_from_filename(const std::string &filepath);
 
-  // Asset market validation - check if asset belongs to valid stock markets (not index)
-  static bool is_valid_market_asset(const std::string &asset_code);
+
 
 private:
   // Reusable vector tables for delta decoding (snapshots)

@@ -55,46 +55,7 @@ size_t BinaryDecoder_L2::extract_count_from_filename(const std::string &filepath
   return 0; // Return 0 if count cannot be extracted
 }
 
-bool BinaryDecoder_L2::is_valid_market_asset(const std::string &asset_code) {
-  if (asset_code.length() < 6)
-    return false;
 
-  std::string code_prefix = asset_code.substr(0, 3);
-
-  // Shanghai Stock Exchange (SSE)
-  if (code_prefix == "600" || code_prefix == "601" || code_prefix == "603" || code_prefix == "605" || // 沪市主板
-      // code_prefix == "900" ||                                                                         // 沪市B股
-      code_prefix == "688" ||                                                                         // 科创板
-      code_prefix == "689") {                                                                         // 科创板存托凭证
-    return true;
-  }
-
-  // Shenzhen Stock Exchange (SZSE)
-  if (code_prefix == "000" || code_prefix == "001" ||                         // 深市主板
-      code_prefix == "002" || code_prefix == "003" || code_prefix == "004" || // 深市中小板
-      //  code_prefix == "200" || code_prefix == "201" ||                         // 深市B股
-      code_prefix == "300" || code_prefix == "301" || code_prefix == "302" || // 创业板
-      code_prefix == "309") {                                                 // 创业板存托凭证
-    return true;
-  }
-
-  // NEEQ/Beijing Stock Exchange
-  if (code_prefix == "400" || code_prefix == "420" || code_prefix == "430") { // 新三板基础
-    return true;
-  }
-
-  // Check for 2-digit prefixes for NEEQ
-  if (asset_code.length() >= 2) {
-    std::string code_prefix_2 = asset_code.substr(0, 2);
-    if (code_prefix_2 == "82" || code_prefix_2 == "83" || // 新三板创新层
-        code_prefix_2 == "87" || code_prefix_2 == "88" || // 北交所精选层
-        code_prefix_2 == "92") {                          // 北交所
-      return true;
-    }
-  }
-
-  return false; // Not a valid market asset (likely an index or other instrument)
-}
 
 std::string BinaryDecoder_L2::time_to_string(uint8_t hour, uint8_t minute, uint8_t second, uint8_t millisecond_10ms) {
   std::ostringstream oss;
