@@ -52,7 +52,7 @@ AppConfig ParseAppConfig(const std::string &config_file) {
   file >> j;
 
   AppConfig config;
-  config.snapshot_dir = j["snapshot_dir"];
+  config.dir = j["dir"];
 
   // lower bound month for data availability
   std::string start_month_str = j.value("start_month", "");

@@ -11,14 +11,14 @@
         "python.analysis.extraPaths": [
             "./py",
             "./py/app",
-            "./py/app/Exchange_API"
+            "./py/app/DataProvider_API"
         ],
         "cursorpyright.analysis.autoImportCompletions": false,
         "cursorpyright.analysis.typeCheckingMode": "basic",
         "cursorpyright.analysis.extraPaths": [
             "./py",
             "./py/app",
-            "./py/app/Exchange_API"
+            "./py/app/DataProvider_API"
         ],
         "clangd.detectExtensionConflicts": false,
         "clangd.path": "/opt/clangd_20.1.8/bin/clangd",

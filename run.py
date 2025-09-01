@@ -68,7 +68,8 @@ def main():
     print(f"Starting {app_name}...")
 
     # Use the virtual environment Python interpreter
-    python = "/usr/bin/python"
+    python = "/home/chuyin/work/py3_12_3/bin/python"
+    # python = "/usr/bin/python"
 
     try:
         if cfg_stk.profile:

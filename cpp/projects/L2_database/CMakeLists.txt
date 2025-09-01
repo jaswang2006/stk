@@ -37,7 +37,7 @@ include_directories(../../package/zstd-1.5.7)
 set(ZSTD_LIB_PATH ${CMAKE_CURRENT_SOURCE_DIR}/../../package/zstd-1.5.7/libzstd.a)
 
 # Source files for L2_database
-set(L2_DATABASE_SOURCES
+set(SOURCES
     ../../src/L2_database.cpp
     ../../src/codec/binary_encoder_L2.cpp
     ../../src/codec/binary_decoder_L2.cpp
@@ -46,7 +46,7 @@ set(L2_DATABASE_SOURCES
     ../../src/misc/logging.cpp
 )
 
-set(L2_DATABASE_HEADERS
+set(HEADERS
     ../../include/codec/L2_DataType.hpp
     ../../include/codec/binary_encoder_L2.hpp
     ../../include/codec/binary_decoder_L2.hpp
@@ -56,7 +56,7 @@ set(L2_DATABASE_HEADERS
 )
 
 # Create L2_database executable
-add_executable(app_L2_database ${L2_DATABASE_SOURCES} ${L2_DATABASE_HEADERS})
+add_executable(app_L2_database ${SOURCES} ${HEADERS})
 
 # Target include directories
 target_include_directories(app_L2_database PRIVATE 
@@ -66,12 +66,6 @@ target_include_directories(app_L2_database PRIVATE
 
 # Link Zstandard library
 target_link_libraries(app_L2_database PRIVATE ${ZSTD_LIB_PATH})
-
-# Windows-specific settings
-if(WIN32)
-    target_link_libraries(app_L2_database PRIVATE ws2_32)
-    set_target_properties(app_L2_database PROPERTIES WIN32_EXECUTABLE FALSE)
-endif()
 
 # Installation
 install(TARGETS app_L2_database RUNTIME DESTINATION bin)
@@ -89,4 +83,4 @@ message(STATUS "Build type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "C++ compiler: ${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "C++ standard: ${CMAKE_CXX_STANDARD}")
 message(STATUS "Output directory: ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
-message(STATUS "app_L2_database sources: ${L2_DATABASE_SOURCES}")
+message(STATUS "app_L2_database sources: ${SOURCES}")

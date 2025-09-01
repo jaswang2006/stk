@@ -46,16 +46,11 @@ void ProcessAsset(const std::string &asset_code,
 
 int main() {
   try {
-#ifdef _WIN32
-    // Set console output code page to UTF-8
-    SetConsoleOutputCP(CP_UTF8);
-    // Set console input code page to UTF-8 as well
-    SetConsoleCP(CP_UTF8);
-#endif
 
     // Configuration file paths
     std::string config_file = "../../../config/config.json";
     std::string stock_info_file = "../../../config/daily_holding/stock_info_test.json";
+    std::string input_dir = "../../../output/L2_binary";
     std::string output_dir = "../../../output";
 
     std::cout << "=== Asset Parser ====================================================" << "\n";
@@ -78,7 +73,7 @@ int main() {
     }
 
     std::cout << "Configuration loaded successfully:" << "\n";
-    std::cout << "  Snapshot directory: " << app_config.snapshot_dir << "\n";
+    std::cout << "  Snapshot directory: " << input_dir << "\n";
     std::cout << "  Data available through: " << JsonConfig::FormatYearMonth(app_config.end_month) << "\n";
     std::cout << "  Total assets found: " << stock_info_map.size() << "\n";
     std::cout << "  Output directory: " << output_dir << "\n\n";
@@ -135,7 +130,7 @@ int main() {
               ProcessAsset,
               asset_code,
               stock_info,
-              app_config.snapshot_dir,
+              input_dir,
               output_dir,
               core_id));
 

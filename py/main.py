@@ -1,39 +1,21 @@
 
 import os
-import sys
 import subprocess
-from typing import List, Dict
+import sys
+from typing import Dict, List
 
 # the path include need to be earlier than relative library
 TOP = "../"
 sys.path.append(os.path.join(os.path.dirname(__file__), "."))
 sys.path.append(os.path.join(os.path.dirname(__file__), TOP))
 sys.path.append(os.path.join(os.path.dirname(__file__), "app"))
-sys.path.append(os.path.join(os.path.dirname(__file__), "app/Exchange_API/"))
-
-
-def run_cpp_build():
-    '''Trigger the C++ build.sh file'''
-    cpp_dir = os.path.join(os.path.dirname(__file__), TOP, "cpp/projects/main")
-    
-    print("Triggering C++ build script...")
-    result = subprocess.run(
-        "./build.sh", 
-        cwd=cpp_dir, 
-        shell=True
-    )
-    
-    if result.returncode != 0:
-        print(f"Build script exited with code: {result.returncode}")
-        return False
-    return True
 
 
 def run_bt():
-    from Util.UtilStk import prepare_all_files, mkdir
-    from config.cfg_stk import cfg_stk
+    # from Util.UtilStk import prepare_all_files, mkdir
+    # from config.cfg_stk import cfg_stk
     # wt_asset = prepare_all_files()
-
+    #
     # wt_assets: List[str] = []
     # ipo_dates: List[str] = []
     # for exg in cfg_stk.exchg:
@@ -53,7 +35,19 @@ def run_bt():
     #     code_info[code] = {'idx':idx}
     # print(wt_asset)
 
-    run_cpp_build()
+    cpp_dir = os.path.join(os.path.dirname(__file__), TOP, "cpp/projects/main")
+
+    print("Triggering C++ build script...")
+    result = subprocess.run(
+        "./build.sh",
+        cwd=cpp_dir,
+        shell=True
+    )
+
+    if result.returncode != 0:
+        print(f"Build script exited with code: {result.returncode}")
+        return False
+    return True
 
 
 if __name__ == '__main__':
