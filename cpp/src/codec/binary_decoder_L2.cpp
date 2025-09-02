@@ -16,8 +16,8 @@ BinaryDecoder_L2::BinaryDecoder_L2(size_t estimated_snapshots, size_t estimated_
   temp_hours.reserve(estimated_snapshots);
   temp_minutes.reserve(estimated_snapshots);
   temp_seconds.reserve(estimated_snapshots);
-  temp_highs.reserve(estimated_snapshots);
-  temp_lows.reserve(estimated_snapshots);
+  // temp_highs.reserve(estimated_snapshots);
+  // temp_lows.reserve(estimated_snapshots);
   temp_closes.reserve(estimated_snapshots);
   temp_all_bid_vwaps.reserve(estimated_snapshots);
   temp_all_ask_vwaps.reserve(estimated_snapshots);

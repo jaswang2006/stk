@@ -100,7 +100,8 @@ public:
 private:
   // Reusable vector tables for delta decoding (snapshots)
   mutable std::vector<uint8_t> temp_hours, temp_minutes, temp_seconds;
-  mutable std::vector<uint16_t> temp_highs, temp_lows, temp_closes;
+  // mutable std::vector<uint16_t> temp_highs, temp_lows;
+  mutable std::vector<uint16_t> temp_closes;
   mutable std::vector<uint16_t> temp_bid_prices[10], temp_ask_prices[10];
   mutable std::vector<uint16_t> temp_all_bid_vwaps, temp_all_ask_vwaps;
   mutable std::vector<uint32_t> temp_all_bid_volumes, temp_all_ask_volumes;

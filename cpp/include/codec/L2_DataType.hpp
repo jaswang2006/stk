@@ -21,8 +21,8 @@
 namespace L2 {
 
 // Processing configuration constants
-inline const uint32_t decompression_threads = 8;
-inline const uint32_t max_temp_folders = 16; // disk backpressure limit
+inline constexpr uint32_t decompression_threads = 8;
+inline constexpr uint32_t max_temp_folders = 16; // disk backpressure limit
 // inline const char *input_base = "/media/chuyin/48ac8067-d3b7-4332-b652-45e367a1ebcc/A_stock/L2";
 // inline const char *output_base = "/home/chuyin/work/L2_binary";
 // inline const char *temp_base = "../../../output/tmp";
@@ -30,7 +30,10 @@ inline const char *input_base = "/mnt/dev/sde/A_stock/L2/";
 inline const char *output_base = "../../../output/tmp/L2_binary";
 inline const char *temp_base = "../../../output/tmp";
 // Debug option to skip decompression and encode directly from input_base
-inline bool skip_decompression = false;
+inline constexpr bool skip_decompression = false;
+
+inline constexpr size_t DEFAULT_ENCODER_CAPACITY = 5000;    // 3秒全量快照 4*3600/3=4800
+inline constexpr size_t DEFAULT_ENCODER_MAX_SIZE = 100000; // 逐笔合并(增删改成交)
 
 // modern compression algo maynot benefit from delta encoding
 inline constexpr bool ENABLE_DELTA_ENCODING = false; // use Zstd for high compress ratio and fast decompress speed

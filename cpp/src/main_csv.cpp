@@ -26,13 +26,8 @@
 
 // Configuration constants
 namespace Config {
-constexpr size_t DEFAULT_ENCODER_CAPACITY = 5000;    // 3秒全量快照 4*3600/3=4800
-constexpr size_t DEFAULT_ENCODER_MAX_SIZE = 1000000; // 逐笔合并(增删改成交)
-constexpr const char *MARKET_CSV_NAME = "行情.csv";
-constexpr const char *ORDER_CSV_NAME = "逐笔委托.csv";
-constexpr const char *TRADE_CSV_NAME = "逐笔成交.csv";
-constexpr const char *SNAPSHOTS_PREFIX = "snapshots_";
-constexpr const char *ORDERS_PREFIX = "orders_";
+
+
 constexpr const char *BIN_EXTENSION = ".bin";
 constexpr const char *SEVEN_ZIP_CMD = "7z";
 } // namespace Config
@@ -91,8 +86,8 @@ public:
     return std::system(command.c_str()) == 0;
   }
 
-  // Check if binary files already exist for optimization
-  static std::pair<bool, std::pair<std::string, std::string>> check_existing_binaries(const std::string &temp_asset_dir) {
+  // Check if binary files already exist for optimization (updated for new naming convention)
+  static std::pair<bool, std::pair<std::string, std::string>> check_existing_binaries(const std::string &temp_asset_dir, const std::string &asset_code) {
     std::string snapshots_file, orders_file;
     bool has_binaries = false;
 
@@ -102,10 +97,11 @@ public:
 
     for (const auto &entry : std::filesystem::directory_iterator(temp_asset_dir)) {
       const std::string filename = entry.path().filename().string();
-      if (filename.starts_with(Config::SNAPSHOTS_PREFIX) && filename.ends_with(Config::BIN_EXTENSION)) {
+      // New naming convention: {asset_code}_snapshots_{count}.bin and {asset_code}_orders_{count}.bin
+      if (filename.starts_with(asset_code + "_snapshots_") && filename.ends_with(Config::BIN_EXTENSION)) {
         snapshots_file = entry.path().string();
         has_binaries = true;
-      } else if (filename.starts_with(Config::ORDERS_PREFIX) && filename.ends_with(Config::BIN_EXTENSION)) {
+      } else if (filename.starts_with(asset_code + "_orders_") && filename.ends_with(Config::BIN_EXTENSION)) {
         orders_file = entry.path().string();
         has_binaries = true;
       }
@@ -122,74 +118,19 @@ public:
   }
 };
 
-// CSV data processing and conversion
+// CSV data processing and conversion (simplified to use encoder's process_stock_data)
 class CSVProcessor {
 public:
-  // Parse all CSV files in directory and convert to binary data
-  static bool parse_csv_files(const std::string &temp_asset_dir, L2::BinaryEncoder_L2 &encoder, std::vector<L2::Snapshot> &snapshots, std::vector<L2::Order> &orders) {
-    const std::string market_csv = temp_asset_dir + "/" + Config::MARKET_CSV_NAME;
-    const std::string order_csv = temp_asset_dir + "/" + Config::ORDER_CSV_NAME;
-    const std::string trade_csv = temp_asset_dir + "/" + Config::TRADE_CSV_NAME;
-
-    bool has_data = false;
-
-    // Parse market data (snapshots)
-    if (std::filesystem::exists(market_csv)) {
-      std::vector<L2::CSVSnapshot> csv_snapshots;
-      if (encoder.parse_snapshot_csv(market_csv, csv_snapshots)) {
-        for (const auto &csv_snap : csv_snapshots) {
-          snapshots.push_back(L2::BinaryEncoder_L2::csv_to_snapshot(csv_snap));
-        }
-        has_data = true;
-      }
-    }
-
-    // Parse order data
-    if (std::filesystem::exists(order_csv)) {
-      std::vector<L2::CSVOrder> csv_orders;
-      if (encoder.parse_order_csv(order_csv, csv_orders)) {
-        for (const auto &csv_order : csv_orders) {
-          orders.push_back(L2::BinaryEncoder_L2::csv_to_order(csv_order));
-        }
-        has_data = true;
-      }
-    }
-
-    // Parse trade data
-    if (std::filesystem::exists(trade_csv)) {
-      std::vector<L2::CSVTrade> csv_trades;
-      if (encoder.parse_trade_csv(trade_csv, csv_trades)) {
-        for (const auto &csv_trade : csv_trades) {
-          orders.push_back(L2::BinaryEncoder_L2::csv_to_trade(csv_trade));
-        }
-        has_data = true;
-      }
-    }
-
-    return has_data;
+  // Process CSV files using the encoder's standardized process_stock_data function
+  static bool process_csv_files(const std::string &temp_asset_dir, const std::string &asset_code, L2::BinaryEncoder_L2 &encoder, std::vector<L2::Snapshot> &snapshots, std::vector<L2::Order> &orders) {
+    // Use the encoder's standardized process_stock_data function for consistency
+    return encoder.process_stock_data(temp_asset_dir, temp_asset_dir, asset_code, &snapshots, &orders);
   }
 };
 
-// Binary data encoding and decoding management
+// Binary data decoding management (encoding now handled by process_stock_data)
 class BinaryManager {
 public:
-  // Encode data to binary files
-  static bool encode_to_binary(const std::vector<L2::Snapshot> &snapshots, const std::vector<L2::Order> &orders, const std::string &temp_asset_dir, L2::BinaryEncoder_L2 &encoder) {
-    bool encode_success = true;
-
-    if (!snapshots.empty()) {
-      const std::string snapshots_file = temp_asset_dir + "/" + Config::SNAPSHOTS_PREFIX + std::to_string(snapshots.size()) + Config::BIN_EXTENSION;
-      encode_success &= encoder.encode_snapshots(snapshots, snapshots_file);
-    }
-
-    if (!orders.empty()) {
-      const std::string orders_file = temp_asset_dir + "/" + Config::ORDERS_PREFIX + std::to_string(orders.size()) + Config::BIN_EXTENSION;
-      encode_success &= encoder.encode_orders(orders, orders_file);
-    }
-
-    return encode_success;
-  }
-
   // Decode binary files for processing
   static bool decode_binary_files(const std::string &snapshots_file, const std::string &orders_file, L2::BinaryDecoder_L2 &decoder) {
     bool decode_success = true;
@@ -204,8 +145,8 @@ public:
     if (!orders_file.empty()) {
       std::vector<L2::Order> decoded_orders;
       decode_success &= decoder.decode_orders(orders_file, decoded_orders);
-      decoder.print_all_orders(decoded_orders);
-      exit(1);
+      // decoder.print_all_orders(decoded_orders);
+      // exit(1);
     }
 
     return decode_success;
@@ -270,7 +211,7 @@ public:
     std::filesystem::create_directories(temp_asset_dir);
 
     // Check if binary files already exist - optimization to skip extraction/encoding
-    const auto [has_existing_binaries, binary_files] = FileManager::check_existing_binaries(temp_asset_dir);
+    const auto [has_existing_binaries, binary_files] = FileManager::check_existing_binaries(temp_asset_dir, asset_code);
     const auto &[existing_snapshots_file, existing_orders_file] = binary_files;
 
     if (has_existing_binaries) {
@@ -299,26 +240,21 @@ public:
 
     FileManager::cleanup_temp_files(temp_extract_dir);
 
-    // Parse CSV files and encode to binary
+    // Process CSV files using the encoder's standardized function (parses and encodes in one step)
     std::vector<L2::Snapshot> snapshots;
     std::vector<L2::Order> orders;
 
-    if (!CSVProcessor::parse_csv_files(temp_asset_dir, encoder, snapshots, orders)) {
-      return false; // No data found
+    if (!CSVProcessor::process_csv_files(temp_asset_dir, asset_code, encoder, snapshots, orders)) {
+      return false; // No data found or processing failed
     }
 
     // decoder.print_all_snapshots(snapshots);
     // decoder.print_all_orders(orders);
     // exit(1);
 
-    // Encode to binary files
-    if (!BinaryManager::encode_to_binary(snapshots, orders, temp_asset_dir, encoder)) {
-      return false; // Encoding failed
-    }
-
-    // Decode and process for debugging/backtesting
-    const std::string snapshots_file = snapshots.empty() ? "" : temp_asset_dir + "/" + Config::SNAPSHOTS_PREFIX + std::to_string(snapshots.size()) + Config::BIN_EXTENSION;
-    const std::string orders_file = orders.empty() ? "" : temp_asset_dir + "/" + Config::ORDERS_PREFIX + std::to_string(orders.size()) + Config::BIN_EXTENSION;
+    // Determine binary file paths (using new naming convention)
+    const std::string snapshots_file = snapshots.empty() ? "" : temp_asset_dir + "/" + asset_code + "_snapshots_" + std::to_string(snapshots.size()) + Config::BIN_EXTENSION;
+    const std::string orders_file = orders.empty() ? "" : temp_asset_dir + "/" + asset_code + "_orders_" + std::to_string(orders.size()) + Config::BIN_EXTENSION;
 
     return BinaryManager::decode_binary_files(snapshots_file, orders_file, decoder);
   }
@@ -446,8 +382,8 @@ void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &st
   std::cout << "Processing asset: " << asset_code << " (" << stock_info.name << ")\n";
 
   // Create encoder and decoder instances with configured capacity
-  L2::BinaryEncoder_L2 encoder(Config::DEFAULT_ENCODER_CAPACITY, Config::DEFAULT_ENCODER_MAX_SIZE);
-  L2::BinaryDecoder_L2 decoder(Config::DEFAULT_ENCODER_CAPACITY, Config::DEFAULT_ENCODER_MAX_SIZE);
+  L2::BinaryEncoder_L2 encoder(L2::DEFAULT_ENCODER_CAPACITY, L2::DEFAULT_ENCODER_MAX_SIZE);
+  L2::BinaryDecoder_L2 decoder(L2::DEFAULT_ENCODER_CAPACITY, L2::DEFAULT_ENCODER_MAX_SIZE);
 
   // Generate date range for this asset
   const std::string start_formatted = JsonConfig::FormatYearMonth(stock_info.start_date);
@@ -462,7 +398,7 @@ void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &st
   for (const std::string &date_str : dates) {
     if (AssetProcessor::process_asset_day_csv(asset_code, date_str, temp_base, l2_archive_base, encoder, decoder)) {
       processed_days++;
-      // std::cout << "  Processed: " << date_str << " (day " << processed_days << ")\n";
+      std::cout << "  Processed: " << date_str << " (day " << processed_days << ")\n";
 
       // Optionally clean up day-specific temp files to save disk space
       // const std::string day_temp_dir = PathUtils::generate_temp_asset_dir(temp_base, date_str, asset_code);

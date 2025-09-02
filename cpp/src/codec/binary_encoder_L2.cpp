@@ -35,8 +35,8 @@ BinaryEncoder_L2::BinaryEncoder_L2(size_t estimated_snapshots, size_t estimated_
   temp_hours.reserve(estimated_snapshots);
   temp_minutes.reserve(estimated_snapshots);
   temp_seconds.reserve(estimated_snapshots);
-  temp_highs.reserve(estimated_snapshots);
-  temp_lows.reserve(estimated_snapshots);
+  // temp_highs.reserve(estimated_snapshots);
+  // temp_lows.reserve(estimated_snapshots);
   temp_closes.reserve(estimated_snapshots);
   temp_all_bid_vwaps.reserve(estimated_snapshots);
   temp_all_ask_vwaps.reserve(estimated_snapshots);
@@ -225,8 +225,8 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<
       order.exchange_code = fields[1];
       order.date = std::stoul(fields[2]);
       order.time = std::stoul(fields[3]);
-      order.order_id = std::stoull(fields[4]);
-      order.exchange_order_id = std::stoull(fields[5]);
+      order.order_id = std::stoull(fields[4]);           // 委托编号 (not used, only for missing data check)
+      order.exchange_order_id = std::stoull(fields[5]); // 交易所委托号 (actual order ID to use)
 
       bool is_szse = is_szse_market(order.stock_code);
 
@@ -367,9 +367,9 @@ inline bool BinaryEncoder_L2::is_szse_market(const std::string &stock_code) {
     std::string suffix = stock_code.substr(stock_code.size() - 3);
     // Convert to uppercase for case-insensitive comparison
     std::transform(suffix.begin(), suffix.end(), suffix.begin(), ::toupper);
-    if (suffix == ".SZ")
+    if (suffix == ".SZ" || suffix == ".sz")
       return true;
-    if (suffix == ".SH")
+    if (suffix == ".SH" || suffix == ".sh")
       return false;
   }
   assert(false && "Stock code must contain either .SZ/.sz or .SH/.sh");
@@ -449,12 +449,13 @@ Order BinaryEncoder_L2::csv_to_order(const CSVOrder &csv_order) {
   order.volume = BitwidthBounds::clamp_to_bound(csv_order.volume, BitwidthBounds::VOLUME_BOUND);
 
   // Set order IDs based on direction and type
+  // Use exchange_order_id (field 5) as it contains the actual order ID
   if (order.order_dir == 0) { // bid
-    order.bid_order_id = BitwidthBounds::clamp_to_bound(csv_order.order_id, BitwidthBounds::ORDER_ID_BOUND);
+    order.bid_order_id = BitwidthBounds::clamp_to_bound(csv_order.exchange_order_id, BitwidthBounds::ORDER_ID_BOUND);
     order.ask_order_id = 0;
   } else { // ask
     order.bid_order_id = 0;
-    order.ask_order_id = BitwidthBounds::clamp_to_bound(csv_order.order_id, BitwidthBounds::ORDER_ID_BOUND);
+    order.ask_order_id = BitwidthBounds::clamp_to_bound(csv_order.exchange_order_id, BitwidthBounds::ORDER_ID_BOUND);
   }
 
   return order;
@@ -475,7 +476,9 @@ Order BinaryEncoder_L2::csv_to_trade(const CSVTrade &csv_trade) {
   order.price = BitwidthBounds::clamp_to_bound(csv_trade.price, BitwidthBounds::PRICE_BOUND);
   order.volume = BitwidthBounds::clamp_to_bound(csv_trade.volume, BitwidthBounds::VOLUME_BOUND);
 
-  // For trades, set both order IDs
+  // For trades, set both order IDs directly from CSV
+  // The CSV already provides the correct bid_order_id and ask_order_id values
+  // according to the specification table for trades (order_type=3)
   order.bid_order_id = BitwidthBounds::clamp_to_bound(csv_trade.bid_order_id, BitwidthBounds::ORDER_ID_BOUND);
   order.ask_order_id = BitwidthBounds::clamp_to_bound(csv_trade.ask_order_id, BitwidthBounds::ORDER_ID_BOUND);
 
@@ -500,8 +503,8 @@ bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots, 
     temp_hours.resize(count);
     temp_minutes.resize(count);
     temp_seconds.resize(count);
-    temp_highs.resize(count);
-    temp_lows.resize(count);
+    // temp_highs.resize(count);
+    // temp_lows.resize(count);
     temp_closes.resize(count);
     temp_all_bid_vwaps.resize(count);
     temp_all_ask_vwaps.resize(count);
@@ -536,8 +539,8 @@ bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots, 
     DeltaUtils::encode_deltas(temp_hours.data(), count);
     DeltaUtils::encode_deltas(temp_minutes.data(), count);
     DeltaUtils::encode_deltas(temp_seconds.data(), count);
-    DeltaUtils::encode_deltas(temp_highs.data(), count);
-    DeltaUtils::encode_deltas(temp_lows.data(), count);
+    // DeltaUtils::encode_deltas(temp_highs.data(), count);
+    // DeltaUtils::encode_deltas(temp_lows.data(), count);
     DeltaUtils::encode_deltas(temp_closes.data(), count);
     DeltaUtils::encode_deltas(temp_all_bid_vwaps.data(), count);
     DeltaUtils::encode_deltas(temp_all_ask_vwaps.data(), count);
