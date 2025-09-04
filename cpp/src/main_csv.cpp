@@ -156,7 +156,6 @@ public:
         book->clear();
       }
     }
-
     return decode_success;
   }
 };

@@ -66,6 +66,11 @@ set(HEADERS
     ../../include/technical_analysis.hpp
 )
 
+# Disable fast-math specifically for JSON library to avoid infinity issues
+set_source_files_properties(../../src/codec/json_config.cpp PROPERTIES
+    COMPILE_OPTIONS "-fno-fast-math"
+)
+
 # Create executable
 add_executable(app_main_csv ${SOURCES} ${HEADERS})
 
