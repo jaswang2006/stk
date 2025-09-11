@@ -423,13 +423,6 @@ public:
     prev_timestamp_ = curr_timestamp_;
     print_book();
 
-#if PRINT_DEBUG
-    char order_type_char = (order.order_type == OrderType::MAKER) ? 'M' : (order.order_type == OrderType::CANCEL) ? 'C'
-                                                                                                                  : 'T';
-    char order_dir_char = (order.order_dir == OrderDirection::BID) ? 'B' : 'S';
-    std::cout << "[" << format_time() << "] " << " ID: " << get_target_id(order) << " Type: " << order_type_char << " Direction: " << order_dir_char << " Price: " << order.price << " Volume: " << order.volume << std::endl;
-#endif
-
     // 1. Get signed volume and target ID using simple lookup functions
     Quantity signed_volume = get_signed_volume(order);
     OrderId target_id = get_target_id(order);
@@ -563,6 +556,12 @@ public:
 
       std::cout << book_output.str() << "\n";
     }
+#if PRINT_DEBUG
+    char order_type_char = (order.order_type == OrderType::MAKER) ? 'M' : (order.order_type == OrderType::CANCEL) ? 'C'
+                                                                                                                  : 'T';
+    char order_dir_char = (order.order_dir == OrderDirection::BID) ? 'B' : 'S';
+    std::cout << "[" << format_time() << "] " << " ID: " << get_target_id(order) << " Type: " << order_type_char << " Direction: " << order_dir_char << " Price: " << order.price << " Volume: " << order.volume << std::endl;
+#endif
   }
 
   // Book statistics - optimized for performance
