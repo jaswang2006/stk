@@ -160,14 +160,14 @@ namespace Parallel {
 bool process_stock_data(const std::string &asset_dir,
                         const std::string &asset_code,
                         const std::string &date_str,
-                        const std::string &output_base,
+                        const std::string &OUTPUT_DIR,
                         double &compression_ratio) {
   if (!std::filesystem::exists(asset_dir)) {
     return false;
   }
 
   // Create output directory structure
-  std::string output_dir = output_base + "/" + date_str.substr(0, 4) + "/" +
+  std::string output_dir = OUTPUT_DIR + "/" + date_str.substr(0, 4) + "/" +
                            date_str.substr(4, 2) + "/" + date_str.substr(6, 2) + "/" + asset_code;
   std::filesystem::create_directories(output_dir);
 
@@ -283,7 +283,7 @@ void decompression_worker(unsigned int worker_id) {
 
     // Create unique temp_root for this archive (per-day folder)
     std::string archive_name = std::filesystem::path(archive_path).stem().string();
-    std::string temp_root = std::string(L2::temp_base) + "/" + archive_name + "_" +
+    std::string temp_root = std::string(L2::TEMP_DIR) + "/" + archive_name + "_" +
                             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
 
     // Construct folder_token early for RAII (will cleanup on any failure)
@@ -417,7 +417,7 @@ void encoding_worker(unsigned int core_id) {
 
     // Process the asset
     double compression_ratio = 1.0;
-    if (process_stock_data(asset_dir, asset_code, date_str, L2::output_base, compression_ratio)) {
+    if (process_stock_data(asset_dir, asset_code, date_str, L2::OUTPUT_DIR, compression_ratio)) {
       // Update progress: processed++
       std::lock_guard<std::mutex> lock(active_folder_mutex);
       if (active_folder) {
@@ -433,7 +433,7 @@ void encoding_worker(unsigned int core_id) {
 }
 
 void init_decompression_logging() {
-  Logger::init(L2::temp_base);
+  Logger::init(L2::TEMP_DIR);
 }
 
 void close_decompression_logging() {

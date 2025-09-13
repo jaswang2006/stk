@@ -28,9 +28,9 @@ void signal_handler(int signal) {
 }
 
 // Discover all .7z archives
-std::vector<std::string> discover_archives(const std::string &input_base) {
+std::vector<std::string> discover_archives(const std::string &INPUT_DIR) {
   std::vector<std::string> archives;
-  for (const auto &entry : std::filesystem::recursive_directory_iterator(input_base)) {
+  for (const auto &entry : std::filesystem::recursive_directory_iterator(INPUT_DIR)) {
     if (entry.is_regular_file() && entry.path().extension() == ".7z") {
       archives.push_back(entry.path().string());
     }
@@ -48,28 +48,28 @@ int main() {
 
   // Calculate threads
   const unsigned int num_cores = misc::Affinity::core_count();
-  const unsigned int encoding_threads = num_cores - L2::decompression_threads;
+  const unsigned int encoding_threads = num_cores - L2::DECOMPRESSION_THREADS;
 
-  assert(L2::decompression_threads > 0 && encoding_threads > 0);
+  assert(L2::DECOMPRESSION_THREADS > 0 && encoding_threads > 0);
 
   std::cout << "L2 Processing (Asset Queue Design): "
-            << L2::decompression_threads << " decomp, "
+            << L2::DECOMPRESSION_THREADS << " decomp, "
             << encoding_threads << " enc threads (max "
-            << L2::max_temp_folders << " temp folders)" << std::endl;
+            << L2::MAX_TEMP_FOLDERS << " temp folders)" << std::endl;
 
   // Clean and setup directories
-  if (std::filesystem::exists(L2::output_base)) {
-    std::filesystem::remove_all(L2::output_base);
+  if (std::filesystem::exists(L2::OUTPUT_DIR)) {
+    std::filesystem::remove_all(L2::OUTPUT_DIR);
   }
-  std::filesystem::create_directories(L2::output_base);
+  std::filesystem::create_directories(L2::OUTPUT_DIR);
 
-  if (std::filesystem::exists(L2::temp_base)) {
-    std::filesystem::remove_all(L2::temp_base);
+  if (std::filesystem::exists(L2::TEMP_DIR)) {
+    std::filesystem::remove_all(L2::TEMP_DIR);
   }
-  std::filesystem::create_directories(L2::temp_base);
+  std::filesystem::create_directories(L2::TEMP_DIR);
 
   // Discover archives and populate archive queue
-  const auto archives = discover_archives(L2::input_base);
+  const auto archives = discover_archives(L2::INPUT_DIR);
   std::cout << "Processing " << archives.size() << " archives" << std::endl;
 
   {
@@ -84,14 +84,14 @@ int main() {
 
   // Launch decompression workers (producers)
   std::vector<std::thread> decompression_workers;
-  for (unsigned int i = 0; i < L2::decompression_threads; ++i) {
+  for (unsigned int i = 0; i < L2::DECOMPRESSION_THREADS; ++i) {
     decompression_workers.emplace_back(decompression_worker, i);
   }
 
   // Launch encoding workers (consumers)
   std::vector<std::thread> encoding_workers;
   for (unsigned int i = 0; i < encoding_threads; ++i) {
-    const unsigned int core_id = L2::decompression_threads + i;
+    const unsigned int core_id = L2::DECOMPRESSION_THREADS + i;
     encoding_workers.emplace_back(encoding_worker, core_id);
   }
 

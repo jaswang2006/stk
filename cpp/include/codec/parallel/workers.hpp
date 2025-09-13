@@ -10,14 +10,14 @@ namespace Parallel {
  * @param asset_dir Directory containing CSV files for the asset
  * @param asset_code Stock code (e.g., 600000.SH)
  * @param date_str Date string in YYYYMMDD format
- * @param output_base Base output directory
+ * @param OUTPUT_DIR Base output directory
  * @param compression_ratio Output parameter for compression ratio achieved
  * @return true if processing succeeded
  */
 bool process_stock_data(const std::string &asset_dir,
                         const std::string &asset_code,
                         const std::string &date_str,
-                        const std::string &output_base,
+                        const std::string &OUTPUT_DIR,
                         double &compression_ratio);
 
 /**

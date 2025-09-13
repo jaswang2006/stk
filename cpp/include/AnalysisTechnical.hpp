@@ -58,7 +58,7 @@ public:
             &bar_vwaps_) {
     // Reserve memory for efficient operation - reduce reallocations
     snapshots_.reserve(capacity);
-    bars.reserve(15 * 250 * trade_hrs_in_a_day * 3600 / RESAMPLE_BASE_PERIOD); // 15 years of resampled bars
+    bars.reserve(15 * 250 * TRADE_HRS_PER_DAY * 3600 / RESAMPLE_BASE_PERIOD); // 15 years of resampled bars
   }
 
   ~AnalysisHighFrequency() {
@@ -70,13 +70,13 @@ public:
     // Fill gaps by creating intermediate snapshots and processing each one
 #ifdef FILL_GAP_SNAPSHOT
     if (has_previous_snapshot_) [[likely]] {
-      uint32_t gap_time = last_processed_time_ + snapshot_interval;
+      uint32_t gap_time = last_processed_time_ + SNAPSHOT_INTERVAL;
       // NOTE: this also check the causality of last and current snapshot
       // making sure time between 2 days are not filled (as last(yesterday close) > current(today open))
       while (gap_time < snapshot.seconds_in_day) {
         GetGapSnapshot(gap_time);
         ProcessSnapshotInternal(gap_snapshot_);
-        gap_time += snapshot_interval;
+        gap_time += SNAPSHOT_INTERVAL;
       }
     }
 #endif
@@ -225,7 +225,7 @@ private:
   Table::Snapshot_Record gap_snapshot_;
   bool has_previous_snapshot_ = false;
   uint32_t last_processed_time_ = 0;
-  static constexpr uint32_t snapshot_interval = 3; // 3 seconds
+  static constexpr uint32_t SNAPSHOT_INTERVAL = 3; // 3 seconds
 #endif
 
   Table::RunBar_Record resampled_bar_;
@@ -235,24 +235,24 @@ private:
   std::vector<Table::RunBar_Record> bars;
 
   // Snapshot data ================================================================================
-  LimitOrderBook<BLen> lob;
-  CBuffer<uint16_t, BLen> snapshot_delta_t_;
-  CBuffer<float, BLen> snapshot_prices_;
-  CBuffer<float, BLen> snapshot_volumes_;
-  CBuffer<float, BLen> snapshot_turnovers_;
-  CBuffer<float, BLen> snapshot_vwaps_;
-  CBuffer<uint8_t, BLen> snapshot_directions_; // 0: buy, 1: sell (vwap or last trade direction)
-  CBuffer<float, BLen> snapshot_spreads_;
-  CBuffer<float, BLen> snapshot_mid_prices_;
+  LimitOrderBook<BLEN> lob;
+  CBuffer<uint16_t, BLEN> snapshot_delta_t_;
+  CBuffer<float, BLEN> snapshot_prices_;
+  CBuffer<float, BLEN> snapshot_volumes_;
+  CBuffer<float, BLEN> snapshot_turnovers_;
+  CBuffer<float, BLEN> snapshot_vwaps_;
+  CBuffer<uint8_t, BLEN> snapshot_directions_; // 0: buy, 1: sell (vwap or last trade direction)
+  CBuffer<float, BLEN> snapshot_spreads_;
+  CBuffer<float, BLEN> snapshot_mid_prices_;
 
   // Resample data ================================================================================
-  ResampleRunBar<BLen> ResampleRunBar_;
-  CBuffer<uint16_t, BLen> bar_delta_t_;
-  CBuffer<float, BLen> bar_opens_;
-  CBuffer<float, BLen> bar_highs_;
-  CBuffer<float, BLen> bar_lows_;
-  CBuffer<float, BLen> bar_closes_;
-  CBuffer<float, BLen> bar_vwaps_;
+  ResampleRunBar<BLEN> ResampleRunBar_;
+  CBuffer<uint16_t, BLEN> bar_delta_t_;
+  CBuffer<float, BLEN> bar_opens_;
+  CBuffer<float, BLEN> bar_highs_;
+  CBuffer<float, BLEN> bar_lows_;
+  CBuffer<float, BLEN> bar_closes_;
+  CBuffer<float, BLEN> bar_vwaps_;
 
   // daily data ===================================================================================
 

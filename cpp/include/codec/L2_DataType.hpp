@@ -21,22 +21,32 @@
 namespace L2 {
 
 // Processing configuration constants
-inline constexpr uint32_t decompression_threads = 8;
-inline constexpr uint32_t max_temp_folders = 16; // disk backpressure limit
-// inline const char *input_base = "/media/chuyin/48ac8067-d3b7-4332-b652-45e367a1ebcc/A_stock/L2";
-// inline const char *output_base = "/home/chuyin/work/L2_binary";
-// inline const char *temp_base = "../../../output/tmp";
-inline const char *input_base = "/mnt/dev/sde/A_stock/L2/";
-inline const char *output_base = "../../../output/tmp/L2_binary";
-inline const char *temp_base = "../../../output/tmp";
-// Debug option to skip decompression and encode directly from input_base
-inline constexpr bool skip_decompression = false;
+inline constexpr uint32_t DECOMPRESSION_THREADS = 8;
+inline constexpr uint32_t MAX_TEMP_FOLDERS = 16; // disk backpressure limit
+// inline const char *INPUT_DIR = "/media/chuyin/48ac8067-d3b7-4332-b652-45e367a1ebcc/A_stock/L2";
+// inline const char *OUTPUT_DIR = "/home/chuyin/work/L2_binary";
+// inline const char *TEMP_DIR = "../../../output/tmp";
+inline const char *INPUT_DIR = "/mnt/dev/sde/A_stock/L2";
+inline const char *OUTPUT_DIR = "../../../output/tmp/L2_binary";
+inline const char *TEMP_DIR = "../../../output/tmp";
 
-inline constexpr size_t DEFAULT_ENCODER_SNAPSHOT_SIZE = 5000;   // 3秒全量快照 4*3600/3=4800
-inline constexpr size_t DEFAULT_ENCODER_ORDER_SIZE = 100000; // 逐笔合并(增删改成交)
+inline constexpr size_t DEFAULT_ENCODER_SNAPSHOT_SIZE = 5000; // 3秒全量快照 4*3600/3=4800
+inline constexpr size_t DEFAULT_ENCODER_ORDER_SIZE = 100000;  // 逐笔合并(增删改成交)
 
 // modern compression algo maynot benefit from delta encoding
 inline constexpr bool ENABLE_DELTA_ENCODING = false; // use Zstd for high compress ratio and fast decompress speed
+
+// Data Struct
+inline constexpr int BLEN = 100;            // default length for Cbuffers (feature computation)
+inline constexpr int SNAPSHOT_INTERVAL = 3; // 全量快照间隔
+inline constexpr int TRADE_HRS_PER_DAY = 4; // 单日交易时间
+
+// Resample
+inline constexpr int MIN_DATA_BASE_PERIOD = SNAPSHOT_INTERVAL; // min base period of data (in seconds)
+inline constexpr int RESAMPLE_BASE_PERIOD = 30;                // target sample period (in seconds) (more dense sample in the morning)
+inline constexpr int RESAMPLE_EMA_DAYS = 5;                    // shouldn't be too large, std(delta_t) will instead go larger
+// days   3   5   10  25
+// stddev 108 110 114 124
 
 // | Compressor name     | Ratio | Compression | Decompress |
 // |---------------------|-------|-------------|------------|

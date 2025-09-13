@@ -2,18 +2,14 @@
 
 #include <cstdint>
 
-// struct trade {
-//   uint8_t direction; // 1bit - 0:bid 1:ask
-//   uint16_t volume;   // 16bit - units of 100 shares (hands)
-// };
 // 
 // // Data Struct
-// inline constexpr int BLen = 100;
-// inline constexpr int snapshot_interval = 3;
-// inline constexpr int trade_hrs_in_a_day = 4;
+// inline constexpr int BLEN = 100;
+// inline constexpr int SNAPSHOT_INTERVAL = 3;
+// inline constexpr int TRADE_HRS_PER_DAY = 4;
 // 
 // // Resample
-// inline constexpr int MIN_DATA_BASE_PERIOD = snapshot_interval; // min base period of data (in seconds)
+// inline constexpr int MIN_DATA_BASE_PERIOD = SNAPSHOT_INTERVAL; // min base period of data (in seconds)
 // inline constexpr int RESAMPLE_BASE_PERIOD = 30;                // target sample period (in seconds)
 // inline constexpr int RESAMPLE_EMA_DAYS = 5;
 // // days   3   5   10  25

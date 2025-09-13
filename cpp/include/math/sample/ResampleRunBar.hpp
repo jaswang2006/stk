@@ -38,8 +38,8 @@ public:
         bar_low_(bar_low),
         bar_close_(bar_close),
         bar_vwap_(bar_vwap) {
-    daily_snapshot_label.reserve(int(3600 / MIN_DATA_BASE_PERIOD * trade_hrs_in_a_day));
-    daily_snapshot_volume.reserve(int(3600 / MIN_DATA_BASE_PERIOD * trade_hrs_in_a_day));
+    daily_snapshot_label.reserve(int(3600 / MIN_DATA_BASE_PERIOD * TRADE_HRS_PER_DAY));
+    daily_snapshot_volume.reserve(int(3600 / MIN_DATA_BASE_PERIOD * TRADE_HRS_PER_DAY));
   }
 
   inline bool process(const Table::Snapshot_Record &snapshot, Table::RunBar_Record &bar) {
@@ -120,7 +120,7 @@ public:
 private:
   int p_ori = MIN_DATA_BASE_PERIOD; // original sampling period (seconds)
   int p_tar = RESAMPLE_BASE_PERIOD; // target bar length (seconds)
-  int expected_num_daily_samples = int(3600 * trade_hrs_in_a_day / p_tar);
+  int expected_num_daily_samples = int(3600 * TRADE_HRS_PER_DAY / p_tar);
   int tolerance = static_cast<int>(expected_num_daily_samples * 0.05);
 
   CBuffer<uint16_t, N> *snapshot_delta_t_;

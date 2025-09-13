@@ -14,8 +14,9 @@
 #include <unordered_map>
 #include <vector>
 
-#include "codec/L2_DataType.hpp"
 #include "define/MemPool.hpp"
+#include "codec/L2_DataType.hpp"
+// #include "math/sample/ResampleRunBar.hpp"
 
 #define PRINT_DEBUG 0
 #define PRINT_BOOK 1
@@ -423,10 +424,14 @@ public:
     prev_timestamp_ = curr_timestamp_;
     print_book();
 
+    auto result = update_lob(order);
+    return result;
+  };
+
+  [[gnu::hot]] bool update_lob(const L2::Order &order) {
     // 1. Get signed volume and target ID using simple lookup functions
     Quantity signed_volume = get_signed_volume(order);
     OrderId target_id = get_target_id(order);
-
     if (signed_volume == 0 || target_id == 0) [[unlikely]]
       return false;
 
@@ -453,7 +458,6 @@ public:
     if (order.order_type == OrderType::TAKER) {
       update_tob_after_trade(order, was_fully_consumed, effective_price);
     }
-
     return true;
   }
 

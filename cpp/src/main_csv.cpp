@@ -48,8 +48,8 @@ public:
   }
 
   // Generate temporary asset directory path
-  static std::string generate_temp_asset_dir(const std::string &temp_base, const std::string &date_str, const std::string &asset_code) {
-    return temp_base + "/" + date_str.substr(0, 4) + "/" + date_str.substr(4, 2) + "/" + date_str.substr(6, 2) + "/" + asset_code;
+  static std::string generate_temp_asset_dir(const std::string &TEMP_DIR, const std::string &date_str, const std::string &asset_code) {
+    return TEMP_DIR + "/" + date_str.substr(0, 4) + "/" + date_str.substr(4, 2) + "/" + date_str.substr(6, 2) + "/" + asset_code;
   }
 
   // Check if date is valid leap year calculation
@@ -274,7 +274,7 @@ public:
     std::string config_file;
     std::string stock_info_file;
     std::string l2_archive_base;
-    std::string temp_base;
+    std::string TEMP_DIR;
   };
 
   static Paths get_default_paths() {
@@ -288,7 +288,7 @@ public:
   static void print_configuration_info(const Paths &paths, const JsonConfig::AppConfig &app_config, size_t total_assets) {
     std::cout << "Configuration loaded successfully:" << "\n";
     std::cout << "  L2 Archive base: " << paths.l2_archive_base << "\n";
-    std::cout << "  Temporary directory: " << paths.temp_base << "\n";
+    std::cout << "  Temporary directory: " << paths.TEMP_DIR << "\n";
     std::cout << "  Data period: " << JsonConfig::FormatYearMonth(app_config.start_month)
               << " to " << JsonConfig::FormatYearMonth(app_config.end_month) << "\n";
     std::cout << "  Total assets found: " << total_assets << "\n\n";
@@ -309,7 +309,7 @@ public:
 };
 
 // Forward declaration of ProcessAsset function
-void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const std::string &l2_archive_base, const std::string &temp_base, unsigned int core_id);
+void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id);
 
 // Thread pool management class
 class ThreadPoolManager {
@@ -365,7 +365,7 @@ public:
               asset_code,
               stock_info,
               paths.l2_archive_base,
-              paths.temp_base,
+              paths.TEMP_DIR,
               core_id));
 
       ++stock_iter;
@@ -379,7 +379,7 @@ public:
 };
 
 // Main asset processing function with thread affinity
-void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const std::string &l2_archive_base, const std::string &temp_base, unsigned int core_id) {
+void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id) {
   // Set thread affinity to specific core once per thread (if supported)
   static thread_local bool affinity_set = false;
   if (!affinity_set && misc::Affinity::supported()) {
@@ -408,12 +408,12 @@ void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &st
   size_t current_date_index = 0;
   for (const std::string &date_str : dates) {
     misc::print_progress(current_date_index + 1, dates.size(), "Processing " + asset_code + " - " + date_str);
-    if (AssetProcessor::process_asset_day_csv(asset_code, date_str, temp_base, l2_archive_base, encoder, decoder, HFA_)) {
+    if (AssetProcessor::process_asset_day_csv(asset_code, date_str, TEMP_DIR, l2_archive_base, encoder, decoder, HFA_)) {
       processed_days++;
       // std::cout << "  Processed: " << date_str << " (day " << processed_days << ")\n";
 
       // Optionally clean up day-specific temp files to save disk space
-      // const std::string day_temp_dir = PathUtils::generate_temp_asset_dir(temp_base, date_str, asset_code);
+      // const std::string day_temp_dir = PathUtils::generate_temp_asset_dir(TEMP_DIR, date_str, asset_code);
       // FileManager::cleanup_temp_files(day_temp_dir);
 
       // Exit after first successful day for debugging purposes
@@ -444,17 +444,17 @@ int main() {
     AppConfiguration::print_configuration_info(paths, app_config, stock_info_map.size());
 
     // // Prepare temporary directory
-    // if (std::filesystem::exists(paths.temp_base)) {
-    //     std::filesystem::remove_all(paths.temp_base);
+    // if (std::filesystem::exists(paths.TEMP_DIR)) {
+    //     std::filesystem::remove_all(paths.TEMP_DIR);
     // }
-    std::filesystem::create_directories(paths.temp_base);
+    std::filesystem::create_directories(paths.TEMP_DIR);
 
     // Process assets using thread pool
     ThreadPoolManager::process_assets_in_parallel(stock_info_map, paths);
 
     // Optional: Final cleanup
-    // if (std::filesystem::exists(paths.temp_base)) {
-    //     std::filesystem::remove_all(paths.temp_base);
+    // if (std::filesystem::exists(paths.TEMP_DIR)) {
+    //     std::filesystem::remove_all(paths.TEMP_DIR);
     // }
 
     std::cout << "\n=== CSV Debugging Processing completed successfully! ===" << "\n";

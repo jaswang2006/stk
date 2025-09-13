@@ -5,7 +5,7 @@ namespace L2 {
 namespace Parallel {
 
 // Global state definitions following L2_database design
-std::counting_semaphore<> temp_slots{L2::max_temp_folders};
+std::counting_semaphore<> temp_slots{L2::MAX_TEMP_FOLDERS};
 FolderQueue folder_queue{100}; // bounded to 100 folders
 std::queue<std::string> archive_queue;
 std::mutex archive_queue_mutex;

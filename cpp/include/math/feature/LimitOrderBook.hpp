@@ -138,9 +138,9 @@ private:
   CBuffer<float, N> *spreads_;
   CBuffer<float, N> *mid_prices_;
 
-  RollingZScore<float, int(30 * 60 / snapshot_interval)> zs_spread_;
-  RollingZScore<float, int(30 * 60 / snapshot_interval)> zs_mpg_;
-  RollingZScore<float, int(30 * 60 / snapshot_interval)> zs_tobi_;
-  RollingZScore<float, int(30 * 60 / snapshot_interval)> zs_cwi_[CWI_N];
-  RollingZScore<float, int(30 * 60 / snapshot_interval)> zs_ddi_[DDI_N];
+  RollingZScore<float, int(30 * 60 / SNAPSHOT_INTERVAL)> zs_spread_;
+  RollingZScore<float, int(30 * 60 / SNAPSHOT_INTERVAL)> zs_mpg_;
+  RollingZScore<float, int(30 * 60 / SNAPSHOT_INTERVAL)> zs_tobi_;
+  RollingZScore<float, int(30 * 60 / SNAPSHOT_INTERVAL)> zs_cwi_[CWI_N];
+  RollingZScore<float, int(30 * 60 / SNAPSHOT_INTERVAL)> zs_ddi_[DDI_N];
 };
