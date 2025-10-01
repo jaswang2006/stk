@@ -42,9 +42,11 @@ inline constexpr int SNAPSHOT_INTERVAL = 3; // 全量快照间隔
 inline constexpr int TRADE_HRS_PER_DAY = 4; // 单日交易时间
 
 // Resample
-inline constexpr int MIN_DATA_BASE_PERIOD = SNAPSHOT_INTERVAL; // min base period of data (in seconds)
-inline constexpr int RESAMPLE_BASE_PERIOD = 30;                // target sample period (in seconds) (more dense sample in the morning)
-inline constexpr int RESAMPLE_EMA_DAYS = 5;                    // shouldn't be too large, std(delta_t) will instead go larger
+inline constexpr int RESAMPLE_INIT_VOLUME_THD = 100; // initial volume threshold (n*100shares*100rmb = n*10,000rmb)
+inline constexpr int RESAMPLE_TRADE_HRS_PER_DAY = 4; // number of trading hours in a day
+inline constexpr int RESAMPLE_MIN_PERIOD = 1;        // minimal sample period (in seconds)
+inline constexpr int RESAMPLE_TARGET_PERIOD = 30;    // target sample period (in seconds) (more dense sample in the morning)
+inline constexpr int RESAMPLE_EMA_DAYS_PERIOD = 5;   // shouldn't be too large, std(delta_t) will instead go larger
 // days   3   5   10  25
 // stddev 108 110 114 124
 
@@ -60,74 +62,6 @@ inline constexpr int RESAMPLE_EMA_DAYS = 5;                    // shouldn't be t
 // | lz4 1.10.0          | 2.101 | 675 MB/s    | 3850 MB/s  |
 // | snappy 1.2.1        | 2.089 | 520 MB/s    | 1500 MB/s  |
 // | lzf 3.6 -1          | 2.077 | 410 MB/s    | 820 MB/s   |
-
-// Market asset validation function
-inline bool is_valid_market_asset(const std::string &asset_code) {
-  if (asset_code.length() < 6)
-    return false;
-
-  // Check for specific ranges first: 600000-600020 and 300000-300020
-  if (asset_code.substr(0, 3) == "600") {
-    try {
-      int code_num = std::stoi(asset_code.substr(3));
-      if (code_num >= 0 && code_num <= 20) {
-        return true;
-      }
-    } catch (...) {
-      // Fall through to original logic
-    }
-  } else if (asset_code.substr(0, 3) == "300") {
-    try {
-      int code_num = std::stoi(asset_code.substr(3));
-      if (code_num >= 0 && code_num <= 20) {
-        return true;
-      }
-    } catch (...) {
-      // Fall through to original logic
-    }
-  }
-
-  std::string code_prefix = asset_code.substr(0, 3);
-
-  // Shanghai Stock Exchange (SSE)
-  if (code_prefix == "600" || code_prefix == "601" || code_prefix == "603" || code_prefix == "605" || // 沪市主板
-      0 ||                                                                                            // code_prefix == "900" || // 沪市B股
-      code_prefix == "688" ||                                                                         // 科创板
-      code_prefix == "689") {                                                                         // 科创板存托凭证
-    return false;
-  }
-
-  // Shenzhen Stock Exchange (SZSE)
-  if (code_prefix == "000" || code_prefix == "001" ||                         // 深市主板
-      code_prefix == "002" || code_prefix == "003" || code_prefix == "004" || // 深市中小板
-      0 ||                                                                    // code_prefix == "200" || code_prefix == "201" || // 深市B股
-      code_prefix == "300" || code_prefix == "301" || code_prefix == "302" || // 创业板
-      code_prefix == "309") {                                                 // 创业板存托凭证
-    return false;
-  }
-
-  // NEEQ/Beijing Stock Exchange
-  if (code_prefix == "400" || code_prefix == "420" || code_prefix == "430") { // 新三板基础
-    return false;
-  }
-
-  // Check for 2-digit prefixes for NEEQ
-  if (asset_code.length() >= 2) {
-    std::string code_prefix_2 = asset_code.substr(0, 2);
-    if (code_prefix_2 == "82" || code_prefix_2 == "83" || // 新三板创新层
-        code_prefix_2 == "87" || code_prefix_2 == "88" || // 北交所精选层
-        code_prefix_2 == "92") {                          // 北交所
-      return false;
-    }
-  }
-
-  return false; // Not a valid market asset (likely an index or other instrument)
-}
-
-enum class DataType { INT,
-                      FLOAT,
-                      DOUBLE,
-                      BOOL };
 
 struct ColumnMeta {
   std::string_view column_name; // 列名
@@ -167,14 +101,12 @@ constexpr ColumnMeta Snapshot_Schema[] = {
 // clang-format on
 
 struct Snapshot {
-  uint8_t hour;        // 5bit
-  uint8_t minute;      // 6bit
-  uint8_t second;      // 6bit
-  uint8_t trade_count; // 8bit
-  uint16_t volume;     // 16bit - units of 100 shares
-  uint32_t turnover;   // 32bit - RMB
-  // uint16_t high;                // 14bit - price in 0.01 RMB units
-  // uint16_t low;                 // 14bit - price in 0.01 RMB units
+  uint8_t hour;                 // 5bit
+  uint8_t minute;               // 6bit
+  uint8_t second;               // 6bit
+  uint8_t trade_count;          // 8bit
+  uint16_t volume;              // 16bit - units of 100 shares
+  uint32_t turnover;            // 32bit - RMB
   uint16_t close;               // 14bit - price in 0.01 RMB units
   uint16_t bid_price_ticks[10]; // 14bits * 10 - prices in 0.01 RMB units
   uint16_t bid_volumes[10];     // 14bits * 10 - units of 100 shares
@@ -205,6 +137,17 @@ struct Order {
   // bid_order_id:             |buy_maker_id |0             |buy_cancel_id |0              |0     |0     |buy_taker_id  |buy_maker_id
   // ask_order_id:             |0            |sell_maker_id |0             |sell_cancel_id |0     |0     |sell_maker_id |sell_taker_id
 };
+
+namespace OrderType {
+constexpr uint8_t MAKER = 0;
+constexpr uint8_t CANCEL = 1;
+constexpr uint8_t TAKER = 3;
+} // namespace OrderType
+
+namespace OrderDirection {
+constexpr uint8_t BID = 0;
+constexpr uint8_t ASK = 1;
+} // namespace OrderDirection
 
 // Compile-time upper bound calculations based on schema definitions
 namespace SchemaUtils {
@@ -292,5 +235,68 @@ constexpr int ORDER_PRICE_WIDTH = calc_digits_from_bitwidth(get_column_bitwidth(
 constexpr int ORDER_VOLUME_WIDTH = calc_digits_from_bitwidth(get_column_bitwidth(Snapshot_Schema, SCHEMA_SIZE, "volume"));
 constexpr int ORDER_ID_WIDTH = calc_digits_from_bitwidth(get_column_bitwidth(Snapshot_Schema, SCHEMA_SIZE, "bid_order_id"));
 } // namespace SchemaUtils
+
+// Market asset validation function
+inline bool is_valid_market_asset(const std::string &asset_code) {
+  if (asset_code.length() < 6)
+    return false;
+
+  // Check for specific ranges first: 600000-600020 and 300000-300020
+  if (asset_code.substr(0, 3) == "600") {
+    try {
+      int code_num = std::stoi(asset_code.substr(3));
+      if (code_num >= 0 && code_num <= 20) {
+        return true;
+      }
+    } catch (...) {
+      // Fall through to original logic
+    }
+  } else if (asset_code.substr(0, 3) == "300") {
+    try {
+      int code_num = std::stoi(asset_code.substr(3));
+      if (code_num >= 0 && code_num <= 20) {
+        return true;
+      }
+    } catch (...) {
+      // Fall through to original logic
+    }
+  }
+
+  std::string code_prefix = asset_code.substr(0, 3);
+
+  // Shanghai Stock Exchange (SSE)
+  if (code_prefix == "600" || code_prefix == "601" || code_prefix == "603" || code_prefix == "605" || // 沪市主板
+      0 ||                                                                                            // code_prefix == "900" || // 沪市B股
+      code_prefix == "688" ||                                                                         // 科创板
+      code_prefix == "689") {                                                                         // 科创板存托凭证
+    return false;
+  }
+
+  // Shenzhen Stock Exchange (SZSE)
+  if (code_prefix == "000" || code_prefix == "001" ||                         // 深市主板
+      code_prefix == "002" || code_prefix == "003" || code_prefix == "004" || // 深市中小板
+      0 ||                                                                    // code_prefix == "200" || code_prefix == "201" || // 深市B股
+      code_prefix == "300" || code_prefix == "301" || code_prefix == "302" || // 创业板
+      code_prefix == "309") {                                                 // 创业板存托凭证
+    return false;
+  }
+
+  // NEEQ/Beijing Stock Exchange
+  if (code_prefix == "400" || code_prefix == "420" || code_prefix == "430") { // 新三板基础
+    return false;
+  }
+
+  // Check for 2-digit prefixes for NEEQ
+  if (asset_code.length() >= 2) {
+    std::string code_prefix_2 = asset_code.substr(0, 2);
+    if (code_prefix_2 == "82" || code_prefix_2 == "83" || // 新三板创新层
+        code_prefix_2 == "87" || code_prefix_2 == "88" || // 北交所精选层
+        code_prefix_2 == "92") {                          // 北交所
+      return false;
+    }
+  }
+
+  return false; // Not a valid market asset (likely an index or other instrument)
+}
 
 } // namespace L2

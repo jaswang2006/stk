@@ -1,6 +1,4 @@
 #include "codec/binary_decoder_L1.hpp"
-#include "define/Dtype.hpp"
-#include "misc/misc.hpp"
 
 #include <cassert>
 // #include <chrono>
@@ -9,8 +7,6 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
-
-
 
 // #define DEBUG_TIMER
 // #define PRINT_BINARY
@@ -116,13 +112,13 @@ void Decoder::ReverseDifferentialEncoding(std::vector<L1::Snapshot> &records) {
 // #endif
 //   if (binary_records.empty())
 //     return;
-// 
+//
 //   Table::Snapshot_Record snapshot;
-// 
+//
 //   for (const auto &record : binary_records) {
 //     ++records_count_;
 //     misc::print_progress(records_count_, total_records_);
-// 
+//
 //     // Calculate time components (optimized)
 //     uint16_t time_s = record.time_s;
 //     uint8_t current_hour = static_cast<uint8_t>(time_s / 3600);
@@ -143,7 +139,7 @@ void Decoder::ReverseDifferentialEncoding(std::vector<L1::Snapshot> &records) {
 //               << ", direction: " << static_cast<int>(record.direction)
 //               << "\n";
 // #endif
-// 
+//
 //     // Convert to Snapshot_Record
 //     snapshot.year = year;
 //     snapshot.month = month;
@@ -276,6 +272,7 @@ void Decoder::ParseAsset(const std::string &asset_code,
                          const std::string &snapshot_dir,
                          const std::vector<std::string> &month_folders,
                          const std::string &output_dir) {
+  (void)output_dir;
   // auto start_time = std::chrono::high_resolution_clock::now();
 
   // Pre-calculate total records for progress tracking

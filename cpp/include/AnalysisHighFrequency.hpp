@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <bitset>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -9,18 +10,18 @@
 #include <iomanip>
 #include <iostream>
 #include <memory_resource>
-#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
 
-#include "define/MemPool.hpp"
 #include "codec/L2_DataType.hpp"
-// #include "math/sample/ResampleRunBar.hpp"
+#include "define/MemPool.hpp"
+#include "features/backend/FeaturesConfig.hpp"
+#include "math/sample/ResampleRunBar.hpp"
 
 #define PRINT_DEBUG 0
-#define PRINT_BOOK 1
-#define SINGLE_DAY 1
+#define PRINT_BOOK 0
+#define SINGLE_DAY 0
 
 // 我们采用方案2: 抵扣模型 (simple & robust)
 //
@@ -30,7 +31,7 @@
 // 3. snapshot数据为异步 (对于沪深两市, 快照的时间点不确定, 并不是0ms对齐的, 这意味着快照只能作为大规模偏移后的模糊矫正)
 //
 //========================================================================================
-// implementation-1(reorder-queue-based):
+// 方案-1(reorder-queue-based):
 // - MAKER订单(挂单)可以立即执行当且仅当:
 //   1. (假设已满足) 对应的maker_id 在lob中不存在
 //   2. (需要检查)   目标订单价确认在当前lob本方价格中 (交易所会自动将对手方maker单拆分为taker+maker, 但是不保证行情顺序)
@@ -51,7 +52,7 @@
 //   4. (需要检查)   撤单数量 >= 当前lob的剩余挂单数量 (保证成交已经完成)
 //
 //========================================================================================
-// implementation-2(deduction based):
+// 方案-2(deduction-based):
 // - MAKER订单(挂单)立即执行:
 //   1. 大概率对应maker_id 在lob中不存在, 那么创建对应PriceLevel和挂单
 //   2. 因为乱序, 小概率已经存在挂单量为负的挂单(吃单或撤单), 此时order订单不是taker或者cancel id,
@@ -74,29 +75,23 @@
 //   6. 真实bid TOB被定义为最近的主动成交的卖方taker单对手价格(维护简单, 如果吃空对手maker, 则自动向远离mid price的price level顺延)
 //   7. 我们不假设ask TOB和bid TOB的高低关系, 这样易于维护, 并且99%的时间TOB都是准确的(乱序时间很短)
 
+// 对于价格档位, 用位图 + 缓存向量的数据结构
+// 对于订单, 用(内存连续)向量 + 哈希表的数据结构
+
 // LOB reconstruction engine configuration
 // static constexpr size_t EXPECTED_LEVEL_NUM = 200;
 static constexpr size_t EXPECTED_QUEUE_SIZE = 128;
 
 static constexpr size_t CACHE_LINE_SIZE = 64;
 
-static constexpr float HASH_LOAD_FACTOR = 0.2f; // Ultra-low load factor
+static constexpr float HASH_LOAD_FACTOR = 0.4f; // Ultra-low load factor
 
 // Core types
 using Price = uint16_t;
 using Quantity = int32_t; // Supports negative quantities for deduction model
 using OrderId = uint32_t;
 
-namespace OrderType {
-constexpr uint8_t MAKER = 0;
-constexpr uint8_t CANCEL = 1;
-constexpr uint8_t TAKER = 3;
-} // namespace OrderType
-
-namespace OrderDirection {
-constexpr uint8_t BID = 0;
-// constexpr uint8_t ASK = 1;
-} // namespace OrderDirection
+static constexpr uint32_t PRICE_RANGE_SIZE = static_cast<uint32_t>(UINT16_MAX) + 1; // 0-65535
 
 // Ultra-compact order entry - cache-optimized
 struct alignas(8) Order {
@@ -191,7 +186,10 @@ private:
   // Simple unified price level storage
   std::deque<Level> level_storage_;                 // Container for all price levels
   std::unordered_map<Price, Level *> price_levels_; // Simple price -> level mapping
-  std::set<Price> visible_prices_;                  // Ordered prices with positive visible quantity
+  // High-performance visible price tracking - O(1) operations
+  std::bitset<PRICE_RANGE_SIZE> visible_price_bitmap_; // Fast existence check: O(1)
+  mutable std::vector<Price> cached_visible_prices_;   // Sorted cache for iteration
+  mutable bool cache_dirty_ = false;                   // Cache invalidation flag
 
   // Simple TOB tracking - just maintain the key prices
   mutable Price best_bid_price_ = 0, best_ask_price_ = 0;
@@ -207,18 +205,26 @@ private:
   uint32_t curr_timestamp_ = 0;
   bool is_new_timestamp_ = false;
 
+  // Hot path temporary variable cache to reduce allocation overhead
+  mutable Quantity signed_volume_;
+  mutable OrderId target_id_;
+  mutable Price effective_price_;
+
+  // Resampling components
+  ResampleRunBar resampler_;
+
   // ========================================================================================
   // SIMPLE LEVEL MANAGEMENT
   // ========================================================================================
 
   // Simple price level lookup
-  [[gnu::hot]] Level *find_level(Price price) const {
+  [[gnu::hot, gnu::always_inline]] inline Level *find_level(Price price) const {
     auto level_iterator = price_levels_.find(price);
     return (level_iterator != price_levels_.end()) ? level_iterator->second : nullptr;
   }
 
   // Create new price level
-  Level *create_level(Price price) {
+  [[gnu::hot, gnu::always_inline]] Level *create_level(Price price) {
     level_storage_.emplace_back(price);
     Level *new_level = &level_storage_.back();
     price_levels_[price] = new_level;
@@ -226,10 +232,10 @@ private:
   }
 
   // Remove empty level
-  void remove_level(Level *level_to_remove, bool erase_visible = true) {
+  [[gnu::hot, gnu::always_inline]] void remove_level(Level *level_to_remove, bool erase_visible = true) {
     price_levels_.erase(level_to_remove->price);
     if (erase_visible) {
-      visible_prices_.erase(level_to_remove->price);
+      remove_visible_price(level_to_remove->price);
     }
   }
 
@@ -246,58 +252,91 @@ private:
     tob_invalid_ = false;
   }
 
-  // Maintain visible price ordering after any level total change
-  void update_visible_price(Level *level) {
+  // High-performance visible price cache management
+  [[gnu::hot, gnu::always_inline]] inline void refresh_cache_if_dirty() const {
+    if (!cache_dirty_)
+      return;
+
+    cached_visible_prices_.clear();
+    for (uint32_t price_u32 = 0; price_u32 < PRICE_RANGE_SIZE; ++price_u32) {
+      Price price = static_cast<Price>(price_u32);
+      if (visible_price_bitmap_[price]) {
+        cached_visible_prices_.push_back(price);
+      }
+    }
+    cache_dirty_ = false;
+  }
+
+  // O(1) visible price addition
+  [[gnu::hot, gnu::always_inline]] inline void add_visible_price(Price price) {
+    if (!visible_price_bitmap_[price]) {
+      visible_price_bitmap_.set(price);
+      cache_dirty_ = true;
+    }
+  }
+
+  // O(1) visible price removal
+  [[gnu::hot, gnu::always_inline]] inline void remove_visible_price(Price price) {
+    if (visible_price_bitmap_[price]) {
+      visible_price_bitmap_.reset(price);
+      cache_dirty_ = true;
+    }
+  }
+
+  // Maintain visible price ordering after any level total change - now O(1)!
+  [[gnu::hot, gnu::always_inline]] inline void update_visible_price(Level *level) {
     if (level->has_visible_quantity()) {
-      visible_prices_.insert(level->price);
+      add_visible_price(level->price);
     } else {
-      visible_prices_.erase(level->price);
+      remove_visible_price(level->price);
     }
   }
 
-  // Find next ask level strictly above a given price with visible quantity
+  // Find next ask level strictly above a given price with visible quantity - O(n) worst case, but typically very fast
   Price next_ask_above(Price from_price) const {
-    auto it = visible_prices_.upper_bound(from_price);
-    return it == visible_prices_.end() ? 0 : *it;
-  }
-
-  // Find next bid level strictly below a given price with visible quantity
-  Price next_bid_below(Price from_price) const {
-    auto it = visible_prices_.lower_bound(from_price);
-    if (it == visible_prices_.begin())
-      return 0;
-    if (it == visible_prices_.end() || *it >= from_price) {
-      if (it == visible_prices_.begin())
-        return 0;
-      --it;
-      return *it;
+    for (uint32_t price_u32 = static_cast<uint32_t>(from_price) + 1; price_u32 < PRICE_RANGE_SIZE; ++price_u32) {
+      Price price = static_cast<Price>(price_u32);
+      if (visible_price_bitmap_[price]) {
+        return price;
+      }
     }
-    --it;
-    return *it;
+    return 0;
   }
 
-  // Find minimum price with visible quantity
+  // Find next bid level strictly below a given price with visible quantity - O(n) worst case, but typically very fast
+  Price next_bid_below(Price from_price) const {
+    if (from_price == 0)
+      return 0;
+    for (Price price = from_price - 1; price != UINT16_MAX; --price) {
+      if (visible_price_bitmap_[price]) {
+        return price;
+      }
+    }
+    return 0;
+  }
+
+  // Find minimum price with visible quantity - O(n) worst case, but cache-friendly
   Price min_visible_price() const {
-    return visible_prices_.empty() ? 0 : *visible_prices_.begin();
+    refresh_cache_if_dirty();
+    return cached_visible_prices_.empty() ? 0 : cached_visible_prices_.front();
   }
 
-  // Find maximum price with visible quantity
+  // Find maximum price with visible quantity - O(n) worst case, but cache-friendly
   Price max_visible_price() const {
-    return visible_prices_.empty() ? 0 : *visible_prices_.rbegin();
+    refresh_cache_if_dirty();
+    return cached_visible_prices_.empty() ? 0 : cached_visible_prices_.back();
   }
-
-  // judge_side removed: side is not inferred/used in processing
 
   // Simplified unified volume calculation
-  [[gnu::hot]] Quantity get_signed_volume(const L2::Order &order) const {
-    const bool is_bid = (order.order_dir == OrderDirection::BID);
+  [[gnu::hot, gnu::always_inline]] inline Quantity get_signed_volume(const L2::Order &order) const {
+    const bool is_bid = (order.order_dir == L2::OrderDirection::BID);
 
     switch (order.order_type) {
-    case OrderType::MAKER:
+    case L2::OrderType::MAKER:
       return is_bid ? +order.volume : -order.volume;
-    case OrderType::CANCEL:
+    case L2::OrderType::CANCEL:
       return is_bid ? -order.volume : +order.volume;
-    case OrderType::TAKER:
+    case L2::OrderType::TAKER:
       return is_bid ? +order.volume : -order.volume;
     default:
       return 0;
@@ -305,15 +344,15 @@ private:
   }
 
   // Simplified unified target ID lookup
-  [[gnu::hot]] OrderId get_target_id(const L2::Order &order) const {
-    const bool is_bid = (order.order_dir == OrderDirection::BID);
+  [[gnu::hot, gnu::always_inline]] inline OrderId get_target_id(const L2::Order &order) const {
+    const bool is_bid = (order.order_dir == L2::OrderDirection::BID);
 
     switch (order.order_type) {
-    case OrderType::MAKER:
+    case L2::OrderType::MAKER:
       return is_bid ? order.bid_order_id : order.ask_order_id;
-    case OrderType::CANCEL:
+    case L2::OrderType::CANCEL:
       return is_bid ? order.bid_order_id : order.ask_order_id;
-    case OrderType::TAKER:
+    case L2::OrderType::TAKER:
       return is_bid ? order.ask_order_id : order.bid_order_id;
     default:
       return 0;
@@ -321,8 +360,11 @@ private:
   }
 
   // Unified order processing core logic - now accepts lookup iterator from caller
-  [[gnu::hot]] bool apply_volume_change(OrderId target_id, Price price, Quantity signed_volume,
-                                        decltype(order_lookup_.find(target_id)) order_lookup_iterator) {
+  [[gnu::hot, gnu::always_inline]] bool apply_volume_change(
+      OrderId target_id,
+      Price price,
+      Quantity signed_volume,
+      decltype(order_lookup_.find(target_id)) order_lookup_iterator) {
 
     if (order_lookup_iterator != order_lookup_.end()) {
       // Order exists - modify it
@@ -387,8 +429,8 @@ private:
   }
 
   // TOB update logic for taker orders
-  [[gnu::hot]] void update_tob_after_trade(const L2::Order &order, bool was_fully_consumed, Price trade_price) {
-    const bool is_bid = (order.order_dir == OrderDirection::BID);
+  [[gnu::hot, gnu::always_inline]] inline void update_tob_after_trade(const L2::Order &order, bool was_fully_consumed, Price trade_price) {
+    const bool is_bid = (order.order_dir == L2::OrderDirection::BID);
 
     if (was_fully_consumed) {
       // Level was emptied - advance TOB
@@ -418,32 +460,36 @@ public:
 
   // Main order processing entry point - with zero price handling and pending order logic
   [[gnu::hot]] bool process(const L2::Order &order) {
-
     curr_timestamp_ = (order.hour << 24) | (order.minute << 16) | (order.second << 8) | order.millisecond;
     is_new_timestamp_ = curr_timestamp_ != prev_timestamp_;
     prev_timestamp_ = curr_timestamp_;
-    print_book();
+    print_book(); // print before the new timestamp (such that current snapshot is a valid sample)
 
-    auto result = update_lob(order);
+    // Process resampling
+    if (resampler_.process(order)) {
+      // std::cout << "[RESAMPLE] Bar formed at " << format_time() << std::endl;
+    }
+
+    bool result = update_lob(order);
     return result;
   };
 
-  [[gnu::hot]] bool update_lob(const L2::Order &order) {
+  [[gnu::hot, gnu::always_inline]] bool update_lob(const L2::Order &order) {
     // 1. Get signed volume and target ID using simple lookup functions
-    Quantity signed_volume = get_signed_volume(order);
-    OrderId target_id = get_target_id(order);
-    if (signed_volume == 0 || target_id == 0) [[unlikely]]
+    signed_volume_ = get_signed_volume(order);
+    target_id_ = get_target_id(order);
+    if (signed_volume_ == 0 || target_id_ == 0) [[unlikely]]
       return false;
 
     // 2. Perform lookup for the incoming order
-    auto order_lookup_iterator = order_lookup_.find(target_id);
-    Price effective_price = order.price;
+    auto order_lookup_iterator = order_lookup_.find(target_id_);
+    effective_price_ = order.price;
 
     // 3. Handle zero price case - strategically ignore if not found
-    if (order.price == 0) {
+    if (order.price == 0) [[unlikely]] {
       if (order_lookup_iterator != order_lookup_.end()) {
         // Found target, use its price
-        effective_price = order_lookup_iterator->second.level->price;
+        effective_price_ = order_lookup_iterator->second.level->price;
       } else {
         // only very few out-of-order orders will get here (it is not worth it to implement a pending orders mechanism)
         // use snapshots to synchronize
@@ -452,17 +498,17 @@ public:
     }
 
     // 4. Process order normally (either non-zero price or resolved zero price)
-    bool was_fully_consumed = apply_volume_change(target_id, effective_price, signed_volume, order_lookup_iterator);
+    bool was_fully_consumed = apply_volume_change(target_id_, effective_price_, signed_volume_, order_lookup_iterator);
 
     // 5. Order-type specific post-processing
-    if (order.order_type == OrderType::TAKER) {
-      update_tob_after_trade(order, was_fully_consumed, effective_price);
+    if (order.order_type == L2::OrderType::TAKER) {
+      update_tob_after_trade(order, was_fully_consumed, effective_price_);
     }
     return true;
-  }
+  };
 
   // ========================================================================================
-  // SIMPLE MARKET DATA ACCESS
+  // DATA ACCESS
   // ========================================================================================
 
   // Get best bid price
@@ -477,48 +523,22 @@ public:
     return best_ask_price_;
   }
 
-  // Get best bid quantity
-  [[gnu::hot]] Quantity best_bid_qty() const {
-    update_tob();
-    if (best_bid_price_ == 0)
-      return 0;
-
-    Level *level = find_level(best_bid_price_);
-    return level ? level->net_quantity : 0;
-  }
-
-  // Get best ask quantity
-  [[gnu::hot]] Quantity best_ask_qty() const {
-    update_tob();
-    if (best_ask_price_ == 0)
-      return 0;
-
-    Level *level = find_level(best_ask_price_);
-    return level ? level->net_quantity : 0;
-  }
-
-  // Calculate bid-ask spread
-  [[gnu::hot]] Price spread() const {
-    update_tob();
-    return (best_bid_price_ && best_ask_price_) ? best_ask_price_ - best_bid_price_ : 0;
-  }
-
   // ========================================================================================
   // UTILITIES
   // ========================================================================================
 
   // Display current market depth
-  void print_book() const {
+  void inline print_book() const {
     if (is_new_timestamp_ && PRINT_BOOK) {
       std::ostringstream book_output;
       book_output << "[" << format_time() << "] ";
 
-      constexpr size_t MAX_DISPLAY_LEVELS = 20;
-      constexpr size_t LEVEL_WIDTH = 10;
+      constexpr size_t MAX_DISPLAY_LEVELS = 10;
+      constexpr size_t LEVEL_WIDTH = 12;
 
       update_tob();
 
-      // Collect ask levels (price <= best_ask or no clear TOB)
+      // Collect ask levels
       std::vector<std::pair<Price, Quantity>> ask_data;
       for_each_visible_ask([&](Price price, Quantity quantity) {
         ask_data.emplace_back(price, quantity);
@@ -561,9 +581,9 @@ public:
       std::cout << book_output.str() << "\n";
     }
 #if PRINT_DEBUG
-    char order_type_char = (order.order_type == OrderType::MAKER) ? 'M' : (order.order_type == OrderType::CANCEL) ? 'C'
-                                                                                                                  : 'T';
-    char order_dir_char = (order.order_dir == OrderDirection::BID) ? 'B' : 'S';
+    char order_type_char = (order.order_type == L2::OrderType::MAKER) ? 'M' : (order.order_type == L2::OrderType::CANCEL) ? 'C'
+                                                                                                                          : 'T';
+    char order_dir_char = (order.order_dir == L2::OrderDirection::BID) ? 'B' : 'S';
     std::cout << "[" << format_time() << "] " << " ID: " << get_target_id(order) << " Type: " << order_type_char << " Direction: " << order_dir_char << " Price: " << order.price << " Volume: " << order.volume << std::endl;
 #endif
   }
@@ -578,12 +598,17 @@ public:
     level_storage_.clear();
     order_lookup_.clear();
     order_memory_pool_.reset();
-    visible_prices_.clear();
+    visible_price_bitmap_.reset(); // O(1) clear all bits
+    cached_visible_prices_.clear();
+    cache_dirty_ = false;
     best_bid_price_ = best_ask_price_ = 0;
     tob_invalid_ = true;
     curr_timestamp_ = 0;
     prev_timestamp_ = 0;
     is_new_timestamp_ = false;
+    signed_volume_ = 0;
+    target_id_ = 0;
+    effective_price_ = 0;
 
     if (SINGLE_DAY) {
       exit(1);
@@ -594,66 +619,52 @@ public:
   // MARKET DEPTH ITERATION - SIMPLE VERSION
   // ========================================================================================
 
-  // Iterate through bid levels (price >= best_bid_price_)
+  // Iterate through bid levels (price >= best_bid_price_) - optimized with cache
   template <typename Func>
   void for_each_visible_bid(Func &&callback_function, size_t max_levels = 5) const {
     update_tob();
+    refresh_cache_if_dirty();
 
-    // Collect bid levels
-    std::vector<std::pair<Price, Level *>> bid_levels;
-    if (best_bid_price_ == 0)
+    if (best_bid_price_ == 0 || cached_visible_prices_.empty())
       return;
-    auto it = visible_prices_.upper_bound(best_bid_price_);
-    while (it != visible_prices_.begin() && bid_levels.size() < max_levels) {
+
+    // Find position of best_bid_price_ in sorted cache
+    auto it = std::upper_bound(cached_visible_prices_.begin(), cached_visible_prices_.end(), best_bid_price_);
+
+    size_t levels_processed = 0;
+    // Iterate backwards from best_bid position for descending price order
+    while (it != cached_visible_prices_.begin() && levels_processed < max_levels) {
       --it;
       Price price = *it;
       Level *level = find_level(price);
       if (level && level->has_visible_quantity()) {
-        bid_levels.emplace_back(price, level);
+        callback_function(price, level->net_quantity);
+        ++levels_processed;
       }
-    }
-
-    // Sort by price descending (highest bid first)
-    std::sort(bid_levels.begin(), bid_levels.end(),
-              [](const auto &a, const auto &b) { return a.first > b.first; });
-
-    size_t levels_processed = 0;
-    for (const auto &[price, level] : bid_levels) {
-      if (levels_processed >= max_levels)
-        break;
-      callback_function(price, level->net_quantity);
-      ++levels_processed;
     }
   }
 
-  // Iterate through ask levels (price <= best_ask_price_)
+  // Iterate through ask levels (price <= best_ask_price_) - optimized with cache
   template <typename Func>
   void for_each_visible_ask(Func &&callback_function, size_t max_levels = 5) const {
     update_tob();
+    refresh_cache_if_dirty();
 
-    // Collect ask levels
-    std::vector<std::pair<Price, Level *>> ask_levels;
-    if (best_ask_price_ == 0)
+    if (best_ask_price_ == 0 || cached_visible_prices_.empty())
       return;
-    auto it = visible_prices_.lower_bound(best_ask_price_);
-    for (; it != visible_prices_.end() && ask_levels.size() < max_levels; ++it) {
+
+    // Find position of best_ask_price_ in sorted cache
+    auto it = std::lower_bound(cached_visible_prices_.begin(), cached_visible_prices_.end(), best_ask_price_);
+
+    size_t levels_processed = 0;
+    // Iterate forward from best_ask position for ascending price order
+    for (; it != cached_visible_prices_.end() && levels_processed < max_levels; ++it) {
       Price price = *it;
       Level *level = find_level(price);
       if (level && level->has_visible_quantity()) {
-        ask_levels.emplace_back(price, level);
+        callback_function(price, level->net_quantity);
+        ++levels_processed;
       }
-    }
-
-    // Sort by price ascending (lowest ask first)
-    std::sort(ask_levels.begin(), ask_levels.end(),
-              [](const auto &a, const auto &b) { return a.first < b.first; });
-
-    size_t levels_processed = 0;
-    for (const auto &[price, level] : ask_levels) {
-      if (levels_processed >= max_levels)
-        break;
-      callback_function(price, level->net_quantity);
-      ++levels_processed;
     }
   }
 

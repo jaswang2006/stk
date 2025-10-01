@@ -4,175 +4,119 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
-#include <limits>
 #include <numeric>
 #include <vector>
 
 // Project headers
-#include "define/CBuffer.hpp"
-#include "define/Dtype.hpp"
+#include "codec/L2_DataType.hpp"
 
-template <size_t N> // compiler auto derive
 class ResampleRunBar {
 public:
-  explicit ResampleRunBar(
-      CBuffer<uint16_t, N> *snapshot_delta_t,
-      CBuffer<float, N> *snapshot_prices,
-      CBuffer<float, N> *snapshot_volumes,
-      CBuffer<float, N> *snapshot_turnovers,
-      CBuffer<uint8_t, N> *snapshot_directions,
-      CBuffer<uint16_t, N> *bar_timedelta,
-      CBuffer<float, N> *bar_open,
-      CBuffer<float, N> *bar_high,
-      CBuffer<float, N> *bar_low,
-      CBuffer<float, N> *bar_close,
-      CBuffer<float, N> *bar_vwap)
-      : snapshot_delta_t_(snapshot_delta_t),
-        snapshot_prices_(snapshot_prices),
-        snapshot_volumes_(snapshot_volumes),
-        snapshot_turnovers_(snapshot_turnovers),
-        snapshot_directions_(snapshot_directions),
-        bar_timedelta_(bar_timedelta),
-        bar_open_(bar_open),
-        bar_high_(bar_high),
-        bar_low_(bar_low),
-        bar_close_(bar_close),
-        bar_vwap_(bar_vwap) {
-    daily_snapshot_label.reserve(int(3600 / MIN_DATA_BASE_PERIOD * TRADE_HRS_PER_DAY));
-    daily_snapshot_volume.reserve(int(3600 / MIN_DATA_BASE_PERIOD * TRADE_HRS_PER_DAY));
+  explicit ResampleRunBar() {
+    daily_labels.reserve(expected_num_daily_samples);
+    daily_volumes.reserve(expected_num_daily_samples);
   }
 
-  inline bool process(const Table::Snapshot_Record &snapshot, Table::RunBar_Record &bar) {
-    // ---- Label Calculation ----
-    label_long = snapshot_directions_->back() == 0;
-    buy_vol = label_long ? static_cast<float>(snapshot_volumes_->back()) : 0.0f;
-    sell_vol = label_long ? 0.0f : static_cast<float>(snapshot_volumes_->back());
+  [[gnu::hot, gnu::always_inline]] inline bool process(const L2::Order &order) {
+    // Fast early exit for non-taker orders
+    if (order.order_type != L2::OrderType::TAKER)
+      return false;
 
-    // ---- New Day Handling ----
-    auto date = snapshot.day;
-    if (date != prev_date) [[unlikely]] {
-      if (!daily_snapshot_label.empty()) [[likely]] {
+    // ---- Optimized Label and Volume Calculation ----
+    const bool is_bid = order.order_dir == L2::OrderDirection::BID;
+    const uint32_t volume = order.volume;
+
+    // Direct accumulation without intermediate variables
+    if (is_bid) {
+      cumm_buy += volume;
+      label_long = true;
+    } else {
+      cumm_sell += volume;
+      label_long = false;
+    }
+
+    // ---- Hot Path: Check Bar Formation First ----
+    const uint32_t theta = std::max(cumm_buy, cumm_sell);
+    const float threshold = std::max(ema_thresh, 0.0f);
+
+    if (theta < threshold)
+      return false; // Most common case - no bar formation
+
+    // ---- Time Guard: Prevent Too Frequent Sampling ----
+    const uint32_t current_timestamp = (static_cast<uint32_t>(order.hour) << 24) |
+                                       (static_cast<uint32_t>(order.minute) << 16) |
+                                       (static_cast<uint32_t>(order.second) << 8) |
+                                       static_cast<uint32_t>(order.millisecond);
+    const uint32_t time_diff_seconds = (current_timestamp >> 8) - (last_sample_timestamp >> 8);
+
+    if (time_diff_seconds < L2::RESAMPLE_MIN_PERIOD) [[unlikely]]
+      return false; // Time guard prevents sampling
+
+    // ---- Bar Formation Confirmed - Reset State ----
+    last_sample_timestamp = current_timestamp;
+    cumm_buy = 0;
+    cumm_sell = 0;
+    ++daily_bar_count; // Increment daily bar counter
+
+    // ---- New Day Processing ----
+    const uint8_t hour = order.hour;
+    if (hour == 9 && prev_hour != 9) [[unlikely]] {
+      // std::cout << "[DAILY STATS] Previous day formed " << daily_bar_count << " bars" << std::endl;
+      daily_bar_count = 1;
+
+      if (!daily_labels.empty()) [[likely]] {
         daily_thresh = find_run_threshold();
-        ema_thresh = (ema_thresh < 0.0f) ? daily_thresh : alpha * daily_thresh + (1 - alpha) * ema_thresh;
+        ema_thresh = (ema_thresh < 0.0f) ? daily_thresh : alpha * daily_thresh + (1.0f - alpha) * ema_thresh;
       }
-      daily_snapshot_label.clear();
-      daily_snapshot_volume.clear();
-      daily_bar_count = 0;
-      prev_date = date;
+      daily_labels.clear();
+      daily_volumes.clear();
     }
+    prev_hour = hour;
 
-    // ---- Update OHLC ----
-    ohlc_open = (ohlc_open == 0.0f) ? snapshot_prices_->back() : ohlc_open;
-    ohlc_high = std::max(ohlc_high, snapshot_prices_->back());
-    ohlc_low = std::min(ohlc_low, snapshot_prices_->back());
-    ohlc_close = snapshot_prices_->back();
-    daily_snapshot_label.push_back(label_long);
-    daily_snapshot_volume.push_back(snapshot_volumes_->back());
+    // Add to daily tracking (after bar formation to reduce overhead on hot path)
+    daily_labels.push_back(label_long);
+    daily_volumes.push_back(volume);
 
-    // ---- Accumulate Volumes ----
-    cumm_tdelta += snapshot_delta_t_->back();
-    cumm_buy += buy_vol;
-    cumm_sell += sell_vol;
-    cumm_vol += snapshot_volumes_->back();
-    cumm_turnover += snapshot_turnovers_->back();
-
-    // ---- Check Bar Formation ----
-    float theta = std::max(cumm_buy, cumm_sell);
-    float threshold = (ema_thresh > 0) ? ema_thresh : 0.0f;
-
-    if (theta >= threshold) [[unlikely]] {
-      bar_timedelta_->push_back(cumm_tdelta);
-      bar_open_->push_back(ohlc_open);
-      bar_high_->push_back(ohlc_high);
-      bar_low_->push_back(ohlc_low);
-      bar_close_->push_back(ohlc_close);
-      if (cumm_vol > 0) [[likely]] {
-        bar_vwap_->push_back(cumm_turnover / cumm_vol);
-      } else {
-        bar_vwap_->push_back(ohlc_close);
-      }
-
-      // Reset state
-      ohlc_open = snapshot_prices_->back();
-      ohlc_high = snapshot_prices_->back();
-      ohlc_low = snapshot_prices_->back();
-      cumm_buy = cumm_sell = cumm_vol = cumm_turnover = 0.0f;
-      cumm_tdelta = 0;
-      daily_bar_count++;
-
-      bar.year = snapshot.year;
-      bar.month = snapshot.month;
-      bar.day = snapshot.day;
-      bar.hour = snapshot.hour;
-      bar.minute = snapshot.minute;
-      bar.second = snapshot.second;
-      bar.open = bar_open_->back();
-      bar.high = bar_high_->back();
-      bar.low = bar_low_->back();
-      bar.close = bar_close_->back();
-      bar.vwap = bar_vwap_->back();
-      return true;
-    }
-
-    return false;
+    return true;
   }
 
 private:
-  int p_ori = MIN_DATA_BASE_PERIOD; // original sampling period (seconds)
-  int p_tar = RESAMPLE_BASE_PERIOD; // target bar length (seconds)
-  int expected_num_daily_samples = int(3600 * TRADE_HRS_PER_DAY / p_tar);
+  int p_tar = L2::RESAMPLE_TARGET_PERIOD; // target bar length (seconds)
+  int expected_num_daily_samples = int(3600 * L2::RESAMPLE_TRADE_HRS_PER_DAY / p_tar);
   int tolerance = static_cast<int>(expected_num_daily_samples * 0.05);
 
-  CBuffer<uint16_t, N> *snapshot_delta_t_;
-  CBuffer<float, N> *snapshot_prices_;
-  CBuffer<float, N> *snapshot_volumes_;
-  CBuffer<float, N> *snapshot_turnovers_;
-  CBuffer<uint8_t, N> *snapshot_directions_;
-
-  CBuffer<uint16_t, N> *bar_timedelta_;
-  CBuffer<float, N> *bar_open_;
-  CBuffer<float, N> *bar_high_;
-  CBuffer<float, N> *bar_low_;
-  CBuffer<float, N> *bar_close_;
-  CBuffer<float, N> *bar_vwap_;
+  std::vector<bool> daily_labels;
+  std::vector<uint32_t> daily_volumes;
 
   bool label_long;
-  float buy_vol = 0.0f;
-  float sell_vol = 0.0f;
 
-  const float ema_days = RESAMPLE_EMA_DAYS;
+  const float ema_days = L2::RESAMPLE_EMA_DAYS_PERIOD;
   const float alpha = 2.0f / (ema_days + 1);
-  float ema_thresh = -1.0f;
+  float ema_thresh = L2::RESAMPLE_INIT_VOLUME_THD;
 
   float daily_thresh = 0.0f;
-  int daily_bar_count = 0;
-  uint8_t prev_date = 255;
+  uint8_t prev_hour = 255;
 
-  uint16_t cumm_tdelta = 0;
-  float cumm_buy = 0.0f;
-  float cumm_sell = 0.0f;
-  float cumm_vol = 0.0f;
-  float cumm_turnover = 0.0f;
+  uint32_t cumm_buy = 0;
+  uint32_t cumm_sell = 0;
 
-  float ohlc_open = 0.0f;
-  float ohlc_high = -std::numeric_limits<float>::max();
-  float ohlc_low = std::numeric_limits<float>::max();
-  float ohlc_close = 0.0f;
+  // Time tracking for sampling frequency control
+  uint32_t last_sample_timestamp = 0;
 
-  std::vector<bool> daily_snapshot_label;
-  std::vector<float> daily_snapshot_volume;
+  // Daily statistics
+  uint32_t daily_bar_count = 0;
 
   inline int compute_sample_count(float x) {
     float acc_pos = 0.0f;
     float acc_neg = 0.0f;
     int num_daily_samples = 0;
-    size_t n = daily_snapshot_volume.size();
+    size_t n = daily_volumes.size();
 
     for (size_t i = 0; i < n; ++i) {
-      if (daily_snapshot_label[i])
-        acc_pos += daily_snapshot_volume[i];
+      if (daily_labels[i])
+        acc_pos += daily_volumes[i];
       else
-        acc_neg += daily_snapshot_volume[i];
+        acc_neg += daily_volumes[i];
 
       if (acc_pos >= x || acc_neg >= x) {
         ++num_daily_samples;
@@ -184,12 +128,12 @@ private:
   }
 
   inline float find_run_threshold() {
-    if (daily_snapshot_label.empty()) [[unlikely]]
+    if (daily_labels.empty()) [[unlikely]]
       return 0.0f;
 
     // use accum for safety
-    float x_max = std::accumulate(daily_snapshot_volume.begin(), daily_snapshot_volume.end(), 0.0f);
-    float x_min = *std::min_element(daily_snapshot_volume.begin(), daily_snapshot_volume.end());
+    float x_max = std::accumulate(daily_volumes.begin(), daily_volumes.end(), 0.0f);
+    float x_min = *std::min_element(daily_volumes.begin(), daily_volumes.end());
 
     int max_iter = 20;
     float x_mid = 0.0f;
@@ -197,7 +141,7 @@ private:
       x_mid = 0.5f * (x_min + x_max);
       int num_daily_samples = compute_sample_count(x_mid);
 
-      if (std::abs(num_daily_samples - expected_num_daily_samples) <= tolerance || (x_max - x_min) < 100) {
+      if (std::abs(num_daily_samples - expected_num_daily_samples) <= tolerance || (x_max - x_min) < 100.0f) {
         return x_mid;
       }
 
