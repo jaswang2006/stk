@@ -85,36 +85,68 @@ uint32_t BinaryEncoder_L2::parse_time_to_ms(uint32_t time_int) {
 }
 
 inline uint32_t BinaryEncoder_L2::parse_price_to_fen(const std::string &price_str) {
-  if (price_str.empty() || price_str[0] == ' ' || price_str[0] == '\0') {
+  // Handle NaN values: empty string, space (\x20), or null character (\x00)
+  if (price_str.empty() || price_str[0] == ' ' || price_str[0] == '\0' || price_str == "0") {
     return 0;
   }
+  // Trim leading/trailing whitespace
+  size_t start = price_str.find_first_not_of(" \t\n\r\0");
+  if (start == std::string::npos) return 0;
+  size_t end = price_str.find_last_not_of(" \t\n\r\0");
+  std::string trimmed = price_str.substr(start, end - start + 1);
+  if (trimmed.empty() || trimmed == "0") return 0;
+  
   // Optimized: Convert directly from CSV to 0.01 RMB units
   // CSV / 10000 / 0.01 = CSV / 100, avoiding floating point operations
-  return static_cast<uint32_t>(std::stoll(price_str) / 100);
+  return static_cast<uint32_t>(std::stoll(trimmed) / 100);
 }
 
 inline uint32_t BinaryEncoder_L2::parse_vwap_price(const std::string &price_str) {
-  if (price_str.empty() || price_str[0] == ' ' || price_str[0] == '\0') {
+  // Handle NaN values: empty string, space (\x20), or null character (\x00)
+  if (price_str.empty() || price_str[0] == ' ' || price_str[0] == '\0' || price_str == "0") {
     return 0;
   }
+  // Trim leading/trailing whitespace
+  size_t start = price_str.find_first_not_of(" \t\n\r\0");
+  if (start == std::string::npos) return 0;
+  size_t end = price_str.find_last_not_of(" \t\n\r\0");
+  std::string trimmed = price_str.substr(start, end - start + 1);
+  if (trimmed.empty() || trimmed == "0") return 0;
+  
   // Optimized: Convert directly from CSV to 0.001 RMB units
   // CSV / 10000 / 0.001 = CSV / 10, avoiding floating point operations
-  return static_cast<uint32_t>(std::stoll(price_str) / 10);
+  return static_cast<uint32_t>(std::stoll(trimmed) / 10);
 }
 
 inline uint32_t BinaryEncoder_L2::parse_volume_to_100shares(const std::string &volume_str) {
-  if (volume_str.empty() || volume_str[0] == ' ' || volume_str[0] == '\0') {
+  // Handle NaN values: empty string, space (\x20), or null character (\x00)
+  if (volume_str.empty() || volume_str[0] == ' ' || volume_str[0] == '\0' || volume_str == "0") {
     return 0;
   }
+  // Trim leading/trailing whitespace
+  size_t start = volume_str.find_first_not_of(" \t\n\r\0");
+  if (start == std::string::npos) return 0;
+  size_t end = volume_str.find_last_not_of(" \t\n\r\0");
+  std::string trimmed = volume_str.substr(start, end - start + 1);
+  if (trimmed.empty()) return 0;
+  
   // Convert from shares to 100-share units
-  return static_cast<uint32_t>(std::stoll(volume_str) / 100);
+  return static_cast<uint32_t>(std::stoll(trimmed) / 100);
 }
 
 inline uint64_t BinaryEncoder_L2::parse_turnover_to_fen(const std::string &turnover_str) {
+  // Handle NaN values: empty string, space (\x20), or null character (\x00)
   if (turnover_str.empty() || turnover_str[0] == ' ' || turnover_str[0] == '\0') {
     return 0;
   }
-  return static_cast<uint64_t>(std::stod(turnover_str));
+  // Trim leading/trailing whitespace
+  size_t start = turnover_str.find_first_not_of(" \t\n\r\0");
+  if (start == std::string::npos) return 0;
+  size_t end = turnover_str.find_last_not_of(" \t\n\r\0");
+  std::string trimmed = turnover_str.substr(start, end - start + 1);
+  if (trimmed.empty()) return 0;
+  
+  return static_cast<uint64_t>(std::stod(trimmed));
 }
 
 bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, std::vector<CSVSnapshot> &snapshots) {
@@ -231,23 +263,33 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<
       bool is_szse = is_szse_market(order.stock_code);
 
       if (is_szse) {
-        // SZSE: field[6] = 委托类型 (always '0', not used)
-        //       field[7] = 委托代码 (B/S for buy/sell)
-        order.order_type = '0'; // Always '0' for SZSE
-        if (!fields[7].empty()) {
+        // SZSE format changes by year:
+        // - 2023: 委托类型=2, 委托代码=B/S
+        // - 2024: 委托类型=0, 委托代码=B/S
+        // - 2025+: 委托类型=0(普通)/1(特殊)/U(撤单), 委托代码=B/S (撤单时为空或0)
+        
+        // field[6] = 委托类型
+        // field[7] = 委托代码 (B/S for buy/sell, empty/0 for cancellation in 2025+)
+        if (!fields[6].empty() && fields[6][0] != ' ' && fields[6][0] != '\0') {
+          order.order_type = fields[6][0];
+        } else {
+          order.order_type = '0'; // Default to normal order
+        }
+        
+        if (!fields[7].empty() && fields[7][0] != ' ' && fields[7][0] != '\0') {
           order.order_side = fields[7][0];
         } else {
-          order.order_side = ' ';
+          order.order_side = ' '; // Empty for cancellation
         }
       } else {
         // SSE: field[6] = 委托类型 (A:add, D:delete)
         //      field[7] = 委托代码 (B/S for buy/sell)
-        if (!fields[6].empty()) {
+        if (!fields[6].empty() && fields[6][0] != ' ' && fields[6][0] != '\0') {
           order.order_type = fields[6][0];
         } else {
           order.order_type = 'A'; // Default to add for SSE
         }
-        if (!fields[7].empty()) {
+        if (!fields[7].empty() && fields[7][0] != ' ' && fields[7][0] != '\0') {
           order.order_side = fields[7][0];
         } else {
           order.order_side = ' ';
@@ -384,11 +426,16 @@ inline uint8_t BinaryEncoder_L2::determine_order_type(char csv_order_type, char 
 
   // For orders
   if (is_szse) {
-    return 0; // maker (order) - SZSE always uses 0
+    // SZSE 2025+ format: 'U' indicates cancellation, '1' for special order, '0' or '2' for normal maker
+    // Older formats: '2' (2023) or '0' (2024) both mean normal order
+    if (csv_order_type == 'U' || csv_order_type == 'u') {
+      return 1; // cancel
+    }
+    return 0; // maker (normal order, including special orders treated as maker)
   } else {
-    // SSE: determine from order type
-    return (csv_order_type == 'A') ? 0 : (csv_order_type == 'D') ? 1
-                                                                 : 0;
+    // SSE: determine from order type (A:add/maker, D:delete/cancel)
+    return (csv_order_type == 'A' || csv_order_type == 'a') ? 0 : 
+           (csv_order_type == 'D' || csv_order_type == 'd') ? 1 : 0;
   }
 }
 

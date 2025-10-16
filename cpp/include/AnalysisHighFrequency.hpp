@@ -16,12 +16,46 @@
 
 #include "codec/L2_DataType.hpp"
 #include "define/MemPool.hpp"
-#include "features/backend/FeaturesConfig.hpp"
+// #include "features/backend/FeaturesConfig.hpp"
 #include "math/sample/ResampleRunBar.hpp"
 
-#define PRINT_DEBUG 0
-#define PRINT_BOOK 1
-#define SINGLE_DAY 1
+#define DEBUG_ORDER_PRINT 0
+#define DEBUG_BOOK_PRINT 1
+#define DEBUG_BOOK_BY_SECOND 1 // 0: by tick, 1: every 1 second, 2: every 2 seconds, ...
+#define DEBUG_BOOK_AS_AMOUNT 10 // 0: 手, 1: 1万元, 2: 2万元, 3: 3万元, ...
+#define DEBUG_SINGLE_DAY 1
+
+//========================================================================================
+// ORDER TYPE PROCESSING COMPARISON TABLE
+//========================================================================================
+//
+// ┌─────────────────────────┬──────────────────────────────┬──────────────────────────────┬──────────────────────────────┐
+// │ Dimension               │ MAKER (Creator·Consumer)     │ TAKER (Counterparty·TOB)     │ CANCEL (Self·Shenzhen no px) │
+// ├─────────────────────────┼──────────────────────────────┼──────────────────────────────┼──────────────────────────────┤
+// │ target_id               │ Self ID                      │ Counterparty ID (reversed!)  │ Self ID                      │
+// │ signed_volume           │ BID: +  ASK: -               │ BID: +  ASK: -               │ BID: -  ASK: +               │
+// ├─────────────────────────┼──────────────────────────────┼──────────────────────────────┼──────────────────────────────┤
+// │ order_lookup_ access    │ [Write] Create/Update Loc    │ [R/W] Update/Erase Loc       │ [R/W] Update/Erase Loc       │
+// │ pending_deductions_     │ [Read+Del] Check & flush     │ [Write] If not found         │ [Write] If not found         │
+// │ order_memory_pool_      │ [Alloc] Common               │ [-] Rare (out-of-order)      │ [-] Rare (out-of-order)      │
+// │ level_storage_          │ [Create] May create Level    │ [-] Never                    │ [-] Never                    │
+// │ visible_price_bitmap_   │ add/remove                   │ May remove                   │ May remove                   │
+// │ best_bid_/best_ask_     │ [-]                          │ [YES] Update TOB             │ [-]                          │
+// ├─────────────────────────┼──────────────────────────────┼──────────────────────────────┼──────────────────────────────┤
+// │ Level::net_quantity     │ Increase (+/-)               │ Decrease                     │ Decrease                     │
+// │ When order found        │ qty += signed_vol (merge)    │ qty += signed_vol (deduct C) │ qty += signed_vol (deduct S) │
+// │ When order NOT found    │ Flush pending + Create Order │ Enqueue to pending           │ Enqueue to pending           │
+// │ price=0 handling        │ Never happens                │ Use level->price             │ Common (SZ), use level->price│
+// ├─────────────────────────┼──────────────────────────────┼──────────────────────────────┼──────────────────────────────┤
+// │ Hash lookups            │ 2x (lookup + pending)        │ 1x (lookup)                  │ 1x (lookup)                  │
+// │ Execution steps         │ 1→2→4→5→6                    │ 1→2→3→5→6→7                  │ 1→2→3→5→6                    │
+// │ Typical probability     │ 95% create, 5% flush         │ 95% found, 5% pending        │ 85% found, 15% pending/no-px │
+// ├─────────────────────────┼──────────────────────────────┼──────────────────────────────┼──────────────────────────────┤
+// │ Core characteristics    │ Create order, consume pend,  │ Operate counterparty, prod   │ Operate self, produce pend,  │
+// │                         │ allocate memory (creator)    │ pend, update TOB (reversed!) │ no price (Shenzhen special)  │
+// └─────────────────────────┴──────────────────────────────┴──────────────────────────────┴──────────────────────────────┘
+//
+//========================================================================================
 
 // 我们采用方案2: 抵扣模型 (simple & robust)
 //
@@ -29,6 +63,7 @@
 // 1. 同一ms内(甚至不同时刻间), order之间可能为乱序
 // 2. order信息可能丢失
 // 3. snapshot数据为异步 (对于沪深两市, 快照的时间点不确定, 并不是0ms对齐的, 这意味着快照只能作为大规模偏移后的模糊矫正)
+// 4. 深交所2025年起撤单(U类型)无价格信息 (price=0)
 //
 //========================================================================================
 // 方案-1(reorder-queue-based):
@@ -52,19 +87,19 @@
 //   4. (需要检查)   撤单数量 >= 当前lob的剩余挂单数量 (保证成交已经完成)
 //
 //========================================================================================
-// 方案-2(deduction-based):
-// - MAKER订单(挂单)立即执行:
-//   1. 大概率对应maker_id 在lob中不存在, 那么创建对应PriceLevel和挂单
-//   2. 因为乱序, 小概率已经存在挂单量为负的挂单(吃单或撤单), 此时order订单不是taker或者cancel id,
-//      而是对应的maker_id, 此时如综合挂单量为0, 则直接清除此订单
-//   3. 维护 PriceLevel 的总剩余订单量
-// - TAKER订单(吃单)立即执行:
+// 方案-2(deduction-based with pending queue):
+// - MAKER订单(挂单)执行:
+//   1. 检查 pending_deductions_ 中是否有待抵扣的CANCEL/TAKER
+//   2. 如果有, 先抵扣 pending 的量, 如果完全抵消则不创建订单
+//   3. 创建对应PriceLevel和挂单, 或抵扣后仍有余量则创建部分挂单
+//   4. 维护 PriceLevel 的总剩余订单量
+// - TAKER订单(吃单)执行:
 //   1. 大概率maker单已经存在, 正常吃单, 如果执行后挂单量为0, 则直接清除此订单
-//   2. 因为乱序, 小概率maker单不存在, 此时根据maker id创建订单, 挂单量设置为负
+//   2. 因为乱序, 小概率maker单不存在, 此时将抵扣量放入 pending_deductions_, 等待MAKER到达后flush
 //   3. 维护 PriceLevel 的总剩余订单量
-// - CANCEL订单(撤单)立即执行:
+// - CANCEL订单(撤单)执行:
 //   1. 大概率maker单已经存在, 正常撤单, 如果执行后挂单量为0, 则直接清除此订单
-//   2. 因为乱序, 小概率maker单不存在, 此时根据maker id创建订单, 挂单量设置为负
+//   2. 因为乱序或深交所price=0, maker单不存在, 此时将抵扣量放入 pending_deductions_, 等待MAKER到达后flush
 //   3. 维护 PriceLevel 的总剩余订单量
 // - 动态跟踪bid ask的top of book:
 //   1. 因为有乱序问题, bid ask level交界处, 可能出现正负挂单量交替的混乱地带
@@ -180,30 +215,39 @@ public:
 
 private:
   // ========================================================================================
-  // SIMPLE DATA STRUCTURES
+  // CORE DATA STRUCTURES
   // ========================================================================================
 
-  // Simple unified price level storage
-  std::deque<Level> level_storage_;                 // Container for all price levels
-  std::unordered_map<Price, Level *> price_levels_; // Simple price -> level mapping
-  // High-performance visible price tracking - O(1) operations
-  std::bitset<PRICE_RANGE_SIZE> visible_price_bitmap_; // Fast existence check: O(1)
-  mutable std::vector<Price> cached_visible_prices_;   // Sorted cache for iteration
-  mutable bool cache_dirty_ = false;                   // Cache invalidation flag
+  // Price level storage (stable memory addresses via deque)
+  std::deque<Level> level_storage_;                 // All price levels (deque guarantees stable pointers)
+  std::unordered_map<Price, Level *> price_levels_; // Price -> Level* mapping for O(1) lookup
 
-  // Simple TOB tracking - just maintain the key prices
-  mutable Price best_bid_price_ = 0, best_ask_price_ = 0;
-  mutable bool tob_invalid_ = true;
+  // Visible price tracking (prices with non-zero net_quantity)
+  std::bitset<PRICE_RANGE_SIZE> visible_price_bitmap_; // Bitmap for O(1) visibility check
+  mutable std::vector<Price> cached_visible_prices_;   // Sorted cache for fast iteration
+  mutable bool cache_dirty_ = false;                   // Cache needs refresh flag
 
-  // High-performance order lookup infrastructure
-  std::pmr::unsynchronized_pool_resource order_lookup_memory_pool_;
-  std::pmr::unordered_map<OrderId, Location> order_lookup_;
-  MemPool::MemoryPool<Order> order_memory_pool_;
+  // Top of book tracking
+  mutable Price best_bid_ = 0;   // Best bid price (highest buy price with visible quantity)
+  mutable Price best_ask_ = 0;   // Best ask price (lowest sell price with visible quantity)
+  mutable bool tob_dirty_ = true; // TOB needs recalculation flag
 
-  // Market timestamp tracking
-  uint32_t prev_timestamp_ = 0;
-  uint32_t curr_timestamp_ = 0;
-  bool is_new_timestamp_ = false;
+  // Order tracking infrastructure
+  std::pmr::unsynchronized_pool_resource order_lookup_memory_pool_;  // PMR memory pool for hash map
+  std::pmr::unordered_map<OrderId, Location> order_lookup_;          // OrderId -> Location(Level*, index) for O(1) order lookup
+  MemPool::MemoryPool<Order> order_memory_pool_;                     // Memory pool for Order object allocation
+
+  // Out-of-order handling: pending deductions queue
+  // When CANCEL/TAKER arrives before MAKER (especially Shenzhen's price=0 cancels):
+  // - Store signed_volume in this map
+  // - When MAKER arrives, flush by deducting accumulated volume
+  // - Prevents anomaly accumulation in LOB
+  std::unordered_map<OrderId, Quantity> pending_deductions_;  // OrderId -> accumulated signed_volume
+
+  // Market timestamp tracking (hour|minute|second|millisecond)
+  uint32_t prev_tick_ = 0;  // Previous tick timestamp
+  uint32_t curr_tick_ = 0;  // Current tick timestamp
+  bool new_tick_ = false;   // Flag: entered new tick
 
   // Hot path temporary variable cache to reduce allocation overhead
   mutable Quantity signed_volume_;
@@ -241,15 +285,15 @@ private:
 
   // Simple TOB update when needed (bootstrap only)
   void update_tob() const {
-    if (!tob_invalid_)
+    if (!tob_dirty_)
       return;
 
-    if (best_bid_price_ == 0 && best_ask_price_ == 0) {
-      best_bid_price_ = max_visible_price();
-      best_ask_price_ = min_visible_price();
+    if (best_bid_ == 0 && best_ask_ == 0) {
+      best_bid_ = max_visible_price();
+      best_ask_ = min_visible_price();
     }
 
-    tob_invalid_ = false;
+    tob_dirty_ = false;
   }
 
   // High-performance visible price cache management
@@ -436,21 +480,21 @@ private:
       // Level was emptied - advance TOB
       if (is_bid) {
         // Buy taker consumed ask - advance ask to higher price
-        best_ask_price_ = next_ask_above(trade_price);
+        best_ask_ = next_ask_above(trade_price);
       } else {
         // Sell taker consumed bid - advance bid to lower price
-        best_bid_price_ = next_bid_below(trade_price);
+        best_bid_ = next_bid_below(trade_price);
       }
     } else {
       // Partial fill - TOB stays at this price
       if (is_bid) {
-        best_ask_price_ = trade_price;
+        best_ask_ = trade_price;
       } else {
-        best_bid_price_ = trade_price;
+        best_bid_ = trade_price;
       }
     }
 
-    tob_invalid_ = false;
+    tob_dirty_ = false;
   }
 
 public:
@@ -460,10 +504,10 @@ public:
 
   // Main order processing entry point - with zero price handling and pending order logic
   [[gnu::hot]] bool process(const L2::Order &order) {
-    curr_timestamp_ = (order.hour << 24) | (order.minute << 16) | (order.second << 8) | order.millisecond;
-    is_new_timestamp_ = curr_timestamp_ != prev_timestamp_;
-    prev_timestamp_ = curr_timestamp_;
-    print_book(); // print before the new timestamp (such that current snapshot is a valid sample)
+    curr_tick_ = (order.hour << 24) | (order.minute << 16) | (order.second << 8) | order.millisecond;
+    new_tick_ = curr_tick_ != prev_tick_;
+    print_book(); // print before updating prev_tick (such that current snapshot is a valid sample)
+    prev_tick_ = curr_tick_;
 
     // Process resampling
     if (resampler_.process(order)) {
@@ -485,22 +529,38 @@ public:
     auto order_lookup_iterator = order_lookup_.find(target_id_);
     effective_price_ = order.price;
 
-    // 3. Handle zero price case - strategically ignore if not found
-    if (order.price == 0) [[unlikely]] {
-      if (order_lookup_iterator != order_lookup_.end()) {
-        // Found target, use its price
-        effective_price_ = order_lookup_iterator->second.level->price;
-      } else {
-        // only very few out-of-order orders will get here (it is not worth it to implement a pending orders mechanism)
-        // use snapshots to synchronize
-        return true; // ignored
+    // 3. Handle CANCEL/TAKER that arrive before MAKER (out-of-order)
+    if (order.order_type == L2::OrderType::CANCEL || order.order_type == L2::OrderType::TAKER) {
+      if (order_lookup_iterator == order_lookup_.end()) {
+        // Order not found - this is out-of-order (CANCEL/TAKER arrived before MAKER)
+        // Add to pending deductions queue, will be flushed when MAKER arrives
+        pending_deductions_[target_id_] += signed_volume_;
+        return true; // Deferred processing
+      }
+      
+      // Order found - use counterparty MAKER's price from level
+      effective_price_ = order_lookup_iterator->second.level->price;
+    }
+
+    // 4. Handle MAKER: check if there are pending deductions waiting
+    if (order.order_type == L2::OrderType::MAKER) {
+      auto pending_it = pending_deductions_.find(target_id_);
+      if (pending_it != pending_deductions_.end()) {
+        // Found pending deductions - flush them now
+        signed_volume_ += pending_it->second;
+        pending_deductions_.erase(pending_it);
+        
+        // If fully offset by pending deductions, don't create the order
+        if (signed_volume_ == 0) {
+          return true; // Fully offset, no order created
+        }
       }
     }
 
-    // 4. Process order normally (either non-zero price or resolved zero price)
+    // 5. Process order normally (either non-zero price or resolved zero price)
     bool was_fully_consumed = apply_volume_change(target_id_, effective_price_, signed_volume_, order_lookup_iterator);
 
-    // 5. Order-type specific post-processing
+    // 6. Order-type specific post-processing
     if (order.order_type == L2::OrderType::TAKER) {
       update_tob_after_trade(order, was_fully_consumed, effective_price_);
     }
@@ -514,13 +574,13 @@ public:
   // Get best bid price
   [[gnu::hot]] Price best_bid() const {
     update_tob();
-    return best_bid_price_;
+    return best_bid_;
   }
 
   // Get best ask price
   [[gnu::hot]] Price best_ask() const {
     update_tob();
-    return best_ask_price_;
+    return best_ask_;
   }
 
   // ========================================================================================
@@ -529,9 +589,18 @@ public:
 
   // Display current market depth
   void inline print_book() const {
-    if (is_new_timestamp_ && PRINT_BOOK) {
+#if DEBUG_BOOK_BY_SECOND == 0
+    // Print by tick
+    if (new_tick_ && DEBUG_BOOK_PRINT) {
+#else
+    // Print every N seconds (extract second timestamp by removing millisecond)
+    const uint32_t curr_second = (curr_tick_ >> 8);
+    const uint32_t prev_second = (prev_tick_ >> 8);
+    const bool should_print = (curr_second / DEBUG_BOOK_BY_SECOND) != (prev_second / DEBUG_BOOK_BY_SECOND);
+    if (should_print && DEBUG_BOOK_PRINT) {
+#endif
       std::ostringstream book_output;
-      book_output << "[" << format_time() << "] ";
+      book_output << "[" << format_time() << "] [" << std::setfill('0') << std::setw(3) << total_pending() << std::setfill(' ') << "] ";
 
       constexpr size_t MAX_DISPLAY_LEVELS = 10;
       constexpr size_t LEVEL_WIDTH = 12;
@@ -548,15 +617,33 @@ public:
       // Reverse ask data for display
       std::reverse(ask_data.begin(), ask_data.end());
 
-      // Display ask levels
+      // Display ask levels (left side, negate for display)
       book_output << "ASK: ";
       size_t ask_empty_spaces = MAX_DISPLAY_LEVELS - ask_data.size();
       for (size_t i = 0; i < ask_empty_spaces; ++i) {
         book_output << std::setw(LEVEL_WIDTH) << " ";
       }
       for (size_t i = 0; i < ask_data.size(); ++i) {
-        book_output << std::setw(LEVEL_WIDTH) << std::left
-                    << (std::to_string(ask_data[i].first) + "x" + std::to_string(ask_data[i].second));
+        const Price price = ask_data[i].first;
+        const Quantity qty = ask_data[i].second;
+        const Quantity display_qty = -qty; // Negate: normal negative -> positive, anomaly positive -> negative
+        const bool is_anomaly = (qty > 0); // Ask should be negative, positive is anomaly
+        
+#if DEBUG_BOOK_AS_AMOUNT == 0
+        // Display as 手 (lots)
+        const std::string qty_str = std::to_string(display_qty);
+#else
+        // Display as N万元 (N * 10000 yuan): 手 * 100 * 股价 / (N * 10000)
+        const double amount = std::abs(display_qty) * 100.0 * price / (DEBUG_BOOK_AS_AMOUNT * 10000.0);
+        const std::string qty_str = (display_qty < 0 ? "-" : "") + std::to_string(static_cast<int>(amount + 0.5));
+#endif
+        const std::string level_str = std::to_string(price) + "x" + qty_str;
+        
+        if (is_anomaly) {
+          book_output << "\033[31m" << std::setw(LEVEL_WIDTH) << std::left << level_str << "\033[0m";
+        } else {
+          book_output << std::setw(LEVEL_WIDTH) << std::left << level_str;
+        }
       }
 
       book_output << "| BID: ";
@@ -568,11 +655,28 @@ public:
       },
                            MAX_DISPLAY_LEVELS);
 
-      // Display bid levels
+      // Display bid levels (right side, display as-is)
       for (size_t i = 0; i < MAX_DISPLAY_LEVELS; ++i) {
         if (i < bid_data.size()) {
-          book_output << std::setw(LEVEL_WIDTH) << std::left
-                      << (std::to_string(bid_data[i].first) + "x" + std::to_string(bid_data[i].second));
+          const Price price = bid_data[i].first;
+          const Quantity qty = bid_data[i].second;
+          const bool is_anomaly = (qty < 0); // Bid should be positive, negative is anomaly
+          
+#if DEBUG_BOOK_AS_AMOUNT == 0
+          // Display as 手 (lots)
+          const std::string qty_str = std::to_string(qty);
+#else
+          // Display as N万元 (N * 10000 yuan): 手 * 100 * 股价 / (N * 10000)
+          const double amount = std::abs(qty) * 100.0 * price / (DEBUG_BOOK_AS_AMOUNT * 10000.0);
+          const std::string qty_str = (qty < 0 ? "-" : "") + std::to_string(static_cast<int>(amount + 0.5));
+#endif
+          const std::string level_str = std::to_string(price) + "x" + qty_str;
+          
+          if (is_anomaly) {
+            book_output << "\033[31m" << std::setw(LEVEL_WIDTH) << std::left << level_str << "\033[0m";
+          } else {
+            book_output << std::setw(LEVEL_WIDTH) << std::left << level_str;
+          }
         } else {
           book_output << std::setw(LEVEL_WIDTH) << " ";
         }
@@ -580,7 +684,7 @@ public:
 
       std::cout << book_output.str() << "\n";
     }
-#if PRINT_DEBUG
+#if DEBUG_ORDER_PRINT
     char order_type_char = (order.order_type == L2::OrderType::MAKER) ? 'M' : (order.order_type == L2::OrderType::CANCEL) ? 'C'
                                                                                                                           : 'T';
     char order_dir_char = (order.order_dir == L2::OrderDirection::BID) ? 'B' : 'S';
@@ -591,6 +695,7 @@ public:
   // Book statistics - optimized for performance
   size_t total_orders() const { return order_lookup_.size(); }
   size_t total_levels() const { return price_levels_.size(); }
+  size_t total_pending() const { return pending_deductions_.size(); }  // Number of pending out-of-order deductions
 
   // Complete reset
   void clear() {
@@ -598,19 +703,21 @@ public:
     level_storage_.clear();
     order_lookup_.clear();
     order_memory_pool_.reset();
+    pending_deductions_.clear();
     visible_price_bitmap_.reset(); // O(1) clear all bits
     cached_visible_prices_.clear();
     cache_dirty_ = false;
-    best_bid_price_ = best_ask_price_ = 0;
-    tob_invalid_ = true;
-    curr_timestamp_ = 0;
-    prev_timestamp_ = 0;
-    is_new_timestamp_ = false;
+    best_bid_ = 0;
+    best_ask_ = 0;
+    tob_dirty_ = true;
+    prev_tick_ = 0;
+    curr_tick_ = 0;
+    new_tick_ = false;
     signed_volume_ = 0;
     target_id_ = 0;
     effective_price_ = 0;
 
-    if (SINGLE_DAY) {
+    if (DEBUG_SINGLE_DAY) {
       exit(1);
     }
   }
@@ -619,17 +726,17 @@ public:
   // MARKET DEPTH ITERATION - SIMPLE VERSION
   // ========================================================================================
 
-  // Iterate through bid levels (price >= best_bid_price_) - optimized with cache
+  // Iterate through bid levels (price >= best_bid_) - optimized with cache
   template <typename Func>
   void for_each_visible_bid(Func &&callback_function, size_t max_levels = 5) const {
     update_tob();
     refresh_cache_if_dirty();
 
-    if (best_bid_price_ == 0 || cached_visible_prices_.empty())
+    if (best_bid_ == 0 || cached_visible_prices_.empty())
       return;
 
-    // Find position of best_bid_price_ in sorted cache
-    auto it = std::upper_bound(cached_visible_prices_.begin(), cached_visible_prices_.end(), best_bid_price_);
+    // Find position of best_bid_ in sorted cache
+    auto it = std::upper_bound(cached_visible_prices_.begin(), cached_visible_prices_.end(), best_bid_);
 
     size_t levels_processed = 0;
     // Iterate backwards from best_bid position for descending price order
@@ -644,17 +751,17 @@ public:
     }
   }
 
-  // Iterate through ask levels (price <= best_ask_price_) - optimized with cache
+  // Iterate through ask levels (price <= best_ask_) - optimized with cache
   template <typename Func>
   void for_each_visible_ask(Func &&callback_function, size_t max_levels = 5) const {
     update_tob();
     refresh_cache_if_dirty();
 
-    if (best_ask_price_ == 0 || cached_visible_prices_.empty())
+    if (best_ask_ == 0 || cached_visible_prices_.empty())
       return;
 
-    // Find position of best_ask_price_ in sorted cache
-    auto it = std::lower_bound(cached_visible_prices_.begin(), cached_visible_prices_.end(), best_ask_price_);
+    // Find position of best_ask_ in sorted cache
+    auto it = std::lower_bound(cached_visible_prices_.begin(), cached_visible_prices_.end(), best_ask_);
 
     size_t levels_processed = 0;
     // Iterate forward from best_ask position for ascending price order
@@ -692,10 +799,10 @@ private:
 
   // Convert packed timestamp to human-readable format
   std::string format_time() const {
-    uint8_t hours = (curr_timestamp_ >> 24) & 0xFF;
-    uint8_t minutes = (curr_timestamp_ >> 16) & 0xFF;
-    uint8_t seconds = (curr_timestamp_ >> 8) & 0xFF;
-    uint8_t milliseconds = curr_timestamp_ & 0xFF;
+    uint8_t hours = (curr_tick_ >> 24) & 0xFF;
+    uint8_t minutes = (curr_tick_ >> 16) & 0xFF;
+    uint8_t seconds = (curr_tick_ >> 8) & 0xFF;
+    uint8_t milliseconds = curr_tick_ & 0xFF;
 
     std::ostringstream time_formatter;
     time_formatter << std::setfill('0')

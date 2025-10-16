@@ -1,9 +1,9 @@
 {
-    "600004.SH": {
-        "name": "白云机场",
-        "industry": "交通运输",
-        "sub_industry": "航空机场",
-        "ipo_date": "2003-4-28",
+    "300001.SZ": {
+        "name": "浦发银行",
+        "industry": "银行",
+        "sub_industry": "股份制银行",
+        "ipo_date": "1999-11-10",
         "delist_date": ""
     }
 }
