@@ -424,14 +424,15 @@ inline uint8_t BinaryEncoder_L2::determine_order_type(char csv_order_type, char 
     return (is_szse && csv_trade_code == 'C') ? 1 : 3; // cancel or taker
   }
 
-  // For orders
+  // For orders (逐笔委托 are all MAKER orders)
   if (is_szse) {
-    // SZSE 2025+ format: 'U' indicates cancellation, '1' for special order, '0' or '2' for normal maker
-    // Older formats: '2' (2023) or '0' (2024) both mean normal order
-    if (csv_order_type == 'U' || csv_order_type == 'u') {
-      return 1; // cancel
-    }
-    return 0; // maker (normal order, including special orders treated as maker)
+    // SZSE: All order types in 逐笔委托 are MAKER orders (pending orders)
+    // '0' or '2': 限价单 (Limit order) - normal limit order, always has price
+    // '1': 市价单 (Market order) - special order, may have price=0
+    // 'U': 本方最优 (Best for us) - special order, may have price=0
+    // Note: These are all MAKER orders, not cancellations
+    // (Actual cancellations come from 逐笔成交 file with trade_code='C')
+    return 0; // All order types are maker
   } else {
     // SSE: determine from order type (A:add/maker, D:delete/cancel)
     return (csv_order_type == 'A' || csv_order_type == 'a') ? 0 : 
