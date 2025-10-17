@@ -652,10 +652,6 @@ private:
         target_level->net_quantity += signed_volume;
         target_order->qty = new_qty;
         update_visible_price(target_level);
-        
-#if DEBUG_ANOMALY_PRINT
-        check_anomaly(target_level);
-#endif
         return false; // Partially consumed
       }
 
@@ -678,10 +674,6 @@ private:
       target_level->add(new_order);
       order_lookup_.emplace(target_id, Location(target_level, new_order_index));
       update_visible_price(target_level);
-      
-#if DEBUG_ANOMALY_PRINT
-      check_anomaly(target_level);
-#endif
       return false; // New order created
     }
   }
@@ -790,10 +782,9 @@ private:
     const bool is_far_above_ask = (best_ask_ > 0 && level->price > best_ask_ + MIN_DISTANCE);
     if (!is_far_below_bid && !is_far_above_ask) return;
     
-    // Step 2: Classify by distance to TOB (closer to bid = BID side, closer to ask = ASK side)
-    const Price dist_to_bid = (level->price < best_bid_) ? (best_bid_ - level->price) : (level->price - best_bid_);
-    const Price dist_to_ask = (level->price < best_ask_) ? (best_ask_ - level->price) : (level->price - best_ask_);
-    const bool is_bid_side = (dist_to_bid < dist_to_ask);
+    // Step 2: Classify by price relative to TOB mid price
+    const Price tob_mid = (best_bid_ + best_ask_) / 2;
+    const bool is_bid_side = (level->price < tob_mid);
     
     const bool has_anomaly = (is_bid_side && level->net_quantity < 0) || (!is_bid_side && level->net_quantity > 0);
     
@@ -974,14 +965,13 @@ private:
       // Count anomalies across ALL visible levels (not limited to displayed levels)
       size_t anomaly_count = 0;
       refresh_cache_if_dirty();
+      const Price tob_mid = (best_bid_ + best_ask_) / 2;
       for (const Price price : cached_visible_prices_) {
         const Level *level = find_level(price);
         if (!level || !level->has_visible_quantity()) continue;
         
-        // Classify by distance to TOB (closer to bid = BID side, closer to ask = ASK side)
-        const Price dist_to_bid = (price < best_bid_) ? (best_bid_ - price) : (price - best_bid_);
-        const Price dist_to_ask = (price < best_ask_) ? (best_ask_ - price) : (price - best_ask_);
-        const bool is_bid_side = (dist_to_bid < dist_to_ask);
+        // Classify by price relative to TOB mid price
+        const bool is_bid_side = (price < tob_mid);
         
         // Check for sign anomaly: BID should be positive, ASK should be negative
         if ((is_bid_side && level->net_quantity < 0) || (!is_bid_side && level->net_quantity > 0)) {
@@ -994,6 +984,16 @@ private:
       }
       
       std::cout << book_output.str() << "\n";
+
+#if DEBUG_ANOMALY_PRINT
+      // Check anomalies for ALL visible levels (proactive detection)
+      for (const Price price : cached_visible_prices_) {
+        Level *level = find_level(price);
+        if (level && level->has_visible_quantity()) {
+          check_anomaly(level);
+        }
+      }
+#endif
     }
 #if DEBUG_ORDER_PRINT
     char order_type_char = (order.order_type == L2::OrderType::MAKER) ? 'M' : (order.order_type == L2::OrderType::CANCEL) ? 'C'
