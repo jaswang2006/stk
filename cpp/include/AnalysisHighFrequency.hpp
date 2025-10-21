@@ -19,6 +19,7 @@
 #include "define/MemPool.hpp"
 // #include "features/backend/FeaturesConfig.hpp"
 #include "math/sample/ResampleRunBar.hpp"
+#include "package/tracy/tracy/Tracy.hpp"
 
 //========================================================================================
 // CONFIGURATION PARAMETERS
@@ -428,6 +429,7 @@ public:
 
   // Process single order and update LOB state
   [[gnu::hot]] bool process(const L2::Order &order) {
+    ZoneScoped;
     curr_tick_ = (order.hour << 24) | (order.minute << 16) | (order.second << 8) | order.millisecond;
     new_tick_ = curr_tick_ != prev_tick_;
 
@@ -457,6 +459,7 @@ public:
 
   // Handle bilateral matching (both bid and ask deducted)
   [[gnu::hot]] bool handle_bilateral_matching(const L2::Order &order) {
+    ZoneScoped;
     const Price trade_price = order.price;
     const Quantity volume = order.volume;
 
@@ -495,6 +498,7 @@ public:
   }
 
   [[gnu::hot, gnu::always_inline]] bool update_lob(const L2::Order &order) {
+    ZoneScoped;
     // Check for bilateral matching (SSE matching period or SZSE all day)
     const bool need_bilateral_matching = (exchange_type_ == ExchangeType::SZSE) ||
                                          (exchange_type_ == ExchangeType::SSE && in_matching_period_);
@@ -557,6 +561,7 @@ public:
       bool found,
       bool in_call_auction,
       bool in_matching_period) {
+    ZoneScoped;
 
     //====================================================================================
     // MAKER ORDER
@@ -1209,6 +1214,7 @@ private:
 
   // Update session state flags based on current time (called when tick changes)
   [[gnu::hot]] inline void update_trading_session_state() {
+    ZoneScoped;
     const uint16_t hhmm = ((curr_tick_ >> 16) & 0xFFFF); // hour * 256 + minute
 
     // Time boundaries
@@ -1230,6 +1236,7 @@ private:
 
   // Clear CALL_AUCTION flags at 9:30:00 (orders stay at current levels)
   void flush_call_auction_flags() {
+    ZoneScoped;
     for (auto &[price, level] : price_levels_) {
       for (Order *order : level->orders) {
         if (order->flags == OrderFlags::CALL_AUCTION) {
@@ -1452,6 +1459,7 @@ private:
 
   // Display current market depth
   void inline print_book([[maybe_unused]] const L2::Order &order) const {
+    ZoneScoped;
     // Don't print if there are no visible prices (covers pre-9:30 case naturally)
     refresh_cache_if_dirty();
     if (cached_visible_prices_.empty())

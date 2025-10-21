@@ -1,13 +1,12 @@
 import os
-import sys
 import glob
 import subprocess
+import time
 from config.cfg_stk import cfg_stk
 
 
 def kill_python_processes_windows(current_pid):
     """Kill all running Python processes in Windows, except this script."""
-    print("Terminating Windows Python processes...")
     try:
         tasklist = subprocess.check_output(
             "tasklist", shell=True, encoding='cp1252')
@@ -15,158 +14,111 @@ def kill_python_processes_windows(current_pid):
         ) if 'python' in line.lower() and line.split()[1] != str(current_pid)]
         for pid in pids:
             subprocess.run(["taskkill", "/F", "/PID", pid], check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Error while killing processes: {e}")
-    except Exception as ex:
-        print(f"An unexpected error occurred: {ex}")
+    except:
+        pass
 
 
 def kill_python_processes_unix(current_pid):
     """Kill all running Python processes in Unix-like systems, except this script."""
-    print("Terminating Unix-like Python processes...")
     try:
         ps_output = subprocess.check_output("ps aux", shell=True).decode()
         pids = [line.split()[1] for line in ps_output.splitlines(
         ) if 'python' in line and 'grep' not in line and line.split()[1] != str(current_pid)]
         for pid in pids:
-            subprocess.run(["kill", "-9", pid], check=False)  # Ignore permission errors
-    except subprocess.CalledProcessError as e:
-        print(f"Error while killing processes: {e}")
-    except Exception as ex:
-        print(f"An unexpected error occurred: {ex}")
+            subprocess.run(["kill", "-9", pid], check=False)
+    except:
+        pass
 
 
 def remove_old_files():
     """Remove old result files."""
-    print("Removing old results...")
-    for ext in ['*.xlsx', '*.html', '*.prof', '*.json']:
+    for ext in ['*.xlsx', '*.html', '*.json']:
         for file in glob.glob(ext):
             os.remove(file)
-            print(f"Removed {file}")
 
 
-def run_cpp_with_profile(binary_path, profile_output_dir):
-    """Run C++ binary with gperftools profiling."""
-    os.makedirs(profile_output_dir, exist_ok=True)
+def run_cpp_with_tracy(binary_path, original_dir):
+    """Run C++ binary with Tracy profiling."""
+    tracy_exe = os.path.join(original_dir, "cpp/package/tracy/tracy-profiler.exe")
     
-    profile_data = os.path.join(profile_output_dir, "hfa_profile.prof")
-    flamegraph = os.path.join(profile_output_dir, "hfa_flamegraph.svg")
-    callgraph = os.path.join(profile_output_dir, "hfa_callgraph.pdf")
+    if os.path.exists(tracy_exe):
+        try:
+            wsl_ip = subprocess.check_output("hostname -I | awk '{print $1}'", shell=True).decode().strip()
+        except:
+            wsl_ip = "localhost"
+        
+        print(f"Starting Tracy Profiler (auto-connect to {wsl_ip}:8086)...")
+        wsl_path = subprocess.check_output(["wslpath", "-w", tracy_exe]).decode().strip()
+        subprocess.Popen(
+            ["cmd.exe", "/c", "start", "", wsl_path, "-a", wsl_ip],
+            stdout=subprocess.DEVNULL, 
+            stderr=subprocess.DEVNULL
+        )
+        time.sleep(5)
     
-    # Clean old profiles
-    for f in [profile_data, flamegraph, callgraph]:
-        if os.path.exists(f):
-            os.remove(f)
+    start_time = time.time()
+    subprocess.run([binary_path], check=True)
+    elapsed_time = time.time() - start_time
     
-    print(f"🚀 Running with profiling enabled...")
-    print(f"   Profile output: {profile_data}")
+    print(f"\nProfiling complete (Time: {elapsed_time:.2f}s)")
+
+
+def build_cpp_project(app_name, enable_profile_mode=False):
+    """Build C++ project with optional profile mode."""
+    cpp_project_dir = f"./cpp/projects/{app_name}"
     
-    env = os.environ.copy()
-    env['CPUPROFILE'] = profile_data
-    env['CPUPROFILE_FREQUENCY'] = '1000'
-    env['LD_PRELOAD'] = '/lib/x86_64-linux-gnu/libprofiler.so'
+    if enable_profile_mode:
+        subprocess.run(
+            ["cmake", "-S", ".", "-B", "build", "-DPROFILE_MODE=ON"],
+            cwd=cpp_project_dir,
+            check=True
+        )
     
-    try:
-        subprocess.run([binary_path], env=env, check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"Error running binary: {e}")
-        return
+    subprocess.run(
+        ["cmake", "--build", "build", "--parallel"],
+        cwd=cpp_project_dir,
+        check=True
+    )
     
-    if not os.path.exists(profile_data):
-        print("❌ Profile data not generated")
-        return
+    return True
+
+
+def run_cpp_binary(app_name, use_profiler=False, original_dir=None):
+    """Run C++ binary with optional profiling."""
+    binary_path = f"./bin/app_{app_name}"
     
-    print(f"✅ Profiling complete!")
-    
-    # Analyze with pprof
-    pprof = os.path.expanduser("~/go/bin/pprof")
-    if not os.path.exists(pprof):
-        print("⚠️  pprof not found, skipping analysis")
-        return
-    
-    print(f"\n📊 Top 30 Functions by CPU Time:")
-    print("=" * 80)
-    subprocess.run([pprof, "--text", "--nodecount=30", binary_path, profile_data])
-    
-    print(f"\n🔥 Generating flamegraph...")
-    subprocess.run([pprof, "--svg", binary_path, profile_data], 
-                   stdout=open(flamegraph, 'w'), stderr=subprocess.DEVNULL)
-    if os.path.exists(flamegraph):
-        print(f"✅ Flamegraph: {flamegraph}")
-    
-    print(f"\n📈 Generating call graph...")
-    subprocess.run([pprof, "--pdf", binary_path, profile_data],
-                   stdout=open(callgraph, 'w'), stderr=subprocess.DEVNULL)
-    if os.path.exists(callgraph):
-        print(f"✅ Call graph: {callgraph}")
-    
-    print(f"\n🎯 HFA Function Analysis:")
-    print("=" * 80)
-    subprocess.run([pprof, "--text", "--focus=AnalysisHighFrequency", 
-                    "--nodecount=20", binary_path, profile_data])
-    
-    print(f"\n📋 Summary:")
-    print(f"   Profile data: {profile_data}")
-    print(f"   Flamegraph:   {flamegraph}")
-    print(f"   Call graph:   {callgraph}")
-    print(f"\n💡 To start interactive web UI:")
-    print(f"   {pprof} -http=:8080 {binary_path} {profile_data}")
+    if use_profiler:
+        run_cpp_with_tracy(binary_path, original_dir)
+    else:
+        start_time = time.time()
+        subprocess.run([binary_path], check=True)
+        elapsed_time = time.time() - start_time
+        print(f"\nExecution time: {elapsed_time:.2f}s ({elapsed_time/60:.2f}min)")
 
 
 def main():
-    # Change to the directory where this script is located
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+    original_dir = os.getcwd()
 
-    current_pid = os.getpid()  # Store the current process ID
-
-    # Kill Python processes
-    if os.name == 'nt':  # Windows
+    current_pid = os.getpid()
+    if os.name == 'nt':
         kill_python_processes_windows(current_pid)
-    else:  # Unix-like
+    else:
         kill_python_processes_unix(current_pid)
 
-    # Remove old files
     remove_old_files()
 
-    # app_name = "main"
     app_name = "main_csv"
-    # app_name = "L1_database"
-    # app_name = "L2_database"
     
+    build_cpp_project(app_name, enable_profile_mode=cfg_stk.profile)
     
-    print(f"Starting C++ project: {app_name}...")
-    
-    # Build the project first using cmake directly (avoid build.sh auto-run)
-    cpp_project_dir = f"./cpp/projects/{app_name}"
-    print(f"Building project in {cpp_project_dir}...")
-    
-    # Build using cmake (show output in real-time)
-    build_result = subprocess.run(
-        ["cmake", "--build", "build", "--parallel"],
-        cwd=cpp_project_dir
-    )
-    
-    if build_result.returncode != 0:
-        print("❌ Build failed!")
-        return
-    
-    print("✅ Build successful!")
-    
-    # Change to project build directory for correct relative paths
     cpp_build_dir = f"./cpp/projects/{app_name}/build"
-    original_dir = os.getcwd()
     os.chdir(cpp_build_dir)
     
     try:
-        if cfg_stk.profile:
-            profile_dir = os.path.join(original_dir, "output/profile")
-            run_cpp_with_profile("./bin/app_" + app_name, profile_dir)
-        else:
-            subprocess.run(["./bin/app_" + app_name], check=True)
+        run_cpp_binary(app_name, use_profiler=cfg_stk.profile, original_dir=original_dir)
     finally:
         os.chdir(original_dir)
-    
-    print("C++ app finished")
 
 
 if __name__ == "__main__":

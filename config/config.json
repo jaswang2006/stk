@@ -1,5 +1,5 @@
 {
     "dir": "",
-    "start_month": "2023-01",
-    "end_month": "2023-06"
+    "start_date": "2023-01-01",
+    "end_date": "2023-01-31"
 }

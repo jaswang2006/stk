@@ -7,21 +7,29 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # for clangd syntax highlighting
 
+# PROFILE mode: disable aggressive optimizations for better profiling visibility
+option(PROFILE_MODE "Build with profiling-friendly flags (no LTO, less inlining)" OFF)
+
 # Compiler-specific options
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-    # Clang flags with modern LTO using lld linker
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra -march=native -flto")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -ffast-math")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
-elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-    # GCC flags with LTO
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -Wall -Wextra -march=native -flto")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3 -DNDEBUG -ffast-math")
-elseif(MSVC)
-    # MSVC specific flags - Maximum optimization
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /O2 /W4 /EHsc")
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /O2 /Ob2 /DNDEBUG /GL /Gy /Gw /arch:AVX2 /fp:fast")
-    set(CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG /OPT:REF /OPT:ICF")
+if(PROFILE_MODE)
+    # Tracy profiling: Moderate optimization, retain visibility
+    message(STATUS "PROFILE_MODE: Tracy profiling enabled with -O2")
+    set(CMAKE_CXX_FLAGS "-O2 -g -Wall -Wextra -march=native -fno-omit-frame-pointer")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DTRACY_ENABLE -DTRACY_TIMER_FALLBACK")
+    # No LTO - keep function boundaries visible in Tracy
+    # No -fno-inline needed - Tracy instruments at function level
+else()
+    # Production: Maximum performance
+    message(STATUS "Production build: -O3 with LTO")
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+        set(CMAKE_CXX_FLAGS "-O3 -Wall -Wextra -march=native -flto -DNDEBUG -ffast-math")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        set(CMAKE_CXX_FLAGS "-O3 -Wall -Wextra -march=native -flto -DNDEBUG -ffast-math")
+    elseif(MSVC)
+        set(CMAKE_CXX_FLAGS "/O2 /W4 /EHsc /DNDEBUG /GL /Gy /Gw /arch:AVX2 /fp:fast")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /LTCG /OPT:REF /OPT:ICF")
+    endif()
 endif()
 
 # Output directories
@@ -44,6 +52,7 @@ set(SOURCES
     ../../src/codec/binary_encoder_L2.cpp
     ../../src/misc/logging.cpp
     ../../src/main_csv.cpp
+    ../../include/package/tracy/TracyClient.cpp  # Tracy implementation
 )
 
 # code specific settings ==========================================================================
@@ -83,8 +92,8 @@ target_include_directories(app_main_csv PRIVATE
 # Link Zstandard library
 target_link_libraries(app_main_csv PRIVATE ${ZSTD_LIB_PATH})
 
-# Link gperftools for profiling
-target_link_libraries(app_main_csv PRIVATE profiler)
+# Link system libraries required by Tracy
+target_link_libraries(app_main_csv PRIVATE dl pthread)
 
 # Installation
 install(TARGETS app_main_csv RUNTIME DESTINATION bin)

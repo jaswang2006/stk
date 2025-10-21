@@ -21,8 +21,8 @@ struct StockInfo {
 // Application configuration
 struct AppConfig {
     std::string dir;
-    std::chrono::year_month start_month;  // Lower bound month for data availability
-    std::chrono::year_month end_month;  // Upper bound month for data availability
+    std::chrono::year_month_day start_date;  // Lower bound date for data availability
+    std::chrono::year_month_day end_date;  // Upper bound date for data availability
 };
 
 // Stock info parser
@@ -34,9 +34,11 @@ AppConfig ParseAppConfig(const std::string& config_file);
 // Date utilities
 // Accepts "YYYY-MM" or "YYYY-MM-DD"
 std::chrono::year_month ParseDateString(const std::string& date_str);
+std::chrono::year_month_day ParseDateStringFull(const std::string& date_str);
 std::vector<std::chrono::year_month> GetMonthRange(
     const std::chrono::year_month& start,
     const std::chrono::year_month& end);
 std::string FormatYearMonth(const std::chrono::year_month& ym);
+std::string FormatYearMonthDay(const std::chrono::year_month_day& ymd);
 
 } // namespace JsonConfig

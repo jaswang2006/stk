@@ -5,6 +5,8 @@
 #include "codec/json_config.hpp"
 #include "misc/affinity.hpp"
 #include "misc/misc.hpp"
+#include "package/tracy/tracy/Tracy.hpp"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -23,7 +25,7 @@
 // PROCESSING FLOW (Per Asset, Per Day):
 //
 //   1. Configuration Loading
-//      - Read config.json: backtest period (start_month → end_month)
+//      - Read config.json: backtest period (start_date → end_date)
 //      - Read stock_info.json: asset list with IPO/delist dates
 //      - Adjust date ranges based on configuration
 //
@@ -171,21 +173,24 @@ public:
 // Date range generation utility - depends on PathUtils
 class DateRangeGenerator {
 public:
-  static std::vector<std::string> generate_date_range(const std::string &start_month, const std::string &end_month, const std::string &l2_archive_base) {
+  static std::vector<std::string> generate_date_range(const std::string &start_date, const std::string &end_date, const std::string &l2_archive_base) {
+    // No ZoneScoped: called once, not a hotspot
     std::vector<std::string> dates;
 
-    // Parse months (YYYY_MM format)
-    std::regex month_regex(R"((\d{4})_(\d{2}))");
+    // Parse dates (YYYY_MM_DD format)
+    std::regex date_regex(R"((\d{4})_(\d{2})_(\d{2}))");
     std::smatch start_match, end_match;
 
-    if (!std::regex_match(start_month, start_match, month_regex) || !std::regex_match(end_month, end_match, month_regex)) {
+    if (!std::regex_match(start_date, start_match, date_regex) || !std::regex_match(end_date, end_match, date_regex)) {
       return dates;
     }
 
     const int start_year = std::stoi(start_match[1]);
     const int start_mon = std::stoi(start_match[2]);
+    const int start_day = std::stoi(start_match[3]);
     const int end_year = std::stoi(end_match[1]);
     const int end_mon = std::stoi(end_match[2]);
+    const int end_day = std::stoi(end_match[3]);
 
     // Fast path: if RAR archive base doesn't exist, assume binary files are complete
     // Generate all dates in range without filesystem checks
@@ -197,8 +202,12 @@ public:
 
       for (int month = mon_start; month <= mon_end; ++month) {
         const int days_in_month = PathUtils::get_days_in_month(year, month);
+        
+        // Determine day range for this month
+        const int day_start = (year == start_year && month == start_mon) ? start_day : 1;
+        const int day_end = (year == end_year && month == end_mon) ? end_day : days_in_month;
 
-        for (int day = 1; day <= days_in_month; ++day) {
+        for (int day = day_start; day <= day_end; ++day) {
           char date_buf[9];
           snprintf(date_buf, sizeof(date_buf), "%04d%02d%02d", year, month, day);
           const std::string date_str(date_buf);
@@ -232,6 +241,7 @@ public:
   // Extract specific asset CSV files from archive to temporary directory
   // Archive structure: YYYYMMDD.rar -> YYYYMMDD/ASSET_CODE/(行情.csv, 逐笔成交.csv, 逐笔委托.csv)
   static bool extract_asset_csv(const std::string &archive_path, const std::string &asset_code, const std::string &temp_dir) {
+    ZoneScoped;  // Tracy Level 5: RAR extraction (I/O intensive)
     if (!std::filesystem::exists(archive_path)) {
       return false;
     }
@@ -294,6 +304,7 @@ class CSVProcessor {
 public:
   // Process CSV files using the encoder's standardized process_stock_data function
   static bool process_csv_files(const std::string &temp_asset_dir, const std::string &asset_code, L2::BinaryEncoder_L2 &encoder, std::vector<L2::Snapshot> &snapshots, std::vector<L2::Order> &orders) {
+    ZoneScoped;  // Tracy Level 5: CSV parsing & encoding (CPU intensive)
     // Use the encoder's standardized process_stock_data function for consistency
     return encoder.process_stock_data(temp_asset_dir, temp_asset_dir, asset_code, &snapshots, &orders);
   }
@@ -304,6 +315,7 @@ class BinaryManager {
 public:
   // Decode binary files and feed to analysis engine
   static bool decode_binary_files(const std::string &snapshots_file, const std::string &orders_file, L2::BinaryDecoder_L2 &decoder, AnalysisHighFrequency *HFA_) {
+    ZoneScoped;  // Tracy Level 5: Binary decoding & HFA processing (hottest path)
     bool decode_success = true;
     (void)snapshots_file; // Reserved for future snapshot processing
 
@@ -341,6 +353,7 @@ class AssetProcessor {
 public:
   // Process CSV files for a single asset on a single day with optimization for existing binaries
   static bool process_asset_day_csv(const std::string &asset_code, const std::string &date_str, const std::string &temp_base_dir, const std::string &l2_archive_base, L2::BinaryEncoder_L2 &encoder, L2::BinaryDecoder_L2 &decoder, AnalysisHighFrequency &HFA_) {
+    ZoneScoped;  // Tracy Level 4: Per-day processing
     // Generate paths
     const std::string archive_path = PathUtils::generate_archive_path(l2_archive_base, date_str);
     const std::string temp_asset_dir = PathUtils::generate_temp_asset_dir(temp_base_dir, date_str, asset_code);
@@ -431,8 +444,8 @@ public:
     std::cout << "  Archive tool: " << Config::ARCHIVE_TOOL << " (extension: " << Config::ARCHIVE_EXTENSION << ")\n";
     std::cout << "  L2 Archive base: " << paths.l2_archive_base << "\n";
     std::cout << "  Temporary directory: " << paths.TEMP_DIR << "\n";
-    std::cout << "  Data period: " << JsonConfig::FormatYearMonth(app_config.start_month)
-              << " to " << JsonConfig::FormatYearMonth(app_config.end_month) << "\n";
+    std::cout << "  Data period: " << JsonConfig::FormatYearMonthDay(app_config.start_date)
+              << " to " << JsonConfig::FormatYearMonthDay(app_config.end_date) << "\n";
     std::cout << "  Total assets found: " << total_assets << "\n";
     std::cout << "  Skip existing binaries: " << (Config::SKIP_EXISTING_BINARIES ? "Yes" : "No") << "\n";
     std::cout << "  Cleanup after processing: " << (Config::CLEANUP_AFTER_PROCESSING ? "Yes" : "No") << "\n";
@@ -440,26 +453,31 @@ public:
   }
 
   static void adjust_stock_dates(std::unordered_map<std::string, JsonConfig::StockInfo> &stock_info_map, const JsonConfig::AppConfig &app_config) {
+    // Convert app_config dates to year_month for comparison with stock dates
+    std::chrono::year_month config_start_ym{app_config.start_date.year(), app_config.start_date.month()};
+    std::chrono::year_month config_end_ym{app_config.end_date.year(), app_config.end_date.month()};
+    
     for (auto &pair : stock_info_map) {
-      // If IPO date is earlier than start_month, use start_month
-      if (pair.second.start_date < app_config.start_month) {
-        pair.second.start_date = app_config.start_month;
+      // If IPO date is earlier than start_date, use start_date month
+      if (pair.second.start_date < config_start_ym) {
+        pair.second.start_date = config_start_ym;
       }
-      // Override delist_date for active stocks using configured end_month
+      // Override delist_date for active stocks using configured end_date month
       if (!pair.second.is_delisted) {
-        pair.second.end_date = app_config.end_month;
+        pair.second.end_date = config_end_ym;
       }
     }
   }
 };
 
 // Forward declaration of ProcessAsset function
-void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id);
+void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const JsonConfig::AppConfig &app_config, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id);
 
 // Thread pool management - parallel asset processing
 class ThreadPoolManager {
 public:
-  static void process_assets_in_parallel(const std::unordered_map<std::string, JsonConfig::StockInfo> &stock_info_map, const AppConfiguration::Paths &paths) {
+  static void process_assets_in_parallel(const std::unordered_map<std::string, JsonConfig::StockInfo> &stock_info_map, const JsonConfig::AppConfig &app_config, const AppConfiguration::Paths &paths) {
+    ZoneScoped;  // Tracy Level 2: Thread pool orchestration
     const unsigned int num_threads = misc::Affinity::core_count();
 
     std::cout << "Using " << num_threads << " threads for parallel processing";
@@ -509,6 +527,7 @@ public:
               ProcessAsset,
               asset_code,
               stock_info,
+              app_config,
               paths.l2_archive_base,
               paths.TEMP_DIR,
               core_id));
@@ -528,7 +547,10 @@ public:
 // ============================================================================
 
 // Per-asset processing entry point (runs in separate thread with CPU affinity)
-void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id) {
+void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const JsonConfig::AppConfig &app_config, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id) {
+  ZoneScoped;  // Tracy Level 3: Per-asset processing (parallel threads)
+  ZoneName(asset_code.c_str(), asset_code.size());  // Show asset code in Tracy GUI //tracer改为股票名
+  
   // Set thread affinity to specific core once per thread (if supported)
   static thread_local bool affinity_set = false;
   if (!affinity_set && misc::Affinity::supported()) {
@@ -546,9 +568,17 @@ void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &st
   L2::ExchangeType exchange_type = L2::infer_exchange_type(asset_code);
   AnalysisHighFrequency HFA_(L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type);
 
-  // Generate date range for this asset
-  const std::string start_formatted = JsonConfig::FormatYearMonth(stock_info.start_date);
-  const std::string end_formatted = JsonConfig::FormatYearMonth(stock_info.end_date);
+  // Determine effective date range: intersection of stock dates and app config dates
+  // Stock dates are at month granularity, app config dates are at day granularity
+  std::chrono::year_month_day stock_start_ymd{stock_info.start_date / std::chrono::day{1}};
+  std::chrono::year_month_day stock_end_ymd{stock_info.end_date / std::chrono::last};
+  
+  // Take the later start date and earlier end date
+  std::chrono::year_month_day effective_start = (stock_start_ymd > app_config.start_date) ? stock_start_ymd : app_config.start_date;
+  std::chrono::year_month_day effective_end = (stock_end_ymd < app_config.end_date) ? stock_end_ymd : app_config.end_date;
+
+  const std::string start_formatted = JsonConfig::FormatYearMonthDay(effective_start);
+  const std::string end_formatted = JsonConfig::FormatYearMonthDay(effective_end);
   std::cout << "  Debug: start_date = " << start_formatted << ", end_date = " << end_formatted << "\n";
 
   const std::vector<std::string> dates = DateRangeGenerator::generate_date_range(start_formatted, end_formatted, l2_archive_base);
@@ -579,6 +609,8 @@ void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &st
 
 // Program entry point
 int main() {
+  ZoneScoped;  // Tracy Level 1: Application entry
+  
   try {
     // Get configuration paths
     const AppConfiguration::Paths paths = AppConfiguration::get_default_paths();
@@ -600,7 +632,7 @@ int main() {
     std::filesystem::create_directories(paths.TEMP_DIR);
 
     // Process assets using thread pool
-    ThreadPoolManager::process_assets_in_parallel(stock_info_map, paths);
+    ThreadPoolManager::process_assets_in_parallel(stock_info_map, app_config, paths);
 
     // Optional: Final cleanup of all temp files
     if (Config::CLEANUP_AFTER_PROCESSING) {

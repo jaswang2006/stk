@@ -54,15 +54,13 @@ AppConfig ParseAppConfig(const std::string &config_file) {
   AppConfig config;
   config.dir = j["dir"];
 
-  // lower bound month for data availability
-  std::string start_month_str = j.value("start_month", "");
-  config.start_month = ParseDateString(start_month_str);
+  // lower bound date for data availability
+  std::string start_date_str = j.value("start_date", "");
+  config.start_date = ParseDateStringFull(start_date_str);
 
-  // upper bound month for data availability
-  std::string end_month_str = j.value("end_month", "");
-  config.end_month = ParseDateString(end_month_str);
-  // auto now = std::chrono::year_month_day{std::chrono::floor<std::chrono::days>(std::chrono::system_clock::now())};
-  // config.end_month = std::chrono::year_month{now.year(), now.month()};
+  // upper bound date for data availability
+  std::string end_date_str = j.value("end_date", "");
+  config.end_date = ParseDateStringFull(end_date_str);
 
   return config;
 }
@@ -78,6 +76,23 @@ std::chrono::year_month ParseDateString(const std::string &date_str) {
 
   // BC/BCE years can be negative
   return std::chrono::year_month{std::chrono::year{static_cast<int>(year)}, std::chrono::month{static_cast<unsigned>(month)}};
+}
+
+std::chrono::year_month_day ParseDateStringFull(const std::string &date_str) {
+  // Expected format: "YYYY-MM-DD"
+  if (date_str.length() < 10) {
+    throw std::runtime_error("Invalid date format, expected YYYY-MM-DD: " + date_str);
+  }
+
+  unsigned int year = std::stoi(date_str.substr(0, 4));
+  unsigned int month = std::stoi(date_str.substr(5, 2));
+  unsigned int day = std::stoi(date_str.substr(8, 2));
+
+  return std::chrono::year_month_day{
+    std::chrono::year{static_cast<int>(year)}, 
+    std::chrono::month{static_cast<unsigned>(month)},
+    std::chrono::day{static_cast<unsigned>(day)}
+  };
 }
 
 std::vector<std::chrono::year_month> GetMonthRange(
@@ -99,6 +114,15 @@ std::vector<std::chrono::year_month> GetMonthRange(
 std::string FormatYearMonth(const std::chrono::year_month &ym) {
   std::ostringstream oss;
   oss << static_cast<int>(ym.year()) << "_" << std::setfill('0') << std::setw(2) << static_cast<unsigned>(ym.month());
+  return oss.str();
+}
+
+// Example: FormatYearMonthDay(2024y/3/15) returns "2024_03_15"
+std::string FormatYearMonthDay(const std::chrono::year_month_day &ymd) {
+  std::ostringstream oss;
+  oss << static_cast<int>(ymd.year()) << "_" 
+      << std::setfill('0') << std::setw(2) << static_cast<unsigned>(ymd.month()) << "_"
+      << std::setfill('0') << std::setw(2) << static_cast<unsigned>(ymd.day());
   return oss.str();
 }
 

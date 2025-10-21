@@ -152,21 +152,25 @@ int main() {
     JsonConfig::AppConfig app_config = JsonConfig::ParseAppConfig(config_file);
     auto stock_info_map = JsonConfig::ParseStockInfo(stock_info_file);
 
-    // Override IPO date if earlier than start_month, and delist_date for active stocks using configured end_month
+    // Override IPO date if earlier than start_date, and delist_date for active stocks using configured end_date
+    // Convert app_config dates to year_month for comparison with stock dates
+    std::chrono::year_month config_start_ym{app_config.start_date.year(), app_config.start_date.month()};
+    std::chrono::year_month config_end_ym{app_config.end_date.year(), app_config.end_date.month()};
+    
     for (auto &pair : stock_info_map) {
-      // If IPO date is earlier than start_month, use start_month
-      if (pair.second.start_date < app_config.start_month) {
-        pair.second.start_date = app_config.start_month;
+      // If IPO date is earlier than start_date, use start_date month
+      if (pair.second.start_date < config_start_ym) {
+        pair.second.start_date = config_start_ym;
       }
-      // Override delist_date for active stocks using configured end_month
+      // Override delist_date for active stocks using configured end_date month
       if (!pair.second.is_delisted) {
-        pair.second.end_date = app_config.end_month;
+        pair.second.end_date = config_end_ym;
       }
     }
 
     std::cout << "Configuration loaded successfully:" << "\n";
     std::cout << "  L2 Binary directory: " << input_dir << "\n";
-    std::cout << "  Data available through: " << JsonConfig::FormatYearMonth(app_config.end_month) << "\n";
+    std::cout << "  Data available through: " << JsonConfig::FormatYearMonthDay(app_config.end_date) << "\n";
     std::cout << "  Total assets found: " << stock_info_map.size() << "\n";
     std::cout << "  Output directory: " << output_dir << "\n\n";
 
