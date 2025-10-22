@@ -12,11 +12,9 @@ lsblk -o NAME,MODEL,SIZE,ROTA,TRAN,FSTYPE,MOUNTPOINT
 net localgroup Administrators Chuyin.Wang /add
 runas /user:amlogic\chuyin.wang "powershell.exe -NoExit -Command cd '%USERPROFILE%'"
 # powershell
-$disk_id = 1
-wsl --mount "\\.\PHYSICALDRIVE$disk_id" --bare
+wsl --mount "\\.\PHYSICALDRIVE1" --bare
 # wsl-2
-DEV=/dev/sde;PART=${DEV}1;
-sudo mount -o noatime,nodiratime,attr2,inode64,logbufs=8,logbsize=32k $PART /mnt/$DEV
+sudo mount -o noatime,nodiratime,attr2,inode64,logbufs=8,logbsize=32k /dev/sde1 /mnt/dev/sde
 
 #==================================================================================================
 # admin-powershell:

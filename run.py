@@ -6,7 +6,7 @@ import time
 # ============================================================================
 # Configuration
 # ============================================================================
-ENABLE_PROFILE = True               # Enable CPU profiling
+ENABLE_PROFILE = False               # Enable CPU profiling
 APP_NAME = "main_csv"               # C++ application name
 CPUPROFILE_FREQUENCY = 40000         # Profiler sampling rate (Hz)
 PROFILER_LIB = '/usr/lib/x86_64-linux-gnu/libprofiler.so.0'
@@ -16,6 +16,7 @@ TARGET_NAMESPACE = "AssetProcessor"  # Focus on this namespace and all its calle
 PPROF_DEPTH = 50                     # Max nodes to display in call tree
 PPROF_PORT = 8080                    # Web GUI port
 PPROF_IGNORE = "std::|__gnu_cxx::"   # Filter out standard library noise
+
 
 def run_cpp_with_sampling_profile(binary_path):
     """Run C++ binary with gperftools sampling profiler at maximum frequency."""

@@ -37,7 +37,7 @@
 //   3. Archive Extraction (per trading day)
 //      Input:  /mnt/dev/sde/A_stock/L2/YYYY/YYYYMM/YYYYMMDD.rar
 //      Extract: YYYYMMDD/ASSET_CODE/*.csv
-//      Output: output/tmp/YYYY/MM/DD/ASSET_CODE/(行情.csv, 逐笔成交.csv, 逐笔委托.csv)
+//      Output: output/database/YYYY/MM/DD/ASSET_CODE/(行情.csv, 逐笔成交.csv, 逐笔委托.csv)
 //
 //      Optimization: Skip if binary files already exist
 //
@@ -91,7 +91,7 @@
 // THREAD SAFETY:
 //   - Each thread processes one asset independently
 //   - No shared state between asset processors
-//   - Temporary extraction directories use unique names (extract_tmp_ASSET_CODE)
+//   - Temporary extraction directories use unique names (tmp_ASSET_CODE)
 //   - CPU affinity prevents thread migration and cache thrashing
 //
 // OPTIMIZATION STRATEGIES:
@@ -123,7 +123,7 @@ constexpr const char *BIN_EXTENSION = ".bin";
 constexpr const char *DEFAULT_CONFIG_FILE = "../../../../config/config.json";
 constexpr const char *DEFAULT_STOCK_INFO_FILE = "../../../../config/daily_holding/stock_info_test.json";
 constexpr const char *DEFAULT_L2_ARCHIVE_BASE = "/mnt/dev/sde/A_stock/L2";
-constexpr const char *DEFAULT_TEMP_DIR = "../../../../output/tmp";
+constexpr const char *DEFAULT_TEMP_DIR = "../../../../output/database";
 
 // Processing settings - modify for different behaviors
 constexpr bool CLEANUP_AFTER_PROCESSING = false; // Clean up temp files after processing (saves disk space)
@@ -328,7 +328,7 @@ public:
     }
 
     // Extract from archive
-    const std::string temp_extract_dir = temp_base_dir + "/extract_tmp_" + asset_code;
+    const std::string temp_extract_dir = temp_base_dir + "/tmp_" + asset_code;
     if (!FileManager::extract_asset_csv(archive_path, asset_code, temp_extract_dir)) {
       return false;
     }
@@ -402,7 +402,7 @@ public:
   static void adjust_stock_dates(std::unordered_map<std::string, JsonConfig::StockInfo> &stock_info_map, const JsonConfig::AppConfig &app_config) {
     const std::chrono::year_month config_start{app_config.start_date.year(), app_config.start_date.month()};
     const std::chrono::year_month config_end{app_config.end_date.year(), app_config.end_date.month()};
-    
+
     for (auto &[code, info] : stock_info_map) {
       if (info.start_date < config_start) {
         info.start_date = config_start;
@@ -492,7 +492,7 @@ void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &st
   const std::string start_formatted = JsonConfig::FormatYearMonthDay(effective_start);
   const std::string end_formatted = JsonConfig::FormatYearMonthDay(effective_end);
   const std::vector<std::string> dates = DateRangeGenerator::generate_date_range(start_formatted, end_formatted, l2_archive_base);
-  
+
   std::cout << "  Range: " << start_formatted << " → " << end_formatted << " (" << dates.size() << " days)\n";
 
   // Process each trading day
@@ -500,7 +500,7 @@ void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &st
   for (size_t i = 0; i < dates.size(); ++i) {
     const std::string &date_str = dates[i];
     misc::print_progress(i + 1, dates.size(), "Processing " + asset_code + " - " + date_str);
-    
+
     if (AssetProcessor::process_single_day(asset_code, date_str, TEMP_DIR, l2_archive_base, encoder, decoder, HFA_)) {
       success_count++;
       if (Config::CLEANUP_AFTER_PROCESSING) {
