@@ -117,13 +117,17 @@ public:
   }
 
   // Acquire a worker slot (returns RAII handle that auto-releases)
-  ProgressHandle acquire_slot() {
+  ProgressHandle acquire_slot(const std::string &label = "") {
     std::lock_guard<std::mutex> lock(slot_mutex_);
 
     for (int i = 0; i < num_workers_; ++i) {
       bool expected = false;
       if (slots_[i].active.compare_exchange_strong(expected, true)) {
-        return ProgressHandle(this, i, true);  // auto_release = true
+        ProgressHandle handle(this, i, true);  // auto_release = true
+        if (!label.empty()) {
+          handle.set_label(label);
+        }
+        return handle;
       }
     }
 

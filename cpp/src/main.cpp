@@ -437,15 +437,18 @@ class ParallelProcessor {
 public:
   static void run(const std::unordered_map<std::string, JsonConfig::StockInfo> &stock_info_map, const JsonConfig::AppConfig &app_config, const AppConfiguration::Paths &paths) {
     const unsigned int num_threads = misc::Affinity::core_count();
+    const unsigned int num_assets = stock_info_map.size();
+    const unsigned int num_workers = std::min(num_threads, num_assets);
 
     std::cout << "Threads: " << num_threads;
     if (misc::Affinity::supported()) {
       std::cout << " (CPU affinity enabled)";
     }
-    std::cout << "\n\n";
+    std::cout << "\n";
+    std::cout << "Workers: " << num_workers << " (processing " << num_assets << " assets)\n\n";
 
-    // Initialize parallel progress tracker (shared across all workers)
-    auto progress_tracker = std::make_shared<misc::ParallelProgress>(num_threads);
+    // Initialize parallel progress tracker (only allocate needed workers)
+    auto progress_tracker = std::make_shared<misc::ParallelProgress>(num_workers);
 
     // Process all assets using thread pool
     std::vector<std::future<void>> tasks;
@@ -454,7 +457,7 @@ public:
 
     while (stock_iter != stock_info_map.end()) {
       // Wait for slot if at capacity
-      if (tasks.size() >= num_threads) {
+      if (tasks.size() >= num_workers) {
         // Remove completed tasks
         tasks.erase(
           std::remove_if(tasks.begin(), tasks.end(),
@@ -465,7 +468,7 @@ public:
         );
         
         // If still at capacity, wait for first one
-        if (tasks.size() >= num_threads && !tasks.empty()) {
+        if (tasks.size() >= num_workers && !tasks.empty()) {
           tasks.front().wait();
           tasks.erase(tasks.begin());
         }
@@ -475,14 +478,11 @@ public:
       const std::string &asset_code = stock_iter->first;
       const JsonConfig::StockInfo &stock_info = stock_iter->second;
 
-      // Acquire worker slot (handle manages lifetime automatically)
-      auto handle = progress_tracker->acquire_slot();
-      handle.set_label(asset_code + " (" + stock_info.name + ")");
-      
       const unsigned int core_id = tasks.size() % num_threads;
       tasks.push_back(
         std::async(std::launch::async, ProcessAsset, asset_code, stock_info, app_config, 
-                   paths.l2_archive_base, paths.TEMP_DIR, core_id, std::move(handle))
+                   paths.l2_archive_base, paths.TEMP_DIR, core_id, 
+                   progress_tracker->acquire_slot(asset_code + " (" + stock_info.name + ")"))
       );
       ++stock_iter;
     }
