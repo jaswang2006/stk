@@ -78,8 +78,10 @@ set(SOURCES
 # =================================================================================================
 
 set(HEADERS
-    ../../include/misc/misc.hpp
+    ../../include/misc/timer.hpp
     ../../include/misc/print.hpp
+    ../../include/misc/progress_single.hpp
+    ../../include/misc/progress_parallel.hpp
     ../../include/misc/affinity.hpp
     ../../include/misc/logging.hpp
     ../../include/define/CBuffer.hpp
@@ -90,7 +92,7 @@ set(HEADERS
     ../../include/codec/delta_encoding.hpp
     ../../include/codec/L2_DataType.hpp
     # ../../include/AnalysisTechnical.hpp
-    ../../include/AnalysisHighFrequency.hpp
+    ../../include/LimitOrderBook.hpp
 )
 
 # Disable fast-math specifically for JSON library to avoid infinity issues

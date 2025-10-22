@@ -1,11 +1,11 @@
-#include "AnalysisHighFrequency.hpp"
+#include "LimitOrderBook.hpp"
 #include "codec/L2_DataType.hpp"
 #include "codec/binary_decoder_L2.hpp"
 #include "codec/binary_encoder_L2.hpp"
 #include "codec/json_config.hpp"
 #include "misc/affinity.hpp"
 #include "misc/logging.hpp"
-#include "misc/misc.hpp"
+#include "misc/progress_parallel.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -66,7 +66,7 @@
 //      - Apply delta decoding if enabled
 //      - Reconstruct L2::Snapshot and L2::Order structures
 //
-//   7. High-Frequency Analysis (AnalysisHighFrequency)
+//   7. High-Frequency Analysis (LimitOrderBook)
 //      - Process order stream to reconstruct order book
 //      - Track maker orders, cancellations, and trades
 //      - Maintain 10-level bid/ask queues
@@ -282,7 +282,7 @@ public:
 class DataAnalyzer {
 public:
   // Load binary data and run high-frequency analysis
-  static bool load_and_analyze(const std::string &snapshots_file, const std::string &orders_file, L2::BinaryDecoder_L2 &decoder, AnalysisHighFrequency *analyzer) {
+  static bool load_and_analyze(const std::string &snapshots_file, const std::string &orders_file, L2::BinaryDecoder_L2 &decoder, LimitOrderBook *analyzer) {
     (void)snapshots_file; // Reserved for future snapshot processing
 
     // // Decode snapshots (currently disabled, enable when needed)
@@ -316,7 +316,7 @@ public:
 // Asset processing workflow
 class AssetProcessor {
 public:
-  static bool process_single_day(const std::string &asset_code, const std::string &date_str, const std::string &temp_base_dir, const std::string &l2_archive_base, L2::BinaryEncoder_L2 &encoder, L2::BinaryDecoder_L2 &decoder, AnalysisHighFrequency &analyzer) {
+  static bool process_single_day(const std::string &asset_code, const std::string &date_str, const std::string &temp_base_dir, const std::string &l2_archive_base, L2::BinaryEncoder_L2 &encoder, L2::BinaryDecoder_L2 &decoder, LimitOrderBook &analyzer) {
     const std::string archive_path = PathUtils::generate_archive_path(l2_archive_base, date_str);
     const std::string temp_asset_dir = PathUtils::generate_temp_asset_dir(temp_base_dir, date_str, asset_code);
 
@@ -430,7 +430,7 @@ public:
 };
 
 // Forward declaration of ProcessAsset function
-void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const JsonConfig::AppConfig &app_config, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id);
+void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const JsonConfig::AppConfig &app_config, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id, misc::ProgressHandle progress_handle);
 
 // Parallel asset processing with thread pool
 class ParallelProcessor {
@@ -444,19 +444,30 @@ public:
     }
     std::cout << "\n\n";
 
+    // Initialize parallel progress tracker (shared across all workers)
+    auto progress_tracker = std::make_shared<misc::ParallelProgress>(num_threads);
+
     // Process all assets using thread pool
-    std::vector<std::future<void>> futures;
+    std::vector<std::future<void>> tasks;
+    tasks.reserve(num_threads);
     auto stock_iter = stock_info_map.begin();
 
     while (stock_iter != stock_info_map.end()) {
       // Wait for slot if at capacity
-      if (futures.size() >= num_threads) {
-        auto is_done = [](std::future<void> &f) { return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready; };
-        futures.erase(std::remove_if(futures.begin(), futures.end(), is_done), futures.end());
-
-        if (futures.size() >= num_threads && !futures.empty()) {
-          futures.front().wait();
-          futures.erase(futures.begin());
+      if (tasks.size() >= num_threads) {
+        // Remove completed tasks
+        tasks.erase(
+          std::remove_if(tasks.begin(), tasks.end(),
+            [](std::future<void> &f) { 
+              return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready; 
+            }),
+          tasks.end()
+        );
+        
+        // If still at capacity, wait for first one
+        if (tasks.size() >= num_threads && !tasks.empty()) {
+          tasks.front().wait();
+          tasks.erase(tasks.begin());
         }
       }
 
@@ -464,19 +475,24 @@ public:
       const std::string &asset_code = stock_iter->first;
       const JsonConfig::StockInfo &stock_info = stock_iter->second;
 
-      std::cout << "Queue: " << asset_code << " (" << stock_info.name << ") "
-                << JsonConfig::FormatYearMonth(stock_info.start_date) << " → "
-                << JsonConfig::FormatYearMonth(stock_info.end_date) << "\n";
-
-      const unsigned int core_id = futures.size() % num_threads;
-      futures.push_back(std::async(std::launch::async, ProcessAsset, asset_code, stock_info, app_config, paths.l2_archive_base, paths.TEMP_DIR, core_id));
+      // Acquire worker slot (handle manages lifetime automatically)
+      auto handle = progress_tracker->acquire_slot();
+      handle.set_label(asset_code + " (" + stock_info.name + ")");
+      
+      const unsigned int core_id = tasks.size() % num_threads;
+      tasks.push_back(
+        std::async(std::launch::async, ProcessAsset, asset_code, stock_info, app_config, 
+                   paths.l2_archive_base, paths.TEMP_DIR, core_id, std::move(handle))
+      );
       ++stock_iter;
     }
 
-    // Wait for completion
-    for (auto &f : futures) {
-      f.wait();
+    // Wait for all remaining tasks
+    for (auto &task : tasks) {
+      task.wait();
     }
+
+    progress_tracker->stop();
   }
 };
 
@@ -485,18 +501,16 @@ public:
 // ============================================================================
 
 // Per-asset processing (thread entry point)
-void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const JsonConfig::AppConfig &app_config, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id) {
+void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &stock_info, const JsonConfig::AppConfig &app_config, const std::string &l2_archive_base, const std::string &TEMP_DIR, unsigned int core_id, misc::ProgressHandle progress_handle) {
   static thread_local bool affinity_set = false;
   if (!affinity_set && misc::Affinity::supported()) {
     affinity_set = misc::Affinity::pin_to_core(core_id);
   }
 
-  std::cout << "Start: " << asset_code << " (" << stock_info.name << ")\n";
-
   L2::BinaryEncoder_L2 encoder(L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE);
   L2::BinaryDecoder_L2 decoder(L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE);
   L2::ExchangeType exchange_type = L2::infer_exchange_type(asset_code);
-  AnalysisHighFrequency HFA_(L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type);
+  LimitOrderBook HFA_(L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type);
 
   // Calculate effective date range
   std::chrono::year_month_day stock_start_ymd{stock_info.start_date / std::chrono::day{1}};
@@ -508,23 +522,19 @@ void ProcessAsset(const std::string &asset_code, const JsonConfig::StockInfo &st
   const std::string end_formatted = JsonConfig::FormatYearMonthDay(effective_end);
   const std::vector<std::string> dates = DateRangeGenerator::generate_date_range(start_formatted, end_formatted, l2_archive_base);
 
-  std::cout << "  Range: " << start_formatted << " → " << end_formatted << " (" << dates.size() << " days)\n";
-
   // Process each trading day
-  int success_count = 0;
   for (size_t i = 0; i < dates.size(); ++i) {
     const std::string &date_str = dates[i];
-    misc::print_progress(i + 1, dates.size(), "Processing " + asset_code + " - " + date_str);
+    
+    // Simply update progress handle - no coupling with progress system
+    progress_handle.update(i + 1, dates.size(), date_str);
 
     if (AssetProcessor::process_single_day(asset_code, date_str, TEMP_DIR, l2_archive_base, encoder, decoder, HFA_)) {
-      success_count++;
       if (Config::CLEANUP_AFTER_PROCESSING) {
         FileManager::cleanup_temp_files(PathUtils::generate_temp_asset_dir(TEMP_DIR, date_str, asset_code));
       }
     }
   }
-
-  std::cout << "  Done: " << asset_code << " (" << success_count << "/" << dates.size() << " days)\n";
 }
 
 // Program entry point

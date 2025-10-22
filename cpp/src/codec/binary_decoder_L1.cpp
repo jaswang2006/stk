@@ -12,7 +12,7 @@
 // #define PRINT_BINARY
 
 #ifdef DEBUG_TIMER
-#include "misc/misc.hpp"
+#include "misc/timer.hpp"
 #endif
 
 namespace BinaryDecoder_L1 {

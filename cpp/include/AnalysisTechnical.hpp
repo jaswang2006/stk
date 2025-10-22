@@ -32,9 +32,9 @@ inline double TickToPrice(int16_t tick) {
 
 namespace {} // anonymous namespace
 
-class AnalysisHighFrequency {
+class LimitOrderBook {
 public:
-  AnalysisHighFrequency(size_t capacity)
+  LimitOrderBook(size_t capacity)
       : lob(
             &snapshot_delta_t_,
             &snapshot_prices_,
@@ -61,7 +61,7 @@ public:
     bars.reserve(15 * 250 * TRADE_HRS_PER_DAY * 3600 / RESAMPLE_BASE_PERIOD); // 15 years of resampled bars
   }
 
-  ~AnalysisHighFrequency() {
+  ~LimitOrderBook() {
     // Cleanup completed
   }
 

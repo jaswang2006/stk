@@ -10,7 +10,7 @@
 
 // Project headers
 #include <model/define/DataType.hpp>
-#include <model/misc/misc.hpp>
+#include <misc/progress_single.hpp>
 
 class LabelCalmar
 {

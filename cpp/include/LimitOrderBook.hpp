@@ -423,14 +423,14 @@ struct OrderIdHash {
 // MAIN CLASS
 //========================================================================================
 
-class AnalysisHighFrequency {
+class LimitOrderBook {
 
 public:
   //======================================================================================
   // CONSTRUCTOR & CONFIGURATION
   //======================================================================================
 
-  explicit AnalysisHighFrequency(size_t ORDER_SIZE = L2::DEFAULT_ENCODER_ORDER_SIZE, ExchangeType exchange_type = ExchangeType::SSE)
+  explicit LimitOrderBook(size_t ORDER_SIZE = L2::DEFAULT_ENCODER_ORDER_SIZE, ExchangeType exchange_type = ExchangeType::SSE)
       : order_lookup_(&order_lookup_memory_pool_), order_memory_pool_(ORDER_SIZE), exchange_type_(exchange_type) {
     // Configure hash table for minimal collisions based on custom order count
     const size_t HASH_BUCKETS = (1ULL << static_cast<size_t>(std::ceil(std::log2(ORDER_SIZE / HASH_LOAD_FACTOR))));

@@ -73,7 +73,7 @@
  *   - Encoders claim work via i = next_asset_index.fetch_add(1). If i >= total, they wait/idle;
  *     they do not fetch a new folder.
  *   - After each processed asset: processed++ and print per-folder progress (processed/total):
- *     use function print_progress from misc.hpp
+ *     use function print_progress
  *     "[=====>] 14% (430/3033) 20170104 002789.SZ (2.5x)".
  *
  * STEP 3: CLEANUP AUTOMATIC VIA RAII
@@ -135,7 +135,7 @@
 #include "codec/L2_DataType.hpp"
 #include "codec/parallel/processing_types.hpp"
 #include "misc/affinity.hpp"
-#include "misc/misc.hpp"
+#include "misc/progress_single.hpp"
 #include "misc/logging.hpp"
 
 #include <algorithm>
@@ -422,7 +422,6 @@ void encoding_worker(unsigned int core_id) {
       std::lock_guard<std::mutex> lock(active_folder_mutex);
       if (active_folder) {
         int processed_count = active_folder->processed.fetch_add(1) + 1;
-        // Print progress using function from misc.hpp
         std::ostringstream message;
         message << date_str << " " << asset_code
                 << " (" << std::fixed << std::setprecision(1) << compression_ratio << "x)";

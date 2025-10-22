@@ -27,7 +27,7 @@ public:
   }
 
   // Main sampling interface - returns true when new bar formed
-  // Parameters: packed timestamp (from AnalysisHighFrequency::curr_tick_), trade direction, volume
+  // Parameters: packed timestamp (from LimitOrderBook::curr_tick_), trade direction, volume
   [[gnu::hot, gnu::always_inline]] inline bool resample(uint32_t timestamp, bool is_bid, uint32_t volume) {
     // Update cumulative volumes and last trade direction
     accumulate_volume(is_bid, volume);
