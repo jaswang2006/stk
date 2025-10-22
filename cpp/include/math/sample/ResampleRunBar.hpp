@@ -1,156 +1,208 @@
 #pragma once
 
-// System headers
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <numeric>
 #include <vector>
 
-// Project headers
 #include "codec/L2_DataType.hpp"
+
+//========================================================================================
+// VOLUME-IMBALANCE RUN BAR SAMPLER
+//========================================================================================
+// Resamples tick-by-tick trades into volume-balanced bars using run-length encoding
+// Key features:
+// - Accumulates buy/sell volumes separately until threshold reached
+// - Adapts threshold dynamically using EMA of daily statistics
+// - Enforces minimum time spacing between samples (time guard)
+// - Labels bars by dominant side (buy/sell) of final trade
+//========================================================================================
 
 class ResampleRunBar {
 public:
   explicit ResampleRunBar() {
-    daily_labels.reserve(expected_num_daily_samples);
-    daily_volumes.reserve(expected_num_daily_samples);
+    daily_labels_.reserve(expected_samples_per_day_);
+    daily_volumes_.reserve(expected_samples_per_day_);
   }
 
-  [[gnu::hot, gnu::always_inline]] inline bool resample(const L2::Order &order) {
-    // Fast early exit for non-taker orders
-    if (order.order_type != L2::OrderType::TAKER)
+  // Main sampling interface - returns true when new bar formed
+  // Parameters: packed timestamp (from AnalysisHighFrequency::curr_tick_), trade direction, volume
+  [[gnu::hot, gnu::always_inline]] inline bool resample(uint32_t timestamp, bool is_bid, uint32_t volume) {
+    // Update cumulative volumes and last trade direction
+    accumulate_volume(is_bid, volume);
+
+    // Check if bar should be emitted
+    if (!should_emit_bar(timestamp))
       return false;
 
-    // ---- Optimized Label and Volume Calculation ----
-    const bool is_bid = order.order_dir == L2::OrderDirection::BID;
-    const uint32_t volume = order.volume;
-
-    // Direct accumulation without intermediate variables
-    if (is_bid) {
-      cumm_buy += volume;
-      label_long = true;
-    } else {
-      cumm_sell += volume;
-      label_long = false;
-    }
-
-    // ---- Hot Path: Check Bar Formation First ----
-    const uint32_t theta = std::max(cumm_buy, cumm_sell);
-    const float threshold = std::max(ema_thresh, 0.0f);
-
-    if (theta < threshold)
-      return false; // Most common case - no bar formation
-
-    // ---- Time Guard: Prevent Too Frequent Sampling ----
-    const uint32_t current_timestamp = (static_cast<uint32_t>(order.hour) << 24) |
-                                       (static_cast<uint32_t>(order.minute) << 16) |
-                                       (static_cast<uint32_t>(order.second) << 8) |
-                                       static_cast<uint32_t>(order.millisecond);
-    const uint32_t time_diff_seconds = (current_timestamp >> 8) - (last_sample_timestamp >> 8);
-
-    if (time_diff_seconds < L2::RESAMPLE_MIN_PERIOD) [[unlikely]]
-      return false; // Time guard prevents sampling
-
-    // ---- Bar Formation Confirmed - Reset State ----
-    last_sample_timestamp = current_timestamp;
-    cumm_buy = 0;
-    cumm_sell = 0;
-    ++daily_bar_count; // Increment daily bar counter
-
-    // ---- New Day Processing ----
-    const uint8_t hour = order.hour;
-    if (hour == 9 && prev_hour != 9) [[unlikely]] {
-      // std::cout << "[DAILY STATS] Previous day formed " << daily_bar_count << " bars" << std::endl;
-      daily_bar_count = 1;
-
-      if (!daily_labels.empty()) [[likely]] {
-        daily_thresh = find_run_threshold();
-        ema_thresh = (ema_thresh < 0.0f) ? daily_thresh : alpha * daily_thresh + (1.0f - alpha) * ema_thresh;
-      }
-      daily_labels.clear();
-      daily_volumes.clear();
-    }
-    prev_hour = hour;
-
-    // Add to daily tracking (after bar formation to reduce overhead on hot path)
-    daily_labels.push_back(label_long);
-    daily_volumes.push_back(volume);
-
+    // Bar formation confirmed - emit and reset
+    emit_bar(timestamp, is_bid, volume);
     return true;
   }
 
 private:
-  int p_tar = L2::RESAMPLE_TARGET_PERIOD; // target bar length (seconds)
-  int expected_num_daily_samples = int(3600 * L2::RESAMPLE_TRADE_HRS_PER_DAY / p_tar);
-  int tolerance = static_cast<int>(expected_num_daily_samples * 0.05);
+  //======================================================================================
+  // CONFIGURATION
+  //======================================================================================
+  const int target_bar_period_ = L2::RESAMPLE_TARGET_PERIOD;                                      // Target period (seconds)
+  const int expected_samples_per_day_ = int(3600 * L2::RESAMPLE_TRADE_HRS_PER_DAY / target_bar_period_); // Expected bars per day
+  const int threshold_tolerance_ = static_cast<int>(expected_samples_per_day_ * 0.05);           // ±5% tolerance
 
-  std::vector<bool> daily_labels;
-  std::vector<uint32_t> daily_volumes;
+  const float ema_alpha_ = 2.0f / (L2::RESAMPLE_EMA_DAYS_PERIOD + 1); // EMA smoothing factor
 
-  bool label_long;
+  //======================================================================================
+  // STATE: Volume Accumulators
+  //======================================================================================
+  uint32_t accum_buy_ = 0;  // Buy-side volume accumulator
+  uint32_t accum_sell_ = 0; // Sell-side volume accumulator
 
-  const float ema_days = L2::RESAMPLE_EMA_DAYS_PERIOD;
-  const float alpha = 2.0f / (ema_days + 1);
-  float ema_thresh = L2::RESAMPLE_INIT_VOLUME_THD;
+  //======================================================================================
+  // STATE: Threshold Tracking
+  //======================================================================================
+  float threshold_ema_ = L2::RESAMPLE_INIT_VOLUME_THD; // EMA of daily thresholds (adaptive)
+  float threshold_daily_ = 0.0f;                        // Yesterday's optimal threshold
 
-  float daily_thresh = 0.0f;
-  uint8_t prev_hour = 255;
+  //======================================================================================
+  // STATE: Timing Control
+  //======================================================================================
+  uint32_t last_emit_timestamp_ = 0; // Timestamp of last bar emission (for time guard)
+  uint8_t last_hour_ = 255;          // Last observed hour (for new day detection)
 
-  uint32_t cumm_buy = 0;
-  uint32_t cumm_sell = 0;
+  //======================================================================================
+  // STATE: Daily Statistics
+  //======================================================================================
+  std::vector<bool> daily_labels_;      // Trade direction history (true=buy, false=sell)
+  std::vector<uint32_t> daily_volumes_; // Trade volume history
+  uint32_t daily_bar_count_ = 0;        // Number of bars formed today
 
-  // Time tracking for sampling frequency control
-  uint32_t last_sample_timestamp = 0;
-
-  // Daily statistics
-  uint32_t daily_bar_count = 0;
-
-  inline int compute_sample_count(float x) {
-    float acc_pos = 0.0f;
-    float acc_neg = 0.0f;
-    int num_daily_samples = 0;
-    size_t n = daily_volumes.size();
-
-    for (size_t i = 0; i < n; ++i) {
-      if (daily_labels[i])
-        acc_pos += daily_volumes[i];
-      else
-        acc_neg += daily_volumes[i];
-
-      if (acc_pos >= x || acc_neg >= x) {
-        ++num_daily_samples;
-        acc_pos = 0.0f;
-        acc_neg = 0.0f;
-      }
-    }
-    return num_daily_samples;
+  //======================================================================================
+  // CORE LOGIC: Volume Accumulation
+  //======================================================================================
+  [[gnu::hot, gnu::always_inline]] inline void accumulate_volume(bool is_bid, uint32_t volume) {
+    if (is_bid)
+      accum_buy_ += volume;
+    else
+      accum_sell_ += volume;
   }
 
-  inline float find_run_threshold() {
-    if (daily_labels.empty()) [[unlikely]]
-      return 0.0f;
+  //======================================================================================
+  // CORE LOGIC: Bar Emission Check
+  //======================================================================================
+  [[gnu::hot, gnu::always_inline]] inline bool should_emit_bar(uint32_t timestamp) const {
+    // Check 1: Volume threshold reached?
+    const uint32_t max_side = std::max(accum_buy_, accum_sell_);
+    const float threshold = std::max(threshold_ema_, 0.0f);
+    if (max_side < threshold)
+      return false;
 
-    // use accum for safety
-    float x_max = std::accumulate(daily_volumes.begin(), daily_volumes.end(), 0.0f);
-    float x_min = *std::min_element(daily_volumes.begin(), daily_volumes.end());
+    // Check 2: Time guard (minimum spacing between bars)
+    const uint32_t time_diff_seconds = (timestamp >> 8) - (last_emit_timestamp_ >> 8);
+    if (time_diff_seconds < L2::RESAMPLE_MIN_PERIOD) [[unlikely]]
+      return false;
 
-    int max_iter = 20;
-    float x_mid = 0.0f;
-    for (int i = 0; i < max_iter; ++i) {
-      x_mid = 0.5f * (x_min + x_max);
-      int num_daily_samples = compute_sample_count(x_mid);
+    return true;
+  }
 
-      if (std::abs(num_daily_samples - expected_num_daily_samples) <= tolerance || (x_max - x_min) < 100.0f) {
-        return x_mid;
-      }
+  //======================================================================================
+  // CORE LOGIC: Bar Emission and State Reset
+  //======================================================================================
+  inline void emit_bar(uint32_t timestamp, bool is_bid, uint32_t volume) {
+    // Reset volume accumulators
+    accum_buy_ = 0;
+    accum_sell_ = 0;
 
-      if (num_daily_samples > expected_num_daily_samples)
-        x_min = x_mid;
-      else
-        x_max = x_mid;
+    // Update timing state
+    last_emit_timestamp_ = timestamp;
+    ++daily_bar_count_;
+
+    // New day detection and threshold update
+    const uint8_t hour = (timestamp >> 24) & 0xFF;
+    if (hour == 9 && last_hour_ != 9) [[unlikely]] {
+      on_new_day();
+    }
+    last_hour_ = hour;
+
+    // Record trade for daily statistics
+    daily_labels_.push_back(is_bid);
+    daily_volumes_.push_back(volume);
+  }
+
+  //======================================================================================
+  // NEW DAY PROCESSING
+  //======================================================================================
+  inline void on_new_day() {
+    daily_bar_count_ = 1;
+
+    // Update threshold using yesterday's data
+    if (!daily_labels_.empty()) [[likely]] {
+      threshold_daily_ = compute_optimal_threshold();
+      threshold_ema_ = (threshold_ema_ < 0.0f) 
+                         ? threshold_daily_ 
+                         : ema_alpha_ * threshold_daily_ + (1.0f - ema_alpha_) * threshold_ema_;
     }
 
-    return 0.5f * (x_min + x_max);
+    // Clear daily statistics
+    daily_labels_.clear();
+    daily_volumes_.clear();
+  }
+
+  //======================================================================================
+  // THRESHOLD OPTIMIZATION: Binary Search
+  //======================================================================================
+  inline float compute_optimal_threshold() {
+    if (daily_labels_.empty()) [[unlikely]]
+      return 0.0f;
+
+    // Binary search bounds
+    float threshold_min = *std::min_element(daily_volumes_.begin(), daily_volumes_.end());
+    float threshold_max = std::accumulate(daily_volumes_.begin(), daily_volumes_.end(), 0.0f);
+
+    // Binary search for threshold that yields target sample count
+    constexpr int max_iterations = 20;
+    for (int iter = 0; iter < max_iterations; ++iter) {
+      const float threshold_mid = 0.5f * (threshold_min + threshold_max);
+      const int sample_count = simulate_sample_count(threshold_mid);
+
+      // Convergence check
+      if (std::abs(sample_count - expected_samples_per_day_) <= threshold_tolerance_ || 
+          (threshold_max - threshold_min) < 100.0f) {
+        return threshold_mid;
+      }
+
+      // Binary search update
+      if (sample_count > expected_samples_per_day_)
+        threshold_min = threshold_mid;
+      else
+        threshold_max = threshold_mid;
+    }
+
+    return 0.5f * (threshold_min + threshold_max);
+  }
+
+  //======================================================================================
+  // THRESHOLD OPTIMIZATION: Simulation
+  //======================================================================================
+  inline int simulate_sample_count(float threshold) const {
+    float accum_buy = 0.0f;
+    float accum_sell = 0.0f;
+    int bar_count = 0;
+
+    for (size_t i = 0; i < daily_volumes_.size(); ++i) {
+      // Accumulate volume by side
+      if (daily_labels_[i])
+        accum_buy += daily_volumes_[i];
+      else
+        accum_sell += daily_volumes_[i];
+
+      // Check bar formation
+      if (accum_buy >= threshold || accum_sell >= threshold) {
+        ++bar_count;
+        accum_buy = 0.0f;
+        accum_sell = 0.0f;
+      }
+    }
+
+    return bar_count;
   }
 };

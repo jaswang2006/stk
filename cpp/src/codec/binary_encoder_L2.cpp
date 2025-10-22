@@ -200,28 +200,51 @@ inline uint64_t BinaryEncoder_L2::parse_turnover_to_fen(std::string_view str) {
   return parse_numeric_field(str, 1);
 }
 
+// Helper: Detect CSV line delimiter (find first line ending)
+static char detect_csv_delimiter(const std::string &filepath) {
+  std::ifstream file(filepath, std::ios::binary);
+  if (!file.is_open()) return '\n';
+  
+  char ch;
+  while (file.get(ch)) {
+    if (ch == '\r') return '\r';
+    if (ch == '\n') return '\n';
+  }
+  return '\n';
+}
+
+// Helper: Parse CSV with detected delimiter
+template<typename ParseFunc>
+static bool parse_csv_with_delimiter(const std::string &filepath, char delimiter, ParseFunc parse_func) {
+  auto file = open_csv_with_gbk(filepath);
+  if (!file.is_open()) return false;
+
+  std::string line;
+  if (!std::getline(file, line, delimiter)) return false;
+  // Remove trailing \n or \r if present (handle mixed line endings)
+  while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+
+  size_t line_count = 0;
+  while (std::getline(file, line, delimiter)) {
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+    if (line.empty()) continue;
+    parse_func(line);
+    line_count++;
+  }
+  
+  return line_count > 0;
+}
+
 // Parse snapshot CSV file
 bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, 
                                           std::vector<CSVSnapshot> &snapshots) {
-  auto file = open_csv_with_gbk(filepath);
-  if (!file.is_open()) [[unlikely]] {
-    Logger::log_parsing_error("Cannot open snapshot CSV: " + filepath);
-    return false;
-  }
-
-  std::string line;
-  if (!std::getline(file, line)) [[unlikely]] {
-    Logger::log_parsing_error("Cannot read snapshot CSV header: " + filepath);
-    return true; // Empty file is ok
-  }
-
   uint32_t prev_trade_count = 0;
   size_t line_number = 1;
 
-  while (std::getline(file, line)) {
+  auto parse_line = [&](const std::string &line) {
     ++line_number;
     auto fields = split_csv_line_view(line);
-    if (fields.size() < 65) continue;
+    if (fields.size() < 65) return;
 
     try {
       CSVSnapshot snap = {};
@@ -260,8 +283,15 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath,
       snapshots.push_back(snap);
     } catch (const std::exception &e) {
       Logger::log_parsing_error("Error parsing snapshot: " + std::string(e.what()));
-      continue;
+      return;
     }
+  };
+
+  // Auto-detect delimiter and parse
+  char delimiter = detect_csv_delimiter(filepath);
+  if (!parse_csv_with_delimiter(filepath, delimiter, parse_line)) {
+    Logger::log_parsing_error("Cannot parse snapshot CSV: " + filepath);
+    return false;
   }
 
   return true;
@@ -270,21 +300,9 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath,
 // Parse order CSV file
 bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, 
                                        std::vector<CSVOrder> &orders) {
-  auto file = open_csv_with_gbk(filepath);
-  if (!file.is_open()) [[unlikely]] {
-    Logger::log_parsing_error("Cannot open order CSV: " + filepath);
-    return false;
-  }
-
-  std::string line;
-  if (!std::getline(file, line)) [[unlikely]] {
-    Logger::log_parsing_error("Cannot read order CSV header: " + filepath);
-    return true;
-  }
-
-  while (std::getline(file, line)) {
+  auto parse_line = [&](const std::string &line) {
     auto fields = split_csv_line_view(line);
-    if (fields.size() < 10) continue;
+    if (fields.size() < 10) return;
 
     try {
       CSVOrder order = {};
@@ -316,8 +334,15 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath,
       orders.push_back(order);
     } catch (const std::exception &e) {
       Logger::log_parsing_error("Error parsing order: " + std::string(e.what()));
-      continue;
+      return;
     }
+  };
+
+  // Auto-detect delimiter and parse
+  char delimiter = detect_csv_delimiter(filepath);
+  if (!parse_csv_with_delimiter(filepath, delimiter, parse_line)) {
+    Logger::log_parsing_error("Cannot parse order CSV: " + filepath);
+    return false;
   }
 
   return true;
@@ -326,21 +351,9 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath,
 // Parse trade CSV file
 bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, 
                                        std::vector<CSVTrade> &trades) {
-  auto file = open_csv_with_gbk(filepath);
-  if (!file.is_open()) [[unlikely]] {
-    Logger::log_parsing_error("Cannot open trade CSV: " + filepath);
-    return false;
-  }
-
-  std::string line;
-  if (!std::getline(file, line)) [[unlikely]] {
-    Logger::log_parsing_error("Cannot read trade CSV header: " + filepath);
-    return true;
-  }
-
-  while (std::getline(file, line)) {
+  auto parse_line = [&](const std::string &line) {
     auto fields = split_csv_line_view(line);
-    if (fields.size() < 12) continue;
+    if (fields.size() < 12) return;
 
     try {
       CSVTrade trade = {};
@@ -370,8 +383,15 @@ bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath,
       trades.push_back(trade);
     } catch (const std::exception &e) {
       Logger::log_parsing_error("Error parsing trade: " + std::string(e.what()));
-      continue;
+      return;
     }
+  };
+
+  // Auto-detect delimiter and parse
+  char delimiter = detect_csv_delimiter(filepath);
+  if (!parse_csv_with_delimiter(filepath, delimiter, parse_line)) {
+    Logger::log_parsing_error("Cannot parse trade CSV: " + filepath);
+    return false;
   }
 
   return true;
@@ -651,6 +671,18 @@ bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots,
   std::vector<Snapshot> data = snapshots;
   const size_t count = data.size();
 
+  // Clear temp buffers before reuse
+  temp_snap_hours.clear();
+  temp_snap_minutes.clear();
+  temp_snap_seconds.clear();
+  temp_snap_closes.clear();
+  temp_snap_bid_vwaps.clear();
+  temp_snap_ask_vwaps.clear();
+  temp_snap_bid_volumes.clear();
+  temp_snap_ask_volumes.clear();
+  for (auto &vec : temp_snap_bid_prices) vec.clear();
+  for (auto &vec : temp_snap_ask_prices) vec.clear();
+
   // Apply delta encoding
   if (use_delta && count > 1) {
     apply_delta_encoding_snapshots(data, temp_snap_hours, temp_snap_minutes, temp_snap_seconds,
@@ -680,6 +712,15 @@ bool BinaryEncoder_L2::encode_orders(const std::vector<Order> &orders,
 
   std::vector<Order> data = orders;
   const size_t count = data.size();
+
+  // Clear temp buffers before reuse
+  temp_order_hours.clear();
+  temp_order_minutes.clear();
+  temp_order_seconds.clear();
+  temp_order_millis.clear();
+  temp_order_prices.clear();
+  temp_order_bid_ids.clear();
+  temp_order_ask_ids.clear();
 
   // Apply delta encoding
   if (use_delta && count > 1) {
@@ -826,6 +867,14 @@ bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
                                    "_orders_" + std::to_string(all_orders.size()) + ".bin";
     if (!encode_orders(all_orders, output_file, ENABLE_DELTA_ENCODING)) return false;
   }
+
+  // Release temporary memory after each day
+  csv_snaps.clear();
+  csv_snaps.shrink_to_fit();
+  csv_orders.clear();
+  csv_orders.shrink_to_fit();
+  csv_trades.clear();
+  csv_trades.shrink_to_fit();
 
   return true;
 }

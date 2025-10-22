@@ -16,15 +16,29 @@ import time
 # ============================================================================
 # Configuration
 # ============================================================================
-ENABLE_PROFILE = False                          # Enable CPU profiling
+ENABLE_PROFILE = False
 APP_NAME = "main"                              # C++ project name
-CPUPROFILE_FREQUENCY = 40000                   # Profiler sampling rate (Hz)
+CPUPROFILE_FREQUENCY = 1000000                 # Profiler sampling rate (Hz)
 PROFILER_LIB = '/usr/lib/x86_64-linux-gnu/libprofiler.so.0'
 
 # Profiler report settings
 TARGET_NAMESPACE = "AssetProcessor"            # Focus namespace
 PPROF_PORT = 8080                              # Web GUI port
 PPROF_IGNORE = "std::|__gnu_cxx::"             # Filter standard library
+
+
+def _cleanup_background_processes():
+    """Kill background processes that may cause memory bloat."""
+    processes_to_kill = [
+        f"pprof.*{PPROF_PORT}",      # Old pprof web servers
+        f"app_{APP_NAME}",            # Old app instances
+    ]
+    
+    for pattern in processes_to_kill:
+        subprocess.run(["pkill", "-9", "-f", pattern], 
+                      capture_output=True, check=False)
+    
+    time.sleep(0.3)
 
 
 def _cleanup_old_profiler():
@@ -143,6 +157,10 @@ def main():
     # Change to script directory
     script_dir = os.path.dirname(os.path.abspath(__file__))
     os.chdir(script_dir)
+    
+    # Cleanup background processes first
+    print("Cleaning up background processes...")
+    _cleanup_background_processes()
     
     # Build project
     build_project(APP_NAME, ENABLE_PROFILE)

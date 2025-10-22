@@ -454,8 +454,15 @@ public:
 
   // Process single order and update LOB state
   HOT_NOINLINE bool process(const L2::Order &order) {
+    // Parse timestamp
     curr_tick_ = (order.hour << 24) | (order.minute << 16) | (order.second << 8) | order.millisecond;
     new_tick_ = curr_tick_ != prev_tick_;
+
+    // Parse order metadata (cache for reuse)
+    is_maker_ = (order.order_type == L2::OrderType::MAKER);
+    is_taker_ = (order.order_type == L2::OrderType::TAKER);
+    is_cancel_ = (order.order_type == L2::OrderType::CANCEL);
+    is_bid_ = (order.order_dir == L2::OrderDirection::BID);
 
     // Update session state on tick change
     if (new_tick_) [[unlikely]] {
@@ -474,9 +481,11 @@ public:
 #endif
     prev_tick_ = curr_tick_;
 
-    // Process resampling
-    if (resampler_.resample(order)) {
-      // std::cout << "[RESAMPLE] Bar formed at " << format_time() << std::endl;
+    // Process resampling (only for TAKER orders)
+    if (is_taker_) [[likely]] {
+      if (resampler_.resample(curr_tick_, is_bid_, order.volume)) {
+        // std::cout << "[RESAMPLE] Bar formed at " << format_time() << std::endl;
+      }
     }
 
     bool result = update_lob(order);
@@ -530,12 +539,12 @@ public:
     const bool need_bilateral_matching = (exchange_type_ == ExchangeType::SZSE) ||
                                          (exchange_type_ == ExchangeType::SSE && in_matching_period_);
 
-    if (order.order_type == L2::OrderType::TAKER && need_bilateral_matching &&
+    if (is_taker_ && need_bilateral_matching &&
         order.bid_order_id != 0 && order.ask_order_id != 0) [[unlikely]] {
       return handle_bilateral_matching(order);
     }
 
-    // Extract operation parameters
+    // Extract operation parameters (using cached is_maker_/is_taker_/is_cancel_ and is_bid_)
     delta_qty_ = order_get_delta_qty(order);
     target_id_ = order_get_target_id(order);
     if (delta_qty_ == 0 || target_id_ == 0) [[unlikely]]
@@ -552,15 +561,14 @@ public:
     //====================================================================================
     // FAST PATH: TAKER/CANCEL with existing order
     //====================================================================================
-    if ((order.order_type == L2::OrderType::TAKER || order.order_type == L2::OrderType::CANCEL) &&
-        found && !in_call_auction_) [[likely]] {
+    if ((is_taker_ || is_cancel_) && found && !in_call_auction_) [[likely]] {
       Level *existing_level = it->second.level;
       actual_price_ = existing_level->price;
 
       if (actual_price_ == order.price) [[likely]] {
         bool was_fully_consumed = order_upsert(target_id_, actual_price_, delta_qty_, it, OrderFlags::NORMAL, existing_level);
-        if (order.order_type == L2::OrderType::TAKER) {
-          update_tob_after_trade(order, was_fully_consumed, actual_price_);
+        if (is_taker_) {
+          update_tob_after_trade(was_fully_consumed, actual_price_);
         }
         return true;
       }
@@ -570,7 +578,7 @@ public:
     //====================================================================================
     // FAST PATH: MAKER (most common case)
     //====================================================================================
-    if (order.order_type == L2::OrderType::MAKER && !in_call_auction_ && order.price != 0 && !found) {
+    if (is_maker_ && !in_call_auction_ && order.price != 0 && !found) {
       actual_price_ = order.price;
       // For MAKER, we may need to create level, so don't pass hint
       order_upsert(target_id_, actual_price_, delta_qty_, it, OrderFlags::NORMAL);
@@ -584,6 +592,7 @@ public:
   };
 
   // Slow path: handle corner cases (out-of-order, call auction, special prices)
+  // NOTE: Uses cached is_maker_/is_taker_/is_cancel_ and is_bid_ from process()
   [[gnu::cold]] [[gnu::noinline]] bool update_lob_deferred(
       const L2::Order &order,
       std::pmr::unordered_map<OrderId, Location, OrderIdHash>::iterator it,
@@ -594,7 +603,7 @@ public:
     //====================================================================================
     // MAKER ORDER
     //====================================================================================
-    if (order.order_type == L2::OrderType::MAKER) {
+    if (is_maker_) {
       // Determine placement and flags
       Price placement_price;
       OrderFlags flags;
@@ -631,9 +640,8 @@ public:
     //====================================================================================
     // TAKER ORDER
     //====================================================================================
-    if (order.order_type == L2::OrderType::TAKER) {
-      const bool is_bid = (order.order_dir == L2::OrderDirection::BID);
-      const OrderId self_id = is_bid ? order.bid_order_id : order.ask_order_id;
+    if (is_taker_) {
+      const OrderId self_id = is_bid_ ? order.bid_order_id : order.ask_order_id;
       const bool both_ids_present = (order.bid_order_id != 0 && order.ask_order_id != 0);
 
       // Handle target order (counterparty)
@@ -656,7 +664,7 @@ public:
 
         actual_price_ = order.price;
         bool was_fully_consumed = order_upsert(target_id_, actual_price_, delta_qty_, it);
-        update_tob_after_trade(order, was_fully_consumed, actual_price_);
+        update_tob_after_trade(was_fully_consumed, actual_price_);
       } else {
         // OUT_OF_ORDER: create placeholder
         actual_price_ = order.price;
@@ -688,7 +696,7 @@ public:
     //====================================================================================
     // CANCEL ORDER
     //====================================================================================
-    if (order.order_type == L2::OrderType::CANCEL) {
+    if (is_cancel_) {
       if (found) {
         Price self_price = it->second.level->price;
 
@@ -880,6 +888,12 @@ private:
   mutable OrderId target_id_;  // Target order ID for current operation
   mutable Price actual_price_; // Actual effective price for current operation
 
+  // Order parsing cache (parsed once per order in process())
+  mutable bool is_maker_;
+  mutable bool is_taker_;
+  mutable bool is_cancel_;
+  mutable bool is_bid_;
+
   // Resampling components
   ResampleRunBar resampler_;
 
@@ -1017,15 +1031,13 @@ private:
   
   // Helper: Calculate signed quantity delta for order type
   // Returns: +qty (add to level), -qty (deduct from level)
+  // NOTE: Uses cached is_maker_/is_taker_/is_cancel_ and is_bid_ from process()
   HOT_INLINE Quantity order_get_delta_qty(const L2::Order &order) const {
-    const bool is_bid = (order.order_dir == L2::OrderDirection::BID);
-
-    switch (order.order_type) {
-    case L2::OrderType::MAKER:
-      return is_bid ? +order.volume : -order.volume;
-    case L2::OrderType::CANCEL:
-      return is_bid ? -order.volume : +order.volume;
-    case L2::OrderType::TAKER: {
+    if (is_maker_) {
+      return is_bid_ ? +order.volume : -order.volume;
+    } else if (is_cancel_) {
+      return is_bid_ ? -order.volume : +order.volume;
+    } else if (is_taker_) {
       // For TAKER, determine sign based on which ID is smaller (the maker side)
       bool target_is_bid;
       if (order.bid_order_id != 0 && order.ask_order_id != 0) {
@@ -1036,29 +1048,22 @@ private:
       // Deduct from maker: BID maker needs -volume, ASK maker needs +volume
       return target_is_bid ? -order.volume : +order.volume;
     }
-    default:
-      return 0;
-    }
+    return 0;
   }
 
   // Helper: Extract target order ID (the order to be modified)
+  // NOTE: Uses cached is_maker_/is_taker_/is_cancel_ and is_bid_ from process()
   HOT_INLINE OrderId order_get_target_id(const L2::Order &order) const {
-    const bool is_bid = (order.order_dir == L2::OrderDirection::BID);
-
-    switch (order.order_type) {
-    case L2::OrderType::MAKER:
-      return is_bid ? order.bid_order_id : order.ask_order_id;
-    case L2::OrderType::CANCEL:
-      return is_bid ? order.bid_order_id : order.ask_order_id;
-    case L2::OrderType::TAKER:
+    if (is_maker_ || is_cancel_) {
+      return is_bid_ ? order.bid_order_id : order.ask_order_id;
+    } else if (is_taker_) {
       // Use smaller (earlier) ID as it must be the passive maker order
       if (order.bid_order_id != 0 && order.ask_order_id != 0) {
         return (order.bid_order_id < order.ask_order_id) ? order.bid_order_id : order.ask_order_id;
       }
       return (order.bid_order_id != 0) ? order.bid_order_id : order.ask_order_id;
-    default:
-      return 0;
     }
+    return 0;
   }
 
   // Core: Upsert order (update existing or insert new)
@@ -1279,9 +1284,9 @@ private:
   }
 
   // Update TOB after single-side trade (SSE continuous trading)
-  HOT_INLINE void update_tob_after_trade(const L2::Order &order, bool was_fully_consumed, Price trade_price) {
-    const bool is_active_bid = (order.order_dir == L2::OrderDirection::BID);
-    update_tob_one_side(is_active_bid, was_fully_consumed, trade_price);
+  // NOTE: Uses cached is_bid_ from process()
+  HOT_INLINE void update_tob_after_trade(bool was_fully_consumed, Price trade_price) {
+    update_tob_one_side(is_bid_, was_fully_consumed, trade_price);
   }
 
   //======================================================================================

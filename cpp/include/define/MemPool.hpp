@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cassert>
+#include <iostream>
 #include <type_traits>
 #include <vector>
 
@@ -97,10 +98,10 @@ public:
   // Ultra-fast O(1) allocation
   [[gnu::hot]] T *allocate() {
     if (used_ >= capacity_) [[unlikely]] {
-      // Memory exhausted, try to expand
-      if (!try_expand()) {
-        return nullptr; // Allocation failed
-      }
+      std::cerr << std::endl;
+      std::cerr << "[MemoryPool] Capacity exceeded! Initial capacity: " << capacity_ 
+                << ", used: " << used_ << std::endl;
+      exit(0);
     }
 
     return &data_[used_++];
@@ -199,6 +200,10 @@ public:
     const T *end = start + capacity_;
     return ptr >= start && ptr < end;
   }
+
+  // Get current usage
+  size_t size() const { return used_; }
+  size_t capacity() const { return capacity_; }
 
 private:
   // ========================================================================

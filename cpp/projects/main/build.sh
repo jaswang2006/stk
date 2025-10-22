@@ -26,6 +26,7 @@ if [ "$PROFILE_MODE" = "ON" ]; then
     CMAKE_ARGS="$CMAKE_ARGS -DPROFILE_MODE=ON"
 else
     echo "Profile mode: DISABLED"
+    CMAKE_ARGS="$CMAKE_ARGS -DPROFILE_MODE=OFF"
 fi
 
 # Configure

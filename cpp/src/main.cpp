@@ -354,6 +354,21 @@ public:
     // decoder.print_all_orders(orders);
     // exit(1);
 
+    // Validate data counts before cleanup
+    constexpr size_t MIN_EXPECTED_COUNT = 1000;
+    if (!snapshots.empty() && snapshots.size() < MIN_EXPECTED_COUNT) [[unlikely]] {
+      Logger::log_parsing_error("Abnormal snapshot count: " + asset_code + " " + date_str + 
+                               " has only " + std::to_string(snapshots.size()) + " snapshots (expected >= " + 
+                               std::to_string(MIN_EXPECTED_COUNT) + ")");
+      std::exit(0);
+    }
+    if (!orders.empty() && orders.size() < MIN_EXPECTED_COUNT) [[unlikely]] {
+      Logger::log_parsing_error("Abnormal order count: " + asset_code + " " + date_str + 
+                               " has only " + std::to_string(orders.size()) + " orders (expected >= " + 
+                               std::to_string(MIN_EXPECTED_COUNT) + ")");
+      std::exit(0);
+    }
+
     const std::string snap_file = snapshots.empty() ? "" : temp_asset_dir + "/" + asset_code + "_snapshots_" + std::to_string(snapshots.size()) + Config::BIN_EXTENSION;
     const std::string ord_file = orders.empty() ? "" : temp_asset_dir + "/" + asset_code + "_orders_" + std::to_string(orders.size()) + Config::BIN_EXTENSION;
 

@@ -1,6 +1,11 @@
 cmake_minimum_required(VERSION 3.20)
 project(Main VERSION 1.0.0 LANGUAGES CXX C)
 
+# Force Clang compiler
+if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR "This project requires Clang compiler. Current compiler: ${CMAKE_CXX_COMPILER_ID}")
+endif()
+
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,39 +15,40 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON) # for clangd syntax highlighting
 # PROFILE mode: disable aggressive optimizations for better profiling visibility
 option(PROFILE_MODE "Build with profiling-friendly flags (no LTO, less inlining)" OFF)
 
-# Compiler-specific options
+# Compiler options
 if(PROFILE_MODE)
-    message(STATUS "PROFILE_MODE: profiling with all inlining and function optimizations disabled")
-    set(CMAKE_CXX_FLAGS "-Og -g -Wall -Wextra -march=native -fno-omit-frame-pointer")
+    message(STATUS "PROFILE_MODE: sampling profiling with comprehensive optimization disabling")
     add_compile_definitions(PROFILE_MODE)  # Enable PROFILE_MODE macro in source code
+    
+    # Base flags for profiling
+    set(CMAKE_CXX_FLAGS "-O0 -g -Wall -Wextra -march=native -fno-omit-frame-pointer")
     # Disable all forms of inlining
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-inline")                          # No inline at all
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-inline-functions")                # No automatic inlining
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-inline-small-functions")          # No small function inlining
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-inline-functions-called-once")    # No single-call inlining
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-early-inlining")                  # No early inlining phase
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-default-inline")                  # No C++ default inline (class methods)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-partial-inlining")                # No partial inlining
-    # Disable interprocedural optimizations
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-ipa-cp")                          # No constant propagation
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-ipa-cp-clone")                    # No cloning for constants
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-ipa-sra")                         # No scalar replacement
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-ipa-icf")                         # No identical code folding
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-inline")                       # No inline at all
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-inline-functions")             # No automatic inlining
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mllvm -inline-threshold=0")        # Force inline threshold to 0
     # Disable call optimizations
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-optimize-sibling-calls")          # No tail call optimization
-    # No LTO - keep all function boundaries visible for sampling
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-optimize-sibling-calls")       # No tail call optimization
+    # Disable loop optimizations
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-unroll-loops")                 # No loop unrolling
+    # Disable vectorization
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-vectorize")                    # No auto-vectorization
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-slp-vectorize")                # No SLP vectorization
+    # Disable builtin optimizations
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-builtin")                      # No builtin function optimizations    
 else()
-    # Production: Maximum performance
-    message(STATUS "Production build: -O3 with LTO")
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-        set(CMAKE_CXX_FLAGS "-O3 -Wall -Wextra -march=native -flto -DNDEBUG -ffast-math")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
-    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        set(CMAKE_CXX_FLAGS "-O3 -Wall -Wextra -march=native -flto=auto -DNDEBUG -ffast-math")
-    elseif(MSVC)
-        set(CMAKE_CXX_FLAGS "/O2 /W4 /EHsc /DNDEBUG /GL /Gy /Gw /arch:AVX2 /fp:fast")
-        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} /LTCG /OPT:REF /OPT:ICF")
-    endif()
+    message(STATUS "Production build: Optimized for performance")
+    
+    # Base optimization flags
+    set(CMAKE_CXX_FLAGS "-O3 -DNDEBUG -Wall -Wextra")
+    # CPU-specific optimizations
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
+    # LTO for cross-module optimizations
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -flto=thin")
+    # Fast math (already includes many aggressive FP optimizations)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -ffast-math")
+    # Link-time optimizations
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--icf=all")
 endif()
 
 # Output directories
