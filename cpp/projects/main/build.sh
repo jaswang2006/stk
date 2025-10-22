@@ -1,52 +1,51 @@
 #!/bin/bash
+#
+# C++ Build Script
+# Compiles the project and copies compile_commands.json for clangd
+#
+
+set -e  # Exit on error
 
 echo "========================================"
-echo "    BinaryParser Build Script (Linux)"
+echo "  C++ Build Script"
 echo "========================================"
 
-# Set compiler environment variables for clang
+# Compiler configuration
 export CC=clang
 export CXX=clang++
 
-# Configure with CMake using Ninja generator
-echo "Configuring project with CMake using Ninja generator..."
-cmake -S . -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+# Build configuration
+BUILD_TYPE="Release"
+CMAKE_ARGS="-S . -B build -G Ninja"
+CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_BUILD_TYPE=$BUILD_TYPE"
+CMAKE_ARGS="$CMAKE_ARGS -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
 
-# Check if configuration was successful
-if [ $? -ne 0 ]; then
-    echo "CMake configuration failed!"
-    exit 1
+# Profile mode
+if [ "$PROFILE_MODE" = "ON" ]; then
+    echo "Profile mode: ENABLED"
+    CMAKE_ARGS="$CMAKE_ARGS -DPROFILE_MODE=ON"
+else
+    echo "Profile mode: DISABLED"
 fi
 
-# Build the project
-echo "Building project..."
+# Configure
+echo ""
+echo "Configuring with CMake..."
+cmake $CMAKE_ARGS
+
+# Build
+echo ""
+echo "Building..."
 cmake --build build --parallel
 
-# Check if build was successful
-if [ $? -ne 0 ]; then
-    echo "Build failed!"
-    exit 1
-fi
-
-echo "Build completed successfully!"
-
-# Copy compile_commands.json to root directory for IDE access
+# Copy compile_commands.json for clangd
 if [ -f "build/compile_commands.json" ]; then
-    echo "Copying compile_commands.json to root directory..."
     cp "build/compile_commands.json" "../../compile_commands.json"
-    echo "compile_commands.json copied to root directory"
-else
-    echo "Warning: compile_commands.json not found"
+    echo ""
+    echo "✓ compile_commands.json copied for clangd"
 fi
 
-# Move executable to root directory
-if [ -f "build/bin/app_main" ]; then
-    echo "Moving executable to root directory..."
-    mv "build/bin/app_main" "../../app_main"
-    echo "Executable moved to: ../../app_main"
-    ../../app_main
-else
-    echo "Warning: Executable not found at expected location"
-fi
-
-# Done
+echo ""
+echo "========================================"
+echo "  Build completed successfully!"
+echo "========================================"
