@@ -6,222 +6,260 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-
 #include <iostream>
 #include <locale>
 #include <memory>
-#include <sstream>
+
+// Data format reference: config/sample/L2/README
 
 namespace L2 {
 
-// Open file with GBK locale for direct reading
-static std::ifstream open_gbk_file(const std::string &filepath) {
+// ============================================================================
+// Section 1: Utility Functions (Low-level helpers)
+// ============================================================================
+
+// Open CSV file with GBK encoding support
+static std::ifstream open_csv_with_gbk(const std::string &filepath) {
   std::ifstream file(filepath);
   if (file.is_open()) {
-    // Set locale to handle GBK encoding properly
     try {
       file.imbue(std::locale("zh_CN.GBK"));
     } catch (const std::exception &) {
-      // Fallback to default locale if GBK not available
-      // File will still work, just might have encoding issues with Chinese characters
+      // Fallback to default locale if GBK unavailable
     }
   }
   return file;
 }
 
-// Constructor with capacity hints
-BinaryEncoder_L2::BinaryEncoder_L2(size_t estimated_snapshots, size_t estimated_orders) {
-  // Pre-reserve space for snapshot vectors
-  temp_hours.reserve(estimated_snapshots);
-  temp_minutes.reserve(estimated_snapshots);
-  temp_seconds.reserve(estimated_snapshots);
-  // temp_highs.reserve(estimated_snapshots);
-  // temp_lows.reserve(estimated_snapshots);
-  temp_closes.reserve(estimated_snapshots);
-  temp_all_bid_vwaps.reserve(estimated_snapshots);
-  temp_all_ask_vwaps.reserve(estimated_snapshots);
-  temp_all_bid_volumes.reserve(estimated_snapshots);
-  temp_all_ask_volumes.reserve(estimated_snapshots);
-
-  for (size_t i = 0; i < 10; ++i) {
-    temp_bid_prices[i].reserve(estimated_snapshots);
-    temp_ask_prices[i].reserve(estimated_snapshots);
+// Fast integer parsing (avoids std::stoul/stoull overhead)
+static inline uint32_t fast_parse_u32(std::string_view s) {
+  if (s.empty()) return 0;
+  uint32_t val = 0;
+  for (char c : s) {
+    if (c >= '0' && c <= '9') {
+      val = val * 10 + (c - '0');
+    }
   }
-
-  // Pre-reserve space for order vectors
-  temp_order_hours.reserve(estimated_orders);
-  temp_order_minutes.reserve(estimated_orders);
-  temp_order_seconds.reserve(estimated_orders);
-  temp_order_milliseconds.reserve(estimated_orders);
-  temp_order_prices.reserve(estimated_orders);
-  temp_bid_order_ids.reserve(estimated_orders);
-  temp_ask_order_ids.reserve(estimated_orders);
+  return val;
 }
 
-// CSV parsing functions
-std::vector<std::string> BinaryEncoder_L2::split_csv_line(const std::string &line) {
-  std::vector<std::string> result;
-  std::stringstream ss(line);
-  std::string item;
-
-  while (std::getline(ss, item, ',')) {
-    result.push_back(item);
+static inline uint64_t fast_parse_u64(std::string_view s) {
+  if (s.empty()) return 0;
+  uint64_t val = 0;
+  for (char c : s) {
+    if (c >= '0' && c <= '9') {
+      val = val * 10 + (c - '0');
+    }
   }
-
-  return result;
+  return val;
 }
 
+// Generic number string parser with whitespace handling
+// Returns parsed integer, divided by specified divisor
+static inline uint64_t parse_numeric_field(std::string_view str, uint32_t divisor) {
+  if (str.empty()) return 0;
+  
+  const char* p = str.data();
+  const char* end = p + str.size();
+  
+  // Skip leading whitespace (handles \x20, \x00, \t, \n, \r)
+  while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0')) ++p;
+  if (p == end) return 0;
+  
+  // Parse integer part
+  uint64_t value = 0;
+  while (p < end && *p >= '0' && *p <= '9') {
+    value = value * 10 + (*p - '0');
+    ++p;
+  }
+  
+  // Skip decimal part if present (not used)
+  if (p < end && *p == '.') {
+    ++p;
+    while (p < end && *p >= '0' && *p <= '9') ++p;
+  }
+  
+  return value == 0 ? 0 : value / divisor;
+}
+
+// Time decomposition helpers
+static inline uint8_t extract_hour(uint32_t time_ms) {
+  return static_cast<uint8_t>(time_ms / 3600000);
+}
+
+static inline uint8_t extract_minute(uint32_t time_ms) {
+  return static_cast<uint8_t>((time_ms % 3600000) / 60000);
+}
+
+static inline uint8_t extract_second(uint32_t time_ms) {
+  return static_cast<uint8_t>((time_ms % 60000) / 1000);
+}
+
+static inline uint8_t extract_millisecond_10ms(uint32_t time_ms) {
+  return static_cast<uint8_t>((time_ms % 1000) / 10);
+}
+
+// Market detection
+static inline bool is_shenzhen_market(const std::string &stock_code) {
+  if (stock_code.size() >= 3) {
+    const char* suffix = stock_code.data() + stock_code.size() - 3;
+    // Check for .SZ or .sz
+    if (suffix[0] == '.' && (suffix[1] == 'S' || suffix[1] == 's') && 
+        (suffix[2] == 'Z' || suffix[2] == 'z')) {
+      return true;
+    }
+    // Check for .SH or .sh
+    if (suffix[0] == '.' && (suffix[1] == 'S' || suffix[1] == 's') && 
+        (suffix[2] == 'H' || suffix[2] == 'h')) {
+      return false;
+    }
+  }
+  assert(false && "Invalid stock code format (must end with .SZ or .SH)");
+  return false;
+}
+
+// Order type determination based on exchange rules
+static inline uint8_t determine_order_type(char csv_order_type, char csv_trade_code, 
+                                          bool is_trade, bool is_shenzhen) {
+  if (is_trade) {
+    // Trade: cancel(1) or taker(3)
+    return (is_shenzhen && csv_trade_code == 'C') ? 1 : 3;
+  }
+  
+  // Order: all maker(0) for SZSE; maker(0) or cancel(1) for SSE
+  if (is_shenzhen) {
+    return 0; // SZSE orders are all maker
+  } else {
+    // SSE: A/a=add/maker, D/d=delete/cancel
+    return (csv_order_type == 'A' || csv_order_type == 'a') ? 0 : 
+           (csv_order_type == 'D' || csv_order_type == 'd') ? 1 : 0;
+  }
+}
+
+// Order direction: false=bid(B), true=ask(S)
+static inline bool determine_order_direction(char side_flag) {
+  return side_flag == 'S' || side_flag == 's';
+}
+
+// ============================================================================
+// Section 2: CSV Parsing (String → Intermediate structures)
+// ============================================================================
+
+// Split CSV line into string_view fields (zero-copy)
+std::vector<std::string_view> BinaryEncoder_L2::split_csv_line_view(std::string_view line) {
+  std::vector<std::string_view> fields;
+  fields.reserve(70); // Typical snapshot has ~65 fields
+  
+  size_t start = 0;
+  const size_t len = line.length();
+  
+  for (size_t pos = 0; pos < len; ++pos) {
+    if (line[pos] == ',') {
+      fields.emplace_back(line.data() + start, pos - start);
+      start = pos + 1;
+    }
+  }
+  
+  // Last field
+  if (start <= len) {
+    fields.emplace_back(line.data() + start, len - start);
+  }
+  
+  return fields;
+}
+
+// Convert time from HHMMSSMMM format to milliseconds
 uint32_t BinaryEncoder_L2::parse_time_to_ms(uint32_t time_int) {
-  // time format: HHMMSSMMM (9 digits) - extract hour, minute, second, millisecond
   uint32_t ms = time_int % 1000;
   time_int /= 1000;
-  uint32_t second = time_int % 100;
+  uint32_t sec = time_int % 100;
   time_int /= 100;
-  uint32_t minute = time_int % 100;
-  time_int /= 100;
-  uint32_t hour = time_int;
-
-  return hour * 3600000 + minute * 60000 + second * 1000 + ms;
-}
-
-inline uint32_t BinaryEncoder_L2::parse_price_to_fen(const std::string &price_str) {
-  // Handle NaN values: empty string, space (\x20), or null character (\x00)
-  if (price_str.empty() || price_str[0] == ' ' || price_str[0] == '\0' || price_str == "0") {
-    return 0;
-  }
-  // Trim leading/trailing whitespace
-  size_t start = price_str.find_first_not_of(" \t\n\r\0");
-  if (start == std::string::npos) return 0;
-  size_t end = price_str.find_last_not_of(" \t\n\r\0");
-  std::string trimmed = price_str.substr(start, end - start + 1);
-  if (trimmed.empty() || trimmed == "0") return 0;
+  uint32_t min = time_int % 100;
+  uint32_t hour = time_int / 100;
   
-  // Optimized: Convert directly from CSV to 0.01 RMB units
-  // CSV / 10000 / 0.01 = CSV / 100, avoiding floating point operations
-  return static_cast<uint32_t>(std::stoll(trimmed) / 100);
+  return hour * 3600000 + min * 60000 + sec * 1000 + ms;
 }
 
-inline uint32_t BinaryEncoder_L2::parse_vwap_price(const std::string &price_str) {
-  // Handle NaN values: empty string, space (\x20), or null character (\x00)
-  if (price_str.empty() || price_str[0] == ' ' || price_str[0] == '\0' || price_str == "0") {
-    return 0;
-  }
-  // Trim leading/trailing whitespace
-  size_t start = price_str.find_first_not_of(" \t\n\r\0");
-  if (start == std::string::npos) return 0;
-  size_t end = price_str.find_last_not_of(" \t\n\r\0");
-  std::string trimmed = price_str.substr(start, end - start + 1);
-  if (trimmed.empty() || trimmed == "0") return 0;
-  
-  // Optimized: Convert directly from CSV to 0.001 RMB units
-  // CSV / 10000 / 0.001 = CSV / 10, avoiding floating point operations
-  return static_cast<uint32_t>(std::stoll(trimmed) / 10);
+// Parse price fields (CSV value in 0.0001 RMB → 0.01 RMB units)
+inline uint32_t BinaryEncoder_L2::parse_price_to_fen(std::string_view str) {
+  return static_cast<uint32_t>(parse_numeric_field(str, 100));
 }
 
-inline uint32_t BinaryEncoder_L2::parse_volume_to_100shares(const std::string &volume_str) {
-  // Handle NaN values: empty string, space (\x20), or null character (\x00)
-  if (volume_str.empty() || volume_str[0] == ' ' || volume_str[0] == '\0' || volume_str == "0") {
-    return 0;
-  }
-  // Trim leading/trailing whitespace
-  size_t start = volume_str.find_first_not_of(" \t\n\r\0");
-  if (start == std::string::npos) return 0;
-  size_t end = volume_str.find_last_not_of(" \t\n\r\0");
-  std::string trimmed = volume_str.substr(start, end - start + 1);
-  if (trimmed.empty()) return 0;
-  
-  // Convert from shares to 100-share units
-  return static_cast<uint32_t>(std::stoll(trimmed) / 100);
+// Parse VWAP fields (CSV value in 0.0001 RMB → 0.001 RMB units)
+inline uint32_t BinaryEncoder_L2::parse_vwap_price(std::string_view str) {
+  return static_cast<uint32_t>(parse_numeric_field(str, 10));
 }
 
-inline uint64_t BinaryEncoder_L2::parse_turnover_to_fen(const std::string &turnover_str) {
-  // Handle NaN values: empty string, space (\x20), or null character (\x00)
-  if (turnover_str.empty() || turnover_str[0] == ' ' || turnover_str[0] == '\0') {
-    return 0;
-  }
-  // Trim leading/trailing whitespace
-  size_t start = turnover_str.find_first_not_of(" \t\n\r\0");
-  if (start == std::string::npos) return 0;
-  size_t end = turnover_str.find_last_not_of(" \t\n\r\0");
-  std::string trimmed = turnover_str.substr(start, end - start + 1);
-  if (trimmed.empty()) return 0;
-  
-  return static_cast<uint64_t>(std::stod(trimmed));
+// Parse volume fields (shares → 100-share units)
+inline uint32_t BinaryEncoder_L2::parse_volume_to_100shares(std::string_view str) {
+  return static_cast<uint32_t>(parse_numeric_field(str, 100));
 }
 
-bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, std::vector<CSVSnapshot> &snapshots) {
-  // Open file with GBK locale
-  auto file = open_gbk_file(filepath);
+// Parse turnover fields (keep as-is, integer fen)
+inline uint64_t BinaryEncoder_L2::parse_turnover_to_fen(std::string_view str) {
+  return parse_numeric_field(str, 1);
+}
+
+// Parse snapshot CSV file
+bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, 
+                                          std::vector<CSVSnapshot> &snapshots) {
+  auto file = open_csv_with_gbk(filepath);
   if (!file.is_open()) [[unlikely]] {
-    Logger::log_parsing_error("Failed to open snapshot CSV: " + filepath);
+    Logger::log_parsing_error("Cannot open snapshot CSV: " + filepath);
     return false;
   }
 
   std::string line;
-
-  // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
-    Logger::log_parsing_error("Failed to read snapshot CSV header: " + filepath);
-    return true;
+    Logger::log_parsing_error("Cannot read snapshot CSV header: " + filepath);
+    return true; // Empty file is ok
   }
 
-  uint32_t prev_trade_count = 0; // Track previous trade count
+  uint32_t prev_trade_count = 0;
+  size_t line_number = 1;
 
   while (std::getline(file, line)) {
-    auto fields = split_csv_line(line);
-    if (fields.size() < 65) { // Expected minimum number of fields
-      continue;
-    }
+    ++line_number;
+    auto fields = split_csv_line_view(line);
+    if (fields.size() < 65) continue;
 
     try {
-      CSVSnapshot snapshot = {};
-      snapshot.stock_code = fields[0];
-      snapshot.exchange_code = fields[1];
-      snapshot.date = std::stoul(fields[2]);
-      snapshot.time = std::stoul(fields[3]);
-      snapshot.price = parse_price_to_fen(fields[4]);
-      snapshot.volume = parse_volume_to_100shares(fields[5]);
-      snapshot.turnover = parse_turnover_to_fen(fields[6]);
+      CSVSnapshot snap = {};
+      snap.stock_code = fields[0];
+      snap.exchange_code = fields[1];
+      snap.date = fast_parse_u32(fields[2]);
+      snap.time = fast_parse_u32(fields[3]);
+      snap.price = parse_price_to_fen(fields[4]);
+      snap.volume = parse_volume_to_100shares(fields[5]);
+      snap.turnover = parse_turnover_to_fen(fields[6]);
 
-      // Calculate incremental trade count
-      uint32_t curr_trade_count = std::stoul(fields[7]);
-      assert(curr_trade_count >= prev_trade_count && "Trade count should never decrease");
-      snapshot.trade_count = curr_trade_count - prev_trade_count;
+      // Convert cumulative trade count to incremental
+      // Handle edge case: trade count may reset or have data quality issues
+      uint32_t curr_trade_count = fast_parse_u32(fields[7]);
+      if (curr_trade_count >= prev_trade_count) {
+        snap.trade_count = curr_trade_count - prev_trade_count;
+      } else {
+        Logger::log_parsing_error("Trade count decreased at line " + std::to_string(line_number) + ": " + filepath);
+        snap.trade_count = 0;
+      }
       prev_trade_count = curr_trade_count;
 
-      // snapshot.high = parse_price_to_fen(fields[13]);
-      // snapshot.low = parse_price_to_fen(fields[14]);
-      // snapshot.open = parse_price_to_fen(fields[15]);
-      // snapshot.prev_close = parse_price_to_fen(fields[16]);
-
-      // Parse ask prices (申卖价1-10: fields 17-26)
-      for (int i = 0; i < 10; i++) {
-        snapshot.ask_prices[i] = parse_price_to_fen(fields[17 + i]);
+      // Parse 10-level orderbook
+      for (int i = 0; i < 10; ++i) {
+        snap.ask_prices[i] = parse_price_to_fen(fields[17 + i]);
+        snap.ask_volumes[i] = parse_volume_to_100shares(fields[27 + i]);
+        snap.bid_prices[i] = parse_price_to_fen(fields[37 + i]);
+        snap.bid_volumes[i] = parse_volume_to_100shares(fields[47 + i]);
       }
 
-      // Parse ask volumes (申卖量1-10: fields 27-36)
-      for (int i = 0; i < 10; i++) {
-        snapshot.ask_volumes[i] = parse_volume_to_100shares(fields[27 + i]);
-      }
+      snap.weighted_avg_ask_price = parse_vwap_price(fields[57]);
+      snap.weighted_avg_bid_price = parse_vwap_price(fields[58]);
+      snap.total_ask_volume = parse_volume_to_100shares(fields[59]);
+      snap.total_bid_volume = parse_volume_to_100shares(fields[60]);
 
-      // Parse bid prices (申买价1-10: fields 37-46)
-      for (int i = 0; i < 10; i++) {
-        snapshot.bid_prices[i] = parse_price_to_fen(fields[37 + i]);
-      }
-
-      // Parse bid volumes (申买量1-10: fields 47-56)
-      for (int i = 0; i < 10; i++) {
-        snapshot.bid_volumes[i] = parse_volume_to_100shares(fields[47 + i]);
-      }
-
-      snapshot.weighted_avg_ask_price = parse_vwap_price(fields[57]);
-      snapshot.weighted_avg_bid_price = parse_vwap_price(fields[58]);
-      snapshot.total_ask_volume = parse_volume_to_100shares(fields[59]);
-      snapshot.total_bid_volume = parse_volume_to_100shares(fields[60]);
-
-      snapshots.push_back(snapshot);
+      snapshots.push_back(snap);
     } catch (const std::exception &e) {
-      Logger::log_parsing_error("Error parsing snapshot line in " + filepath + ": " + e.what());
+      Logger::log_parsing_error("Error parsing snapshot: " + std::string(e.what()));
       continue;
     }
   }
@@ -229,71 +267,47 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, std::vect
   return true;
 }
 
-bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<CSVOrder> &orders) {
-  // Open file with GBK locale
-  auto file = open_gbk_file(filepath);
+// Parse order CSV file
+bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, 
+                                       std::vector<CSVOrder> &orders) {
+  auto file = open_csv_with_gbk(filepath);
   if (!file.is_open()) [[unlikely]] {
-    Logger::log_parsing_error("Failed to open order CSV: " + filepath);
+    Logger::log_parsing_error("Cannot open order CSV: " + filepath);
     return false;
   }
 
   std::string line;
-
-  // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
-    Logger::log_parsing_error("Failed to read order CSV header: " + filepath);
+    Logger::log_parsing_error("Cannot read order CSV header: " + filepath);
     return true;
   }
 
   while (std::getline(file, line)) {
-    auto fields = split_csv_line(line);
-    if (fields.size() < 10) {
-      continue;
-    }
+    auto fields = split_csv_line_view(line);
+    if (fields.size() < 10) continue;
 
     try {
       CSVOrder order = {};
       order.stock_code = fields[0];
       order.exchange_code = fields[1];
-      order.date = std::stoul(fields[2]);
-      order.time = std::stoul(fields[3]);
-      order.order_id = std::stoull(fields[4]);           // 委托编号 (not used, only for missing data check)
-      order.exchange_order_id = std::stoull(fields[5]); // 交易所委托号 (actual order ID to use)
+      order.date = fast_parse_u32(fields[2]);
+      order.time = fast_parse_u32(fields[3]);
+      order.order_id = fast_parse_u64(fields[4]);
+      order.exchange_order_id = fast_parse_u64(fields[5]);
 
-      bool is_szse = is_szse_market(order.stock_code);
+      bool is_szse = is_shenzhen_market(order.stock_code);
 
-      if (is_szse) {
-        // SZSE format changes by year:
-        // - 2023: 委托类型=2, 委托代码=B/S
-        // - 2024: 委托类型=0, 委托代码=B/S
-        // - 2025+: 委托类型=0(普通)/1(特殊)/U(撤单), 委托代码=B/S (撤单时为空或0)
-        
-        // field[6] = 委托类型
-        // field[7] = 委托代码 (B/S for buy/sell, empty/0 for cancellation in 2025+)
-        if (!fields[6].empty() && fields[6][0] != ' ' && fields[6][0] != '\0') {
-          order.order_type = fields[6][0];
-        } else {
-          order.order_type = '0'; // Default to normal order
-        }
-        
-        if (!fields[7].empty() && fields[7][0] != ' ' && fields[7][0] != '\0') {
-          order.order_side = fields[7][0];
-        } else {
-          order.order_side = ' '; // Empty for cancellation
-        }
+      // Parse order type and side (format differs by exchange)
+      if (!fields[6].empty() && fields[6][0] != ' ' && fields[6][0] != '\0') {
+        order.order_type = fields[6][0];
       } else {
-        // SSE: field[6] = 委托类型 (A:add, D:delete)
-        //      field[7] = 委托代码 (B/S for buy/sell)
-        if (!fields[6].empty() && fields[6][0] != ' ' && fields[6][0] != '\0') {
-          order.order_type = fields[6][0];
-        } else {
-          order.order_type = 'A'; // Default to add for SSE
-        }
-        if (!fields[7].empty() && fields[7][0] != ' ' && fields[7][0] != '\0') {
-          order.order_side = fields[7][0];
-        } else {
-          order.order_side = ' ';
-        }
+        order.order_type = is_szse ? '0' : 'A'; // Default: normal(SZSE) or add(SSE)
+      }
+
+      if (!fields[7].empty() && fields[7][0] != ' ' && fields[7][0] != '\0') {
+        order.order_side = fields[7][0];
+      } else {
+        order.order_side = ' '; // Empty for cancellation
       }
 
       order.price = parse_price_to_fen(fields[8]);
@@ -301,7 +315,7 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<
 
       orders.push_back(order);
     } catch (const std::exception &e) {
-      Logger::log_parsing_error("Error parsing order line in " + filepath + ": " + e.what());
+      Logger::log_parsing_error("Error parsing order: " + std::string(e.what()));
       continue;
     }
   }
@@ -309,76 +323,53 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, std::vector<
   return true;
 }
 
-bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, std::vector<CSVTrade> &trades) {
-  // Open file with GBK locale
-  auto file = open_gbk_file(filepath);
+// Parse trade CSV file
+bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, 
+                                       std::vector<CSVTrade> &trades) {
+  auto file = open_csv_with_gbk(filepath);
   if (!file.is_open()) [[unlikely]] {
-    Logger::log_parsing_error("Failed to open trade CSV: " + filepath);
+    Logger::log_parsing_error("Cannot open trade CSV: " + filepath);
     return false;
   }
 
   std::string line;
-
-  // Skip header line
   if (!std::getline(file, line)) [[unlikely]] {
-    Logger::log_parsing_error("Failed to read trade CSV header: " + filepath);
+    Logger::log_parsing_error("Cannot read trade CSV header: " + filepath);
     return true;
   }
 
   while (std::getline(file, line)) {
-    auto fields = split_csv_line(line);
-    if (fields.size() < 12) {
-      continue;
-    }
+    auto fields = split_csv_line_view(line);
+    if (fields.size() < 12) continue;
 
     try {
       CSVTrade trade = {};
       trade.stock_code = fields[0];
       trade.exchange_code = fields[1];
-      trade.date = std::stoul(fields[2]);
-      trade.time = std::stoul(fields[3]);
-      trade.trade_id = std::stoull(fields[4]);
+      trade.date = fast_parse_u32(fields[2]);
+      trade.time = fast_parse_u32(fields[3]);
+      trade.trade_id = fast_parse_u64(fields[4]);
 
-      bool is_szse = is_szse_market(trade.stock_code);
+      bool is_szse = is_shenzhen_market(trade.stock_code);
 
+      // Parse trade code and BS flag (format differs by exchange)
       if (is_szse) {
-        // SZSE: field[5] = 成交代码 (0:成交, C:撤单)
-        //       field[6] = 委托代码 (not used, always empty)
-        //       field[7] = BS标志 (B:buy, S:sell, empty:撤单)
-        if (!fields[5].empty()) {
-          trade.trade_code = fields[5][0];
-        } else {
-          trade.trade_code = '0'; // Default to trade
-        }
-        trade.dummy_code = ' '; // Not used for SZSE
-
-        if (!fields[7].empty()) {
-          trade.bs_flag = fields[7][0];
-        } else {
-          trade.bs_flag = ' '; // Empty for cancel
-        }
+        trade.trade_code = !fields[5].empty() ? fields[5][0] : '0';
+        trade.bs_flag = !fields[7].empty() ? fields[7][0] : ' ';
       } else {
-        // SSE: field[5] = 成交代码 (not used, always empty)
-        //      field[6] = 委托代码 (not used, always empty)
-        //      field[7] = BS标志 (B:buy, S:sell)
         trade.trade_code = '0'; // SSE doesn't use trade_code
-        trade.dummy_code = ' '; // Not used for SSE
-
-        if (!fields[7].empty()) {
-          trade.bs_flag = fields[7][0];
-        } else {
-          trade.bs_flag = ' ';
-        }
+        trade.bs_flag = !fields[7].empty() ? fields[7][0] : ' ';
       }
+      trade.dummy_code = ' '; // Unused
 
       trade.price = parse_price_to_fen(fields[8]);
       trade.volume = parse_volume_to_100shares(fields[9]);
-      trade.ask_order_id = std::stoull(fields[10]);
-      trade.bid_order_id = std::stoull(fields[11]);
+      trade.ask_order_id = fast_parse_u64(fields[10]);
+      trade.bid_order_id = fast_parse_u64(fields[11]);
 
       trades.push_back(trade);
     } catch (const std::exception &e) {
-      Logger::log_parsing_error("Error parsing trade line in " + filepath + ": " + e.what());
+      Logger::log_parsing_error("Error parsing trade: " + std::string(e.what()));
       continue;
     }
   }
@@ -386,520 +377,455 @@ bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, std::vector<
   return true;
 }
 
-// Private helper functions
-inline uint8_t BinaryEncoder_L2::time_to_hour(uint32_t time_ms) {
-  return static_cast<uint8_t>(time_ms / 3600000);
-}
+// ============================================================================
+// Section 3: Data Conversion (CSV structures → Binary structures)
+// ============================================================================
 
-inline uint8_t BinaryEncoder_L2::time_to_minute(uint32_t time_ms) {
-  return static_cast<uint8_t>((time_ms % 3600000) / 60000);
-}
+Snapshot BinaryEncoder_L2::csv_to_snapshot(const CSVSnapshot &csv) {
+  Snapshot snap = {};
 
-inline uint8_t BinaryEncoder_L2::time_to_second(uint32_t time_ms) {
-  return static_cast<uint8_t>((time_ms % 60000) / 1000);
-}
+  // Time fields
+  uint32_t time_ms = parse_time_to_ms(csv.time);
+  snap.hour = SchemaUtils::clamp_to_bound(extract_hour(time_ms), SchemaUtils::HOUR_BOUND);
+  snap.minute = SchemaUtils::clamp_to_bound(extract_minute(time_ms), SchemaUtils::MINUTE_BOUND);
+  snap.second = SchemaUtils::clamp_to_bound(extract_second(time_ms), SchemaUtils::SECOND_BOUND);
 
-inline uint8_t BinaryEncoder_L2::time_to_millisecond_10ms(uint32_t time_ms) {
-  return static_cast<uint8_t>((time_ms % 1000) / 10);
-}
+  // Trade info
+  snap.trade_count = SchemaUtils::clamp_to_bound(csv.trade_count, SchemaUtils::TRADE_COUNT_BOUND);
+  snap.volume = SchemaUtils::clamp_to_bound(csv.volume, SchemaUtils::VOLUME_BOUND);
+  snap.turnover = SchemaUtils::clamp_to_bound(csv.turnover, SchemaUtils::TURNOVER_BOUND);
+  snap.close = SchemaUtils::clamp_to_bound(csv.price, SchemaUtils::PRICE_BOUND);
+  snap.direction = false; // Default
 
-inline bool BinaryEncoder_L2::is_szse_market(const std::string &stock_code) {
-  // Optimized: check last 3 characters directly for better performance (case-insensitive)
-  if (stock_code.size() >= 3) {
-    std::string suffix = stock_code.substr(stock_code.size() - 3);
-    // Convert to uppercase for case-insensitive comparison
-    std::transform(suffix.begin(), suffix.end(), suffix.begin(), ::toupper);
-    if (suffix == ".SZ" || suffix == ".sz")
-      return true;
-    if (suffix == ".SH" || suffix == ".sh")
-      return false;
-  }
-  assert(false && "Stock code must contain either .SZ/.sz or .SH/.sh");
-  return false; // Unreachable
-}
-
-inline uint8_t BinaryEncoder_L2::determine_order_type(char csv_order_type, char csv_trade_code, bool is_trade, bool is_szse) {
-  if (is_trade) {
-    // For trades, check trade_code if available (SZSE uses it)
-    return (is_szse && csv_trade_code == 'C') ? 1 : 3; // cancel or taker
+  // 10-level orderbook
+  for (int i = 0; i < 10; ++i) {
+    snap.bid_price_ticks[i] = SchemaUtils::clamp_to_bound(csv.bid_prices[i], SchemaUtils::PRICE_BOUND);
+    snap.bid_volumes[i] = SchemaUtils::clamp_to_bound(csv.bid_volumes[i], SchemaUtils::ORDERBOOK_VOLUME_BOUND);
+    snap.ask_price_ticks[i] = SchemaUtils::clamp_to_bound(csv.ask_prices[i], SchemaUtils::PRICE_BOUND);
+    snap.ask_volumes[i] = SchemaUtils::clamp_to_bound(csv.ask_volumes[i], SchemaUtils::ORDERBOOK_VOLUME_BOUND);
   }
 
-  // For orders (逐笔委托 are all MAKER orders)
-  if (is_szse) {
-    // SZSE: All order types in 逐笔委托 are MAKER orders (pending orders)
-    // '0' or '2': 限价单 (Limit order) - normal limit order, always has price
-    // '1': 市价单 (Market order) - special order, may have price=0
-    // 'U': 本方最优 (Best for us) - special order, may have price=0
-    // Note: These are all MAKER orders, not cancellations
-    // (Actual cancellations come from 逐笔成交 file with trade_code='C')
-    return 0; // All order types are maker
-  } else {
-    // SSE: determine from order type (A:add/maker, D:delete/cancel)
-    return (csv_order_type == 'A' || csv_order_type == 'a') ? 0 : 
-           (csv_order_type == 'D' || csv_order_type == 'd') ? 1 : 0;
-  }
+  // Aggregated bid/ask info
+  snap.all_bid_vwap = SchemaUtils::clamp_to_bound(csv.weighted_avg_bid_price, SchemaUtils::VWAP_BOUND);
+  snap.all_ask_vwap = SchemaUtils::clamp_to_bound(csv.weighted_avg_ask_price, SchemaUtils::VWAP_BOUND);
+  snap.all_bid_volume = SchemaUtils::clamp_to_bound(csv.total_bid_volume, SchemaUtils::TOTAL_VOLUME_BOUND);
+  snap.all_ask_volume = SchemaUtils::clamp_to_bound(csv.total_ask_volume, SchemaUtils::TOTAL_VOLUME_BOUND);
+
+  return snap;
 }
 
-inline bool BinaryEncoder_L2::determine_order_direction(char side_flag) {
-  return side_flag == 'S'; // 0:bid(B), 1:ask(S)
-}
-
-// CSV to L2 conversion functions
-Snapshot BinaryEncoder_L2::csv_to_snapshot(const CSVSnapshot &csv_snap) {
-  Snapshot snapshot = {};
-
-  uint32_t time_ms = parse_time_to_ms(csv_snap.time);
-  snapshot.hour = SchemaUtils::clamp_to_bound(time_to_hour(time_ms), SchemaUtils::HOUR_BOUND);
-  snapshot.minute = SchemaUtils::clamp_to_bound(time_to_minute(time_ms), SchemaUtils::MINUTE_BOUND);
-  snapshot.second = SchemaUtils::clamp_to_bound(time_to_second(time_ms), SchemaUtils::SECOND_BOUND);
-
-  snapshot.trade_count = SchemaUtils::clamp_to_bound(csv_snap.trade_count, SchemaUtils::TRADE_COUNT_BOUND);
-  snapshot.volume = SchemaUtils::clamp_to_bound(csv_snap.volume, SchemaUtils::VOLUME_BOUND);
-  snapshot.turnover = SchemaUtils::clamp_to_bound(csv_snap.turnover, SchemaUtils::TURNOVER_BOUND);
-
-  // Convert prices using 14-bit bounds
-  // snapshot.high = SchemaUtils::clamp_to_bound(csv_snap.high, SchemaUtils::PRICE_BOUND);
-  // snapshot.low = SchemaUtils::clamp_to_bound(csv_snap.low, SchemaUtils::PRICE_BOUND);
-  snapshot.close = SchemaUtils::clamp_to_bound(csv_snap.price, SchemaUtils::PRICE_BOUND);
-
-  // Copy bid/ask prices and volumes using bitwidth-based bounds
-  for (int i = 0; i < 10; i++) {
-    snapshot.bid_price_ticks[i] = SchemaUtils::clamp_to_bound(csv_snap.bid_prices[i], SchemaUtils::PRICE_BOUND);
-    snapshot.bid_volumes[i] = SchemaUtils::clamp_to_bound(csv_snap.bid_volumes[i], SchemaUtils::ORDERBOOK_VOLUME_BOUND);
-    snapshot.ask_price_ticks[i] = SchemaUtils::clamp_to_bound(csv_snap.ask_prices[i], SchemaUtils::PRICE_BOUND);
-    snapshot.ask_volumes[i] = SchemaUtils::clamp_to_bound(csv_snap.ask_volumes[i], SchemaUtils::ORDERBOOK_VOLUME_BOUND);
-  }
-
-  // Determine direction based on price movement (simplified)
-  snapshot.direction = false; // Default to buy direction
-
-  snapshot.all_bid_vwap = SchemaUtils::clamp_to_bound(csv_snap.weighted_avg_bid_price, SchemaUtils::VWAP_BOUND);
-  snapshot.all_ask_vwap = SchemaUtils::clamp_to_bound(csv_snap.weighted_avg_ask_price, SchemaUtils::VWAP_BOUND);
-  snapshot.all_bid_volume = SchemaUtils::clamp_to_bound(csv_snap.total_bid_volume, SchemaUtils::TOTAL_VOLUME_BOUND);
-  snapshot.all_ask_volume = SchemaUtils::clamp_to_bound(csv_snap.total_ask_volume, SchemaUtils::TOTAL_VOLUME_BOUND);
-
-  return snapshot;
-}
-
-Order BinaryEncoder_L2::csv_to_order(const CSVOrder &csv_order) {
+Order BinaryEncoder_L2::csv_to_order(const CSVOrder &csv) {
   Order order = {};
 
-  uint32_t time_ms = parse_time_to_ms(csv_order.time);
-  order.hour = SchemaUtils::clamp_to_bound(time_to_hour(time_ms), SchemaUtils::HOUR_BOUND);
-  order.minute = SchemaUtils::clamp_to_bound(time_to_minute(time_ms), SchemaUtils::MINUTE_BOUND);
-  order.second = SchemaUtils::clamp_to_bound(time_to_second(time_ms), SchemaUtils::SECOND_BOUND);
-  order.millisecond = SchemaUtils::clamp_to_bound(time_to_millisecond_10ms(time_ms), SchemaUtils::MILLISECOND_BOUND);
+  // Time fields
+  uint32_t time_ms = parse_time_to_ms(csv.time);
+  order.hour = SchemaUtils::clamp_to_bound(extract_hour(time_ms), SchemaUtils::HOUR_BOUND);
+  order.minute = SchemaUtils::clamp_to_bound(extract_minute(time_ms), SchemaUtils::MINUTE_BOUND);
+  order.second = SchemaUtils::clamp_to_bound(extract_second(time_ms), SchemaUtils::SECOND_BOUND);
+  order.millisecond = SchemaUtils::clamp_to_bound(extract_millisecond_10ms(time_ms), SchemaUtils::MILLISECOND_BOUND);
 
-  bool is_szse = is_szse_market(csv_order.stock_code);
-  order.order_type = SchemaUtils::clamp_to_bound(determine_order_type(csv_order.order_type, '0', false, is_szse), SchemaUtils::ORDER_TYPE_BOUND);
-  order.order_dir = SchemaUtils::clamp_to_bound(determine_order_direction(csv_order.order_side), SchemaUtils::ORDER_DIR_BOUND);
-  order.price = SchemaUtils::clamp_to_bound(csv_order.price, SchemaUtils::PRICE_BOUND);
-  order.volume = SchemaUtils::clamp_to_bound(csv_order.volume, SchemaUtils::VOLUME_BOUND);
+  // Order attributes
+  bool is_szse = is_shenzhen_market(csv.stock_code);
+  order.order_type = SchemaUtils::clamp_to_bound(
+    determine_order_type(csv.order_type, '0', false, is_szse), 
+    SchemaUtils::ORDER_TYPE_BOUND
+  );
+  order.order_dir = SchemaUtils::clamp_to_bound(
+    determine_order_direction(csv.order_side), 
+    SchemaUtils::ORDER_DIR_BOUND
+  );
+  order.price = SchemaUtils::clamp_to_bound(csv.price, SchemaUtils::PRICE_BOUND);
+  order.volume = SchemaUtils::clamp_to_bound(csv.volume, SchemaUtils::VOLUME_BOUND);
 
-  // Set order IDs based on direction and type
-  // Use exchange_order_id (field 5) as it contains the actual order ID
-  if (order.order_dir == 0) { // bid
-    order.bid_order_id = SchemaUtils::clamp_to_bound(csv_order.exchange_order_id, SchemaUtils::ORDER_ID_BOUND);
+  // Order IDs (only one side is set based on direction)
+  if (order.order_dir == 0) { // Bid
+    order.bid_order_id = SchemaUtils::clamp_to_bound(csv.exchange_order_id, SchemaUtils::ORDER_ID_BOUND);
     order.ask_order_id = 0;
-  } else { // ask
+  } else { // Ask
     order.bid_order_id = 0;
-    order.ask_order_id = SchemaUtils::clamp_to_bound(csv_order.exchange_order_id, SchemaUtils::ORDER_ID_BOUND);
+    order.ask_order_id = SchemaUtils::clamp_to_bound(csv.exchange_order_id, SchemaUtils::ORDER_ID_BOUND);
   }
 
   return order;
 }
 
-Order BinaryEncoder_L2::csv_to_trade(const CSVTrade &csv_trade) {
+Order BinaryEncoder_L2::csv_to_trade(const CSVTrade &csv) {
   Order order = {};
 
-  uint32_t time_ms = parse_time_to_ms(csv_trade.time);
-  order.hour = SchemaUtils::clamp_to_bound(time_to_hour(time_ms), SchemaUtils::HOUR_BOUND);
-  order.minute = SchemaUtils::clamp_to_bound(time_to_minute(time_ms), SchemaUtils::MINUTE_BOUND);
-  order.second = SchemaUtils::clamp_to_bound(time_to_second(time_ms), SchemaUtils::SECOND_BOUND);
-  order.millisecond = SchemaUtils::clamp_to_bound(time_to_millisecond_10ms(time_ms), SchemaUtils::MILLISECOND_BOUND);
+  // Time fields
+  uint32_t time_ms = parse_time_to_ms(csv.time);
+  order.hour = SchemaUtils::clamp_to_bound(extract_hour(time_ms), SchemaUtils::HOUR_BOUND);
+  order.minute = SchemaUtils::clamp_to_bound(extract_minute(time_ms), SchemaUtils::MINUTE_BOUND);
+  order.second = SchemaUtils::clamp_to_bound(extract_second(time_ms), SchemaUtils::SECOND_BOUND);
+  order.millisecond = SchemaUtils::clamp_to_bound(extract_millisecond_10ms(time_ms), SchemaUtils::MILLISECOND_BOUND);
 
-  bool is_szse = is_szse_market(csv_trade.stock_code);
-  order.order_type = SchemaUtils::clamp_to_bound(determine_order_type('0', csv_trade.trade_code, true, is_szse), SchemaUtils::ORDER_TYPE_BOUND);
+  // Trade attributes
+  bool is_szse = is_shenzhen_market(csv.stock_code);
+  order.order_type = SchemaUtils::clamp_to_bound(
+    determine_order_type('0', csv.trade_code, true, is_szse), 
+    SchemaUtils::ORDER_TYPE_BOUND
+  );
   
-  // For SZSE cancellation (BS flag is null/empty), determine direction from bid_order_id
-  // null:撤单(bid_id!=0:B:S) - if bid_id != 0 then B, else S
-  if (is_szse && (csv_trade.bs_flag == ' ' || csv_trade.bs_flag == '\0')) {
-    // For SZSE cancellation: if bid_order_id != 0, it's a buy side cancellation (B), else sell side (S)
-    char effective_bs_flag = (csv_trade.bid_order_id != 0) ? 'B' : 'S';
-    order.order_dir = SchemaUtils::clamp_to_bound(determine_order_direction(effective_bs_flag), SchemaUtils::ORDER_DIR_BOUND);
+  // Direction: for SZSE cancellation (bs_flag empty), infer from bid_order_id
+  if (is_szse && (csv.bs_flag == ' ' || csv.bs_flag == '\0')) {
+    char effective_side = (csv.bid_order_id != 0) ? 'B' : 'S';
+    order.order_dir = SchemaUtils::clamp_to_bound(
+      determine_order_direction(effective_side), 
+      SchemaUtils::ORDER_DIR_BOUND
+    );
   } else {
-    order.order_dir = SchemaUtils::clamp_to_bound(determine_order_direction(csv_trade.bs_flag), SchemaUtils::ORDER_DIR_BOUND);
+    order.order_dir = SchemaUtils::clamp_to_bound(
+      determine_order_direction(csv.bs_flag), 
+      SchemaUtils::ORDER_DIR_BOUND
+    );
   }
   
-  order.price = SchemaUtils::clamp_to_bound(csv_trade.price, SchemaUtils::PRICE_BOUND);
-  order.volume = SchemaUtils::clamp_to_bound(csv_trade.volume, SchemaUtils::VOLUME_BOUND);
+  order.price = SchemaUtils::clamp_to_bound(csv.price, SchemaUtils::PRICE_BOUND);
+  order.volume = SchemaUtils::clamp_to_bound(csv.volume, SchemaUtils::VOLUME_BOUND);
 
-  // For trades, set both order IDs directly from CSV
-  // The CSV already provides the correct bid_order_id and ask_order_id values
-  // according to the specification table for trades (order_type=3)
-  order.bid_order_id = SchemaUtils::clamp_to_bound(csv_trade.bid_order_id, SchemaUtils::ORDER_ID_BOUND);
-  order.ask_order_id = SchemaUtils::clamp_to_bound(csv_trade.ask_order_id, SchemaUtils::ORDER_ID_BOUND);
+  // Trade has both order IDs
+  order.bid_order_id = SchemaUtils::clamp_to_bound(csv.bid_order_id, SchemaUtils::ORDER_ID_BOUND);
+  order.ask_order_id = SchemaUtils::clamp_to_bound(csv.ask_order_id, SchemaUtils::ORDER_ID_BOUND);
 
   return order;
 }
 
-// binary encoding functions
-bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots, const std::string &filepath, bool use_delta) {
+// ============================================================================
+// Section 4: Encoding Layer (Binary → Compressed binary with delta encoding)
+// ============================================================================
+
+// Constructor: preallocate buffers and initialize ZSTD context
+BinaryEncoder_L2::BinaryEncoder_L2(size_t est_snapshots, size_t est_orders) {
+  // Snapshot buffers
+  temp_snap_hours.reserve(est_snapshots);
+  temp_snap_minutes.reserve(est_snapshots);
+  temp_snap_seconds.reserve(est_snapshots);
+  temp_snap_closes.reserve(est_snapshots);
+  temp_snap_bid_vwaps.reserve(est_snapshots);
+  temp_snap_ask_vwaps.reserve(est_snapshots);
+  temp_snap_bid_volumes.reserve(est_snapshots);
+  temp_snap_ask_volumes.reserve(est_snapshots);
+
+  for (auto &vec : temp_snap_bid_prices) vec.reserve(est_snapshots);
+  for (auto &vec : temp_snap_ask_prices) vec.reserve(est_snapshots);
+
+  // Order buffers
+  temp_order_hours.reserve(est_orders);
+  temp_order_minutes.reserve(est_orders);
+  temp_order_seconds.reserve(est_orders);
+  temp_order_millis.reserve(est_orders);
+  temp_order_prices.reserve(est_orders);
+  temp_order_bid_ids.reserve(est_orders);
+  temp_order_ask_ids.reserve(est_orders);
+  
+  // Initialize ZSTD compression context
+  zstd_ctx_ = ZSTD_createCCtx();
+  assert(zstd_ctx_ && "Failed to create ZSTD context");
+  ZSTD_CCtx_setParameter(zstd_ctx_, ZSTD_c_compressionLevel, ZSTD_COMPRESSION_LEVEL);
+}
+
+// Destructor: clean up ZSTD context
+BinaryEncoder_L2::~BinaryEncoder_L2() {
+  if (zstd_ctx_) {
+    ZSTD_freeCCtx(zstd_ctx_);
+  }
+}
+
+// Apply delta encoding to snapshots
+static void apply_delta_encoding_snapshots(std::vector<Snapshot> &snapshots,
+                                          std::vector<uint8_t> &hours, std::vector<uint8_t> &minutes, 
+                                          std::vector<uint8_t> &seconds, std::vector<uint16_t> &closes,
+                                          std::vector<uint16_t> (&bid_prices)[10], std::vector<uint16_t> (&ask_prices)[10],
+                                          std::vector<uint16_t> &bid_vwaps, std::vector<uint16_t> &ask_vwaps,
+                                          std::vector<uint32_t> &bid_volumes, std::vector<uint32_t> &ask_volumes) {
+  const size_t count = snapshots.size();
+  if (count <= 1) return;
+
+  // Resize buffers
+  hours.resize(count); minutes.resize(count); seconds.resize(count); closes.resize(count);
+  bid_vwaps.resize(count); ask_vwaps.resize(count);
+  bid_volumes.resize(count); ask_volumes.resize(count);
+  for (auto &vec : bid_prices) vec.resize(count);
+  for (auto &vec : ask_prices) vec.resize(count);
+
+  // Extract data
+  for (size_t i = 0; i < count; ++i) {
+    hours[i] = snapshots[i].hour;
+    minutes[i] = snapshots[i].minute;
+    seconds[i] = snapshots[i].second;
+    closes[i] = snapshots[i].close;
+    bid_vwaps[i] = snapshots[i].all_bid_vwap;
+    ask_vwaps[i] = snapshots[i].all_ask_vwap;
+    bid_volumes[i] = snapshots[i].all_bid_volume;
+    ask_volumes[i] = snapshots[i].all_ask_volume;
+
+    for (size_t j = 0; j < 10; ++j) {
+      bid_prices[j][i] = snapshots[i].bid_price_ticks[j];
+      ask_prices[j][i] = snapshots[i].ask_price_ticks[j];
+    }
+  }
+
+  // Delta encode
+  DeltaUtils::encode_deltas(hours.data(), count);
+  DeltaUtils::encode_deltas(minutes.data(), count);
+  DeltaUtils::encode_deltas(seconds.data(), count);
+  DeltaUtils::encode_deltas(closes.data(), count);
+  DeltaUtils::encode_deltas(bid_vwaps.data(), count);
+  DeltaUtils::encode_deltas(ask_vwaps.data(), count);
+  DeltaUtils::encode_deltas(bid_volumes.data(), count);
+  DeltaUtils::encode_deltas(ask_volumes.data(), count);
+
+  for (auto &vec : bid_prices) DeltaUtils::encode_deltas(vec.data(), count);
+  for (auto &vec : ask_prices) DeltaUtils::encode_deltas(vec.data(), count);
+
+  // Write back
+  for (size_t i = 0; i < count; ++i) {
+    snapshots[i].hour = hours[i];
+    snapshots[i].minute = minutes[i];
+    snapshots[i].second = seconds[i];
+    snapshots[i].close = closes[i];
+    snapshots[i].all_bid_vwap = bid_vwaps[i];
+    snapshots[i].all_ask_vwap = ask_vwaps[i];
+    snapshots[i].all_bid_volume = bid_volumes[i];
+    snapshots[i].all_ask_volume = ask_volumes[i];
+
+    for (size_t j = 0; j < 10; ++j) {
+      snapshots[i].bid_price_ticks[j] = bid_prices[j][i];
+      snapshots[i].ask_price_ticks[j] = ask_prices[j][i];
+    }
+  }
+}
+
+// Apply delta encoding to orders
+static void apply_delta_encoding_orders(std::vector<Order> &orders,
+                                       std::vector<uint8_t> &hours, std::vector<uint8_t> &minutes,
+                                       std::vector<uint8_t> &seconds, std::vector<uint8_t> &millis,
+                                       std::vector<uint16_t> &prices,
+                                       std::vector<uint32_t> &bid_ids, std::vector<uint32_t> &ask_ids) {
+  const size_t count = orders.size();
+  if (count <= 1) return;
+
+  // Resize buffers
+  hours.resize(count); minutes.resize(count); seconds.resize(count); millis.resize(count);
+  prices.resize(count); bid_ids.resize(count); ask_ids.resize(count);
+
+  // Extract data
+  for (size_t i = 0; i < count; ++i) {
+    hours[i] = orders[i].hour;
+    minutes[i] = orders[i].minute;
+    seconds[i] = orders[i].second;
+    millis[i] = orders[i].millisecond;
+    prices[i] = orders[i].price;
+    bid_ids[i] = orders[i].bid_order_id;
+    ask_ids[i] = orders[i].ask_order_id;
+  }
+
+  // Delta encode
+  DeltaUtils::encode_deltas(hours.data(), count);
+  DeltaUtils::encode_deltas(minutes.data(), count);
+  DeltaUtils::encode_deltas(seconds.data(), count);
+  DeltaUtils::encode_deltas(millis.data(), count);
+  DeltaUtils::encode_deltas(prices.data(), count);
+  DeltaUtils::encode_deltas(bid_ids.data(), count);
+  DeltaUtils::encode_deltas(ask_ids.data(), count);
+
+  // Write back
+  for (size_t i = 0; i < count; ++i) {
+    orders[i].hour = hours[i];
+    orders[i].minute = minutes[i];
+    orders[i].second = seconds[i];
+    orders[i].millisecond = millis[i];
+    orders[i].price = prices[i];
+    orders[i].bid_order_id = bid_ids[i];
+    orders[i].ask_order_id = ask_ids[i];
+  }
+}
+
+bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots, 
+                                        const std::string &filepath, bool use_delta) {
   if (snapshots.empty()) {
     Logger::log_parsing_error("No snapshots to encode: " + filepath);
     return true;
   }
 
-  // Create local copies for delta encoding (based on schema use_delta flags)
-  std::vector<Snapshot> delta_snapshots = snapshots;
-  size_t count = delta_snapshots.size();
+  std::vector<Snapshot> data = snapshots;
+  const size_t count = data.size();
 
+  // Apply delta encoding
   if (use_delta && count > 1) {
-    // std::cout << "L2 Encoder: Applying delta encoding to " << count << " snapshots..." << std::endl;
-    // Apply delta encoding to columns marked with use_delta=true in schema
-    // Reuse pre-allocated member vectors for better performance
-    temp_hours.resize(count);
-    temp_minutes.resize(count);
-    temp_seconds.resize(count);
-    // temp_highs.resize(count);
-    // temp_lows.resize(count);
-    temp_closes.resize(count);
-    temp_all_bid_vwaps.resize(count);
-    temp_all_ask_vwaps.resize(count);
-    temp_all_bid_volumes.resize(count);
-    temp_all_ask_volumes.resize(count);
-
-    for (size_t i = 0; i < 10; ++i) {
-      temp_bid_prices[i].resize(count);
-      temp_ask_prices[i].resize(count);
-    }
-
-    // Extract data
-    for (size_t i = 0; i < count; ++i) {
-      temp_hours[i] = delta_snapshots[i].hour;
-      temp_minutes[i] = delta_snapshots[i].minute;
-      temp_seconds[i] = delta_snapshots[i].second;
-      // temp_highs[i] = delta_snapshots[i].high;
-      // temp_lows[i] = delta_snapshots[i].low;
-      temp_closes[i] = delta_snapshots[i].close;
-      temp_all_bid_vwaps[i] = delta_snapshots[i].all_bid_vwap;
-      temp_all_ask_vwaps[i] = delta_snapshots[i].all_ask_vwap;
-      temp_all_bid_volumes[i] = delta_snapshots[i].all_bid_volume;
-      temp_all_ask_volumes[i] = delta_snapshots[i].all_ask_volume;
-
-      for (size_t j = 0; j < 10; ++j) {
-        temp_bid_prices[j][i] = delta_snapshots[i].bid_price_ticks[j];
-        temp_ask_prices[j][i] = delta_snapshots[i].ask_price_ticks[j];
-      }
-    }
-
-    // Apply delta encoding where use_delta=true
-    DeltaUtils::encode_deltas(temp_hours.data(), count);
-    DeltaUtils::encode_deltas(temp_minutes.data(), count);
-    DeltaUtils::encode_deltas(temp_seconds.data(), count);
-    // DeltaUtils::encode_deltas(temp_highs.data(), count);
-    // DeltaUtils::encode_deltas(temp_lows.data(), count);
-    DeltaUtils::encode_deltas(temp_closes.data(), count);
-    DeltaUtils::encode_deltas(temp_all_bid_vwaps.data(), count);
-    DeltaUtils::encode_deltas(temp_all_ask_vwaps.data(), count);
-    DeltaUtils::encode_deltas(temp_all_bid_volumes.data(), count);
-    DeltaUtils::encode_deltas(temp_all_ask_volumes.data(), count);
-
-    for (size_t j = 0; j < 10; ++j) {
-      DeltaUtils::encode_deltas(temp_bid_prices[j].data(), count);
-      DeltaUtils::encode_deltas(temp_ask_prices[j].data(), count);
-    }
-
-    // Copy back delta-encoded data
-    for (size_t i = 0; i < count; ++i) {
-      delta_snapshots[i].hour = temp_hours[i];
-      delta_snapshots[i].minute = temp_minutes[i];
-      delta_snapshots[i].second = temp_seconds[i];
-      // delta_snapshots[i].high = temp_highs[i];
-      // delta_snapshots[i].low = temp_lows[i];
-      delta_snapshots[i].close = temp_closes[i];
-      delta_snapshots[i].all_bid_vwap = temp_all_bid_vwaps[i];
-      delta_snapshots[i].all_ask_vwap = temp_all_ask_vwaps[i];
-      delta_snapshots[i].all_bid_volume = temp_all_bid_volumes[i];
-      delta_snapshots[i].all_ask_volume = temp_all_ask_volumes[i];
-
-      for (size_t j = 0; j < 10; ++j) {
-        delta_snapshots[i].bid_price_ticks[j] = temp_bid_prices[j][i];
-        delta_snapshots[i].ask_price_ticks[j] = temp_ask_prices[j][i];
-      }
-    }
+    apply_delta_encoding_snapshots(data, temp_snap_hours, temp_snap_minutes, temp_snap_seconds,
+                                   temp_snap_closes, temp_snap_bid_prices, temp_snap_ask_prices,
+                                   temp_snap_bid_vwaps, temp_snap_ask_vwaps,
+                                   temp_snap_bid_volumes, temp_snap_ask_volumes);
   }
 
-  // Prepare data for compression: count + snapshots
-  size_t header_size = sizeof(count);
-  size_t snapshots_size = delta_snapshots.size() * sizeof(Snapshot);
-  size_t total_size = header_size + snapshots_size;
+  // Prepare buffer: header + data
+  const size_t header_size = sizeof(count);
+  const size_t data_size = data.size() * sizeof(Snapshot);
+  const size_t total_size = header_size + data_size;
 
-  auto data_buffer = std::make_unique<char[]>(total_size);
-  char *write_ptr = data_buffer.get();
+  auto buffer = std::make_unique<char[]>(total_size);
+  std::memcpy(buffer.get(), &count, header_size);
+  std::memcpy(buffer.get() + header_size, data.data(), data_size);
 
-  // Copy count to buffer
-  std::memcpy(write_ptr, &count, header_size);
-  write_ptr += header_size;
-
-  // Copy snapshots to buffer
-  std::memcpy(write_ptr, delta_snapshots.data(), snapshots_size);
-
-  // Compress and write data
-  if (!compress_and_write_data(filepath, data_buffer.get(), total_size)) {
-    return false;
-  }
-
-  // Progress is now shown via print_progress_with_message in workers.cpp
-  // std::cout << "L2 Encoder: Compressed " << compression_stats.original_size << " bytes to "
-  //           << compression_stats.compressed_size << " bytes (ratio: " << std::fixed
-  //           << std::setprecision(2) << compression_stats.ratio << "x), wrote " << count
-  //           << " snapshots to " << filepath << std::endl;
-
-  return true;
+  return compress_and_write_data(filepath, buffer.get(), total_size);
 }
 
-bool BinaryEncoder_L2::encode_orders(const std::vector<Order> &orders,
+bool BinaryEncoder_L2::encode_orders(const std::vector<Order> &orders, 
                                      const std::string &filepath, bool use_delta) {
   if (orders.empty()) {
     Logger::log_parsing_error("No orders to encode: " + filepath);
     return false;
   }
 
-  // Create local copies for delta encoding (based on schema use_delta flags)
-  std::vector<Order> delta_orders = orders;
-  size_t count = delta_orders.size();
+  std::vector<Order> data = orders;
+  const size_t count = data.size();
 
+  // Apply delta encoding
   if (use_delta && count > 1) {
-    // std::cout << "L2 Encoder: Applying delta encoding to " << count << " orders..." << std::endl;
-    // Apply delta encoding to columns marked with use_delta=true in schema
-    // Reuse pre-allocated member vectors for better performance
-    temp_order_hours.resize(count);
-    temp_order_minutes.resize(count);
-    temp_order_seconds.resize(count);
-    temp_order_milliseconds.resize(count);
-    temp_order_prices.resize(count);
-    temp_bid_order_ids.resize(count);
-    temp_ask_order_ids.resize(count);
-
-    // Extract data
-    for (size_t i = 0; i < count; ++i) {
-      temp_order_hours[i] = delta_orders[i].hour;
-      temp_order_minutes[i] = delta_orders[i].minute;
-      temp_order_seconds[i] = delta_orders[i].second;
-      temp_order_milliseconds[i] = delta_orders[i].millisecond;
-      temp_order_prices[i] = delta_orders[i].price;
-      temp_bid_order_ids[i] = delta_orders[i].bid_order_id;
-      temp_ask_order_ids[i] = delta_orders[i].ask_order_id;
-    }
-
-    // Apply delta encoding where use_delta=true (based on schema)
-    DeltaUtils::encode_deltas(temp_order_hours.data(), count);
-    DeltaUtils::encode_deltas(temp_order_minutes.data(), count);
-    DeltaUtils::encode_deltas(temp_order_seconds.data(), count);
-    DeltaUtils::encode_deltas(temp_order_milliseconds.data(), count);
-    DeltaUtils::encode_deltas(temp_order_prices.data(), count);
-    DeltaUtils::encode_deltas(temp_bid_order_ids.data(), count);
-    DeltaUtils::encode_deltas(temp_ask_order_ids.data(), count);
-
-    // Copy back delta-encoded data
-    for (size_t i = 0; i < count; ++i) {
-      delta_orders[i].hour = temp_order_hours[i];
-      delta_orders[i].minute = temp_order_minutes[i];
-      delta_orders[i].second = temp_order_seconds[i];
-      delta_orders[i].millisecond = temp_order_milliseconds[i];
-      delta_orders[i].price = temp_order_prices[i];
-      delta_orders[i].bid_order_id = temp_bid_order_ids[i];
-      delta_orders[i].ask_order_id = temp_ask_order_ids[i];
-    }
+    apply_delta_encoding_orders(data, temp_order_hours, temp_order_minutes, temp_order_seconds,
+                                temp_order_millis, temp_order_prices,
+                                temp_order_bid_ids, temp_order_ask_ids);
   }
 
-  // Prepare data for compression: count + orders
-  size_t header_size = sizeof(count);
-  size_t orders_size = delta_orders.size() * sizeof(Order);
-  size_t total_size = header_size + orders_size;
+  // Prepare buffer: header + data
+  const size_t header_size = sizeof(count);
+  const size_t data_size = data.size() * sizeof(Order);
+  const size_t total_size = header_size + data_size;
 
-  auto data_buffer = std::make_unique<char[]>(total_size);
-  char *write_ptr = data_buffer.get();
+  auto buffer = std::make_unique<char[]>(total_size);
+  std::memcpy(buffer.get(), &count, header_size);
+  std::memcpy(buffer.get() + header_size, data.data(), data_size);
 
-  // Copy count to buffer
-  std::memcpy(write_ptr, &count, header_size);
-  write_ptr += header_size;
-
-  // Copy orders to buffer
-  std::memcpy(write_ptr, delta_orders.data(), orders_size);
-
-  // Compress and write data
-  if (!compress_and_write_data(filepath, data_buffer.get(), total_size)) {
-    return false;
-  }
-
-  // Progress is now shown via print_progress_with_message in workers.cpp
-  // std::cout << "L2 Encoder: Compressed " << compression_stats.original_size << " bytes to "
-  //           << compression_stats.compressed_size << " bytes (ratio: " << std::fixed
-  //           << std::setprecision(2) << compression_stats.ratio << "x), wrote " << count
-  //           << " orders to " << filepath << std::endl;
-
-  return true;
+  return compress_and_write_data(filepath, buffer.get(), total_size);
 }
 
-// Enhanced processing function with delta encoding
-bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
-                                          const std::string &output_dir,
-                                          const std::string &stock_code,
-                                          std::vector<Snapshot> *out_snapshots,
-                                          std::vector<Order> *out_orders) {
-  // Create output directory if it doesn't exist
-  std::filesystem::create_directories(output_dir);
-
-  std::vector<CSVSnapshot> csv_snapshots;
-  std::vector<CSVOrder> csv_orders;
-  std::vector<CSVTrade> csv_trades;
-
-  // Parse CSV files (using existing methods)
-  std::string snapshot_file = stock_dir + "/行情.csv";
-  std::string order_file = stock_dir + "/逐笔委托.csv";
-  std::string trade_file = stock_dir + "/逐笔成交.csv";
-
-  // Parse snapshots
-  if (std::filesystem::exists(snapshot_file)) {
-    if (!parse_snapshot_csv(snapshot_file, csv_snapshots)) {
-      return false;
-    }
-  }
-
-  // Parse orders
-  if (std::filesystem::exists(order_file)) {
-    if (!parse_order_csv(order_file, csv_orders)) {
-      return false;
-    }
-  }
-
-  // Parse trades
-  if (std::filesystem::exists(trade_file)) {
-    if (!parse_trade_csv(trade_file, csv_trades)) {
-      return false;
-    }
-  }
-
-  // Convert and encode snapshots with compression
-  if (!csv_snapshots.empty()) {
-    std::vector<Snapshot> snapshots;
-    snapshots.reserve(csv_snapshots.size());
-    for (const auto &csv_snap : csv_snapshots) {
-      snapshots.push_back(csv_to_snapshot(csv_snap));
-    }
-
-    // Store original data if requested
-    if (out_snapshots) {
-      *out_snapshots = snapshots;
-    }
-
-    std::string output_file = output_dir + "/" + stock_code + "_snapshots_" + std::to_string(snapshots.size()) + ".bin";
-    if (!encode_snapshots(snapshots, output_file, ENABLE_DELTA_ENCODING)) {
-      return false;
-    }
-  }
-
-  // Convert and encode orders with compression
-  std::vector<Order> all_orders;
-  all_orders.reserve(csv_orders.size() + csv_trades.size());
-
-  // Add orders
-  for (const auto &csv_order : csv_orders) {
-    all_orders.push_back(csv_to_order(csv_order));
-  }
-
-  // Add trades as taker orders
-  for (const auto &csv_trade : csv_trades) {
-    all_orders.push_back(csv_to_trade(csv_trade));
-  }
-
-  // Sort orders by time, then by priority within same timestamp: maker -> taker -> cancel
-  std::sort(all_orders.begin(), all_orders.end(), [](const Order &a, const Order &b) -> bool {
-    uint32_t time_a = a.hour * 3600000 + a.minute * 60000 + a.second * 1000 + a.millisecond * 10;
-    uint32_t time_b = b.hour * 3600000 + b.minute * 60000 + b.second * 1000 + b.millisecond * 10;
-    
-    // Primary sort: by time
-    if (time_a != time_b) {
-      return time_a < time_b;
-    }
-    
-    // Secondary sort: by order type priority (maker=0 -> taker=3 -> cancel=1)
-    // Define priority order: maker(0)=0, taker(3)=1, cancel(1)=2
-    auto get_priority = [](uint8_t order_type) -> uint8_t {
-      if (order_type == 0) return 0; // maker
-      if (order_type == 3) return 1; // taker  
-      if (order_type == 1) return 2; // cancel
-      return 3; // unknown, put at end
-    };
-    
-    return get_priority(a.order_type) < get_priority(b.order_type);
-  });
-
-  if (!all_orders.empty()) {
-    // Store original data if requested
-    if (out_orders) {
-      *out_orders = all_orders;
-    }
-
-    std::string output_file = output_dir + "/" + stock_code + "_orders_" + std::to_string(all_orders.size()) + ".bin";
-    if (!encode_orders(all_orders, output_file, ENABLE_DELTA_ENCODING)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
-// Zstandard compression helper functions
+// Compression helper
 size_t BinaryEncoder_L2::calculate_compression_bound(size_t data_size) {
   return ZSTD_compressBound(data_size);
 }
 
-bool BinaryEncoder_L2::compress_and_write_data(const std::string &filepath, const void *data, size_t data_size) {
+bool BinaryEncoder_L2::compress_and_write_data(const std::string &filepath, 
+                                               const void *data, size_t data_size) {
   std::ofstream file(filepath, std::ios::binary);
   if (!file.is_open()) [[unlikely]] {
-    Logger::log_parsing_error("Failed to open file for compression: " + filepath);
+    Logger::log_parsing_error("Cannot open file for writing: " + filepath);
     return false;
   }
 
-  // Calculate compression bound and allocate buffer
-  size_t compressed_bound = calculate_compression_bound(data_size);
-  auto compressed_buffer = std::make_unique<char[]>(compressed_bound);
-
-  // Standard Zstandard compression
-  size_t compressed_size = ZSTD_compress(
-      compressed_buffer.get(), compressed_bound,
-      data, data_size,
-      ZSTD_COMPRESSION_LEVEL);
+  // Compress using reusable context
+  const size_t bound = calculate_compression_bound(data_size);
+  auto compressed = std::make_unique<char[]>(bound);
+  const size_t compressed_size = ZSTD_compress2(
+    zstd_ctx_, compressed.get(), bound, data, data_size
+  );
 
   if (ZSTD_isError(compressed_size)) [[unlikely]] {
     Logger::log_parsing_error("Compression failed: " + std::string(ZSTD_getErrorName(compressed_size)));
     return false;
   }
 
-  // Write header: original size and compressed size
-  file.write(reinterpret_cast<const char *>(&data_size), sizeof(data_size));
-  file.write(reinterpret_cast<const char *>(&compressed_size), sizeof(compressed_size));
-
+  // Write header + compressed data
+  file.write(reinterpret_cast<const char*>(&data_size), sizeof(data_size));
+  file.write(reinterpret_cast<const char*>(&compressed_size), sizeof(compressed_size));
   if (file.fail()) [[unlikely]] {
-    Logger::log_parsing_error("Failed to write compression header: " + filepath);
+    Logger::log_parsing_error("Failed to write header: " + filepath);
     return false;
   }
 
-  // Write compressed data
-  file.write(compressed_buffer.get(), compressed_size);
-
+  file.write(compressed.get(), compressed_size);
   if (file.fail()) [[unlikely]] {
-    Logger::log_parsing_error("Failed to write compressed data: " + filepath);
+    Logger::log_parsing_error("Failed to write data: " + filepath);
     return false;
   }
 
-  // Store compression statistics for later reporting
+  // Store stats
   compression_stats.original_size = data_size;
   compression_stats.compressed_size = compressed_size;
-  compression_stats.ratio = static_cast<double>(data_size) / static_cast<double>(compressed_size);
+  compression_stats.ratio = static_cast<double>(data_size) / compressed_size;
+
+  return true;
+}
+
+// ============================================================================
+// Section 5: High-Level Interface (Orchestration)
+// ============================================================================
+
+bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
+                                          const std::string &output_dir,
+                                          const std::string &stock_code,
+                                          std::vector<Snapshot> *out_snapshots,
+                                          std::vector<Order> *out_orders) {
+  std::filesystem::create_directories(output_dir);
+
+  // Parse CSV files
+  std::vector<CSVSnapshot> csv_snaps;
+  std::vector<CSVOrder> csv_orders;
+  std::vector<CSVTrade> csv_trades;
+
+  const std::string snap_file = stock_dir + "/行情.csv";
+  const std::string order_file = stock_dir + "/逐笔委托.csv";
+  const std::string trade_file = stock_dir + "/逐笔成交.csv";
+
+  if (std::filesystem::exists(snap_file)) {
+    if (!parse_snapshot_csv(snap_file, csv_snaps)) return false;
+  }
+
+  if (std::filesystem::exists(order_file)) {
+    if (!parse_order_csv(order_file, csv_orders)) return false;
+  }
+
+  if (std::filesystem::exists(trade_file)) {
+    if (!parse_trade_csv(trade_file, csv_trades)) return false;
+  }
+
+  // Convert and encode snapshots
+  if (!csv_snaps.empty()) {
+    std::vector<Snapshot> snapshots;
+    snapshots.reserve(csv_snaps.size());
+    for (const auto &csv : csv_snaps) {
+      snapshots.push_back(csv_to_snapshot(csv));
+    }
+
+    if (out_snapshots) *out_snapshots = snapshots;
+
+    const std::string output_file = output_dir + "/" + stock_code + 
+                                   "_snapshots_" + std::to_string(snapshots.size()) + ".bin";
+    if (!encode_snapshots(snapshots, output_file, ENABLE_DELTA_ENCODING)) return false;
+  }
+
+  // Convert and encode orders + trades
+  std::vector<Order> all_orders;
+  all_orders.reserve(csv_orders.size() + csv_trades.size());
+
+  for (const auto &csv : csv_orders) all_orders.push_back(csv_to_order(csv));
+  for (const auto &csv : csv_trades) all_orders.push_back(csv_to_trade(csv));
+
+  // Sort by time, then by priority (maker → taker → cancel)
+  std::sort(all_orders.begin(), all_orders.end(), [](const Order &a, const Order &b) {
+    const uint32_t time_a = a.hour * 3600000 + a.minute * 60000 + a.second * 1000 + a.millisecond * 10;
+    const uint32_t time_b = b.hour * 3600000 + b.minute * 60000 + b.second * 1000 + b.millisecond * 10;
+    
+    if (time_a != time_b) return time_a < time_b;
+    
+    // Priority: maker(0)=0, taker(3)=1, cancel(1)=2
+    auto priority = [](uint8_t type) -> uint8_t {
+      if (type == 0) return 0;
+      if (type == 3) return 1;
+      if (type == 1) return 2;
+      return 3;
+    };
+    
+    return priority(a.order_type) < priority(b.order_type);
+  });
+
+  if (!all_orders.empty()) {
+    if (out_orders) *out_orders = all_orders;
+
+    const std::string output_file = output_dir + "/" + stock_code + 
+                                   "_orders_" + std::to_string(all_orders.size()) + ".bin";
+    if (!encode_orders(all_orders, output_file, ENABLE_DELTA_ENCODING)) return false;
+  }
 
   return true;
 }

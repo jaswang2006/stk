@@ -834,7 +834,7 @@ public:
 #endif
 
     if (DEBUG_SINGLE_DAY) {
-      exit(1);
+      exit(0);
     }
   }
 

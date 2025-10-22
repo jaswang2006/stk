@@ -13,7 +13,7 @@ class cfg_stk:  # Constants Configs
     wt_session = 'SD0930'
 
     # main functions:
-    profile = False  # Enable gperftools CPU profiler (sampling mode, function-level statistics)
+    profile = False
     plot = False
 
     exchg = ['SSE', 'SZSE', 'BJSE']

@@ -4,6 +4,7 @@
 #include "codec/binary_encoder_L2.hpp"
 #include "codec/json_config.hpp"
 #include "misc/affinity.hpp"
+#include "misc/logging.hpp"
 #include "misc/misc.hpp"
 
 #include <algorithm>
@@ -524,7 +525,10 @@ int main() {
     AppConfiguration::print_summary(paths, app_config, stock_info_map.size());
 
     std::filesystem::create_directories(paths.TEMP_DIR);
+    Logger::init(paths.TEMP_DIR);
     ParallelProcessor::run(stock_info_map, app_config, paths);
+
+    Logger::close();
 
     if (Config::CLEANUP_AFTER_PROCESSING) {
       if (std::filesystem::exists(paths.TEMP_DIR)) {
