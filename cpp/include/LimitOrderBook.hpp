@@ -16,7 +16,7 @@
 
 #include "codec/L2_DataType.hpp"
 #include "define/MemPool.hpp"
-// #include "features/backend/FeaturesConfig.hpp"
+// #include "features/backend/FeatureStoreConfig.hpp"
 #include "math/sample/ResampleRunBar.hpp"
 
 //========================================================================================
@@ -40,11 +40,11 @@
 #define DEBUG_ORDER_PRINT 0         // Print every order processing
 #define DEBUG_ORDER_FLAGS_CREATE 0  // Print when order with special flags is created
 #define DEBUG_ORDER_FLAGS_RESOLVE 0 // Print when order with special flags is resolved/migrated
-#define DEBUG_BOOK_PRINT 1          // Print order book snapshot
+#define DEBUG_BOOK_PRINT 0          // Print order book snapshot
 #define DEBUG_BOOK_BY_SECOND 1      // 0: by tick, 1: every 1 second, 2: every 2 seconds, ...
 #define DEBUG_BOOK_AS_AMOUNT 1      // 0: 手, 1: 1万元, 2: 2万元, 3: 3万元, ...
 #define DEBUG_ANOMALY_PRINT 1       // Print max unmatched order with creation timestamp
-#define DEBUG_SINGLE_DAY 1          // Exit after processing one day
+#define DEBUG_SINGLE_DAY 0          // Exit after processing one day
 
 // Auto-disable dependent switches based on logical relationships
 #if DEBUG_BOOK_PRINT == 0
@@ -822,7 +822,7 @@ public:
     level_storage_.clear();
     order_lookup_.clear();
     order_memory_pool_.reset();
-    visible_price_bitmap_.reset(); // O(1) clear all bits
+    visible_price_bitmap_.reset();
     cached_visible_prices_.clear();
     cache_dirty_ = false;
     best_bid_ = 0;

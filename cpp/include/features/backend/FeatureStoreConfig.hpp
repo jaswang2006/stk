@@ -6,7 +6,7 @@
 
 // Event-driven feature level definitions
 
-// Level 0: Base level features (most frequent)
+// Level 0: L2 tick level
 #define LEVEL_0_FIELDS(X)                                    \
   X(last_price, float, "Last traded price")                  \
   X(bid1, float, "Best bid price")                           \
@@ -27,7 +27,7 @@
   X(price_impact, float, "Price impact")                     \
   X(event_id, uint64_t, "Event identifier")
 
-// Level 1: Aggregated features (mid frequency)
+// Level 1: intraday minute level
 #define LEVEL_1_FIELDS(X)                                 \
   X(vwap, double, "Volume weighted average price")        \
   X(twap, double, "Time weighted average price")          \
@@ -51,7 +51,7 @@
   X(momentum_long, double, "Long-term momentum")          \
   X(event_id, uint64_t, "Event identifier")
 
-// Level 2: High-level aggregated features (lowest frequency)
+// Level 2: intraday day level
 #define LEVEL_2_FIELDS(X)                                    \
   X(vwap, double, "Volume weighted average price")           \
   X(high, double, "High price")                              \

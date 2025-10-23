@@ -1,5 +1,4 @@
 #include "codec/binary_decoder_L2.hpp"
-#include "codec/delta_encoding.hpp"
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -283,7 +282,7 @@ void BinaryDecoder_L2::print_all_orders(const std::vector<Order> &orders) {
 }
 
 // decoder functions
-bool BinaryDecoder_L2::decode_snapshots(const std::string &filepath, std::vector<Snapshot> &snapshots, bool use_delta) {
+bool BinaryDecoder_L2::decode_snapshots(const std::string &filepath, std::vector<Snapshot> &snapshots) {
   // First extract count from filename to estimate required size
   size_t estimated_count = extract_count_from_filename(filepath);
   if (estimated_count == 0) {
@@ -320,88 +319,12 @@ bool BinaryDecoder_L2::decode_snapshots(const std::string &filepath, std::vector
   snapshots.resize(count);
   std::memcpy(snapshots.data(), data_buffer.get() + header_size, snapshots_size);
 
-  // Decode deltas (reverse the delta encoding process)
-  if (use_delta && count > 1) {
-    std::cout << "L2 Decoder: Applying delta decoding to " << count << " snapshots..." << std::endl;
-    // Reuse pre-allocated member vectors for better performance
-    temp_hours.resize(count);
-    temp_minutes.resize(count);
-    temp_seconds.resize(count);
-    // temp_highs.resize(count);
-    // temp_lows.resize(count);
-    temp_closes.resize(count);
-    temp_all_bid_vwaps.resize(count);
-    temp_all_ask_vwaps.resize(count);
-    temp_all_bid_volumes.resize(count);
-    temp_all_ask_volumes.resize(count);
-
-    for (size_t i = 0; i < 10; ++i) {
-      temp_bid_prices[i].resize(count);
-      temp_ask_prices[i].resize(count);
-    }
-
-    // Extract delta-encoded data
-    for (size_t i = 0; i < count; ++i) {
-      temp_hours[i] = snapshots[i].hour;
-      temp_minutes[i] = snapshots[i].minute;
-      temp_seconds[i] = snapshots[i].second;
-      // temp_highs[i] = snapshots[i].high;
-      // temp_lows[i] = snapshots[i].low;
-      temp_closes[i] = snapshots[i].close;
-      temp_all_bid_vwaps[i] = snapshots[i].all_bid_vwap;
-      temp_all_ask_vwaps[i] = snapshots[i].all_ask_vwap;
-      temp_all_bid_volumes[i] = snapshots[i].all_bid_volume;
-      temp_all_ask_volumes[i] = snapshots[i].all_ask_volume;
-
-      for (size_t j = 0; j < 10; ++j) {
-        temp_bid_prices[j][i] = snapshots[i].bid_price_ticks[j];
-        temp_ask_prices[j][i] = snapshots[i].ask_price_ticks[j];
-      }
-    }
-
-    // Decode deltas where use_delta=true (reverse of encode_deltas)
-    DeltaUtils::decode_deltas(temp_hours.data(), count);
-    DeltaUtils::decode_deltas(temp_minutes.data(), count);
-    DeltaUtils::decode_deltas(temp_seconds.data(), count);
-    // DeltaUtils::decode_deltas(temp_highs.data(), count);
-    // DeltaUtils::decode_deltas(temp_lows.data(), count);
-    DeltaUtils::decode_deltas(temp_closes.data(), count);
-    DeltaUtils::decode_deltas(temp_all_bid_vwaps.data(), count);
-    DeltaUtils::decode_deltas(temp_all_ask_vwaps.data(), count);
-    DeltaUtils::decode_deltas(temp_all_bid_volumes.data(), count);
-    DeltaUtils::decode_deltas(temp_all_ask_volumes.data(), count);
-
-    for (size_t j = 0; j < 10; ++j) {
-      DeltaUtils::decode_deltas(temp_bid_prices[j].data(), count);
-      DeltaUtils::decode_deltas(temp_ask_prices[j].data(), count);
-    }
-
-    // Copy back decoded data
-    for (size_t i = 0; i < count; ++i) {
-      snapshots[i].hour = temp_hours[i];
-      snapshots[i].minute = temp_minutes[i];
-      snapshots[i].second = temp_seconds[i];
-      // snapshots[i].high = temp_highs[i];
-      // snapshots[i].low = temp_lows[i];
-      snapshots[i].close = temp_closes[i];
-      snapshots[i].all_bid_vwap = temp_all_bid_vwaps[i];
-      snapshots[i].all_ask_vwap = temp_all_ask_vwaps[i];
-      snapshots[i].all_bid_volume = temp_all_bid_volumes[i];
-      snapshots[i].all_ask_volume = temp_all_ask_volumes[i];
-
-      for (size_t j = 0; j < 10; ++j) {
-        snapshots[i].bid_price_ticks[j] = temp_bid_prices[j][i];
-        snapshots[i].ask_price_ticks[j] = temp_ask_prices[j][i];
-      }
-    }
-  }
-
   // std::cout << "L2 Decoder: Successfully decoded " << snapshots.size() << " snapshots from " << filepath << std::endl;
 
   return true;
 }
 
-bool BinaryDecoder_L2::decode_orders(const std::string &filepath, std::vector<Order> &orders, bool use_delta) {
+bool BinaryDecoder_L2::decode_orders(const std::string &filepath, std::vector<Order> &orders) {
   // First extract count from filename to estimate required size
   size_t estimated_count = extract_count_from_filename(filepath);
   if (estimated_count == 0) {
@@ -437,50 +360,6 @@ bool BinaryDecoder_L2::decode_orders(const std::string &filepath, std::vector<Or
   // Extract orders from decompressed data
   orders.resize(count);
   std::memcpy(orders.data(), data_buffer.get() + header_size, orders_size);
-
-  // Decode deltas (reverse the delta encoding process)
-  if (use_delta && count > 1) {
-    std::cout << "L2 Decoder: Applying delta decoding to " << count << " orders..." << std::endl;
-    // Reuse pre-allocated member vectors for better performance
-    temp_order_hours.resize(count);
-    temp_order_minutes.resize(count);
-    temp_order_seconds.resize(count);
-    temp_order_milliseconds.resize(count);
-    temp_order_prices.resize(count);
-    temp_bid_order_ids.resize(count);
-    temp_ask_order_ids.resize(count);
-
-    // Extract delta-encoded data
-    for (size_t i = 0; i < count; ++i) {
-      temp_order_hours[i] = orders[i].hour;
-      temp_order_minutes[i] = orders[i].minute;
-      temp_order_seconds[i] = orders[i].second;
-      temp_order_milliseconds[i] = orders[i].millisecond;
-      temp_order_prices[i] = orders[i].price;
-      temp_bid_order_ids[i] = orders[i].bid_order_id;
-      temp_ask_order_ids[i] = orders[i].ask_order_id;
-    }
-
-    // Decode deltas where use_delta=true (reverse of encode_deltas)
-    DeltaUtils::decode_deltas(temp_order_hours.data(), count);
-    DeltaUtils::decode_deltas(temp_order_minutes.data(), count);
-    DeltaUtils::decode_deltas(temp_order_seconds.data(), count);
-    DeltaUtils::decode_deltas(temp_order_milliseconds.data(), count);
-    DeltaUtils::decode_deltas(temp_order_prices.data(), count);
-    DeltaUtils::decode_deltas(temp_bid_order_ids.data(), count);
-    DeltaUtils::decode_deltas(temp_ask_order_ids.data(), count);
-
-    // Copy back decoded data
-    for (size_t i = 0; i < count; ++i) {
-      orders[i].hour = temp_order_hours[i];
-      orders[i].minute = temp_order_minutes[i];
-      orders[i].second = temp_order_seconds[i];
-      orders[i].millisecond = temp_order_milliseconds[i];
-      orders[i].price = temp_order_prices[i];
-      orders[i].bid_order_id = temp_bid_order_ids[i];
-      orders[i].ask_order_id = temp_ask_order_ids[i];
-    }
-  }
 
   // std::cout << "L2 Decoder: Successfully decoded " << orders.size() << " orders from " << filepath << std::endl;
 

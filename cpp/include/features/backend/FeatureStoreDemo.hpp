@@ -1,7 +1,7 @@
 #pragma once
 
 #include "./FeatureStore.hpp"
-#include "./FeaturesConfig.hpp"
+#include "./FeatureStoreConfig.hpp"
 
 // Level 0 has no trigger - always processes base events
 

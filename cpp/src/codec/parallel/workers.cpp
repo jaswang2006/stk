@@ -233,12 +233,12 @@ bool process_stock_data(const std::string &asset_dir,
   }
 
   // Encode snapshots (always present)
-  encoder.encode_snapshots(snapshots, output_dir + "/snapshots_" + std::to_string(snapshots.size()) + ".bin", L2::ENABLE_DELTA_ENCODING);
+  encoder.encode_snapshots(snapshots, output_dir + "/snapshots_" + std::to_string(snapshots.size()) + ".bin");
   compression_ratio = encoder.get_compression_stats().ratio;
 
   // Encode orders if any exist
   if (!all_orders.empty()) {
-    encoder.encode_orders(all_orders, output_dir + "/orders_" + std::to_string(all_orders.size()) + ".bin", L2::ENABLE_DELTA_ENCODING);
+    encoder.encode_orders(all_orders, output_dir + "/orders_" + std::to_string(all_orders.size()) + ".bin");
     compression_ratio = encoder.get_compression_stats().ratio;
   }
 

@@ -1,5 +1,4 @@
 #include "codec/binary_encoder_L2.hpp"
-#include "codec/delta_encoding.hpp"
 #include "misc/logging.hpp"
 #include <algorithm>
 #include <cctype>
@@ -551,192 +550,44 @@ BinaryEncoder_L2::~BinaryEncoder_L2() {
   }
 }
 
-// Apply delta encoding to snapshots
-static void apply_delta_encoding_snapshots(std::vector<Snapshot> &snapshots,
-                                          std::vector<uint8_t> &hours, std::vector<uint8_t> &minutes, 
-                                          std::vector<uint8_t> &seconds, std::vector<uint16_t> &closes,
-                                          std::vector<uint16_t> (&bid_prices)[10], std::vector<uint16_t> (&ask_prices)[10],
-                                          std::vector<uint16_t> &bid_vwaps, std::vector<uint16_t> &ask_vwaps,
-                                          std::vector<uint32_t> &bid_volumes, std::vector<uint32_t> &ask_volumes) {
-  const size_t count = snapshots.size();
-  if (count <= 1) return;
-
-  // Resize buffers
-  hours.resize(count); minutes.resize(count); seconds.resize(count); closes.resize(count);
-  bid_vwaps.resize(count); ask_vwaps.resize(count);
-  bid_volumes.resize(count); ask_volumes.resize(count);
-  for (auto &vec : bid_prices) vec.resize(count);
-  for (auto &vec : ask_prices) vec.resize(count);
-
-  // Extract data
-  for (size_t i = 0; i < count; ++i) {
-    hours[i] = snapshots[i].hour;
-    minutes[i] = snapshots[i].minute;
-    seconds[i] = snapshots[i].second;
-    closes[i] = snapshots[i].close;
-    bid_vwaps[i] = snapshots[i].all_bid_vwap;
-    ask_vwaps[i] = snapshots[i].all_ask_vwap;
-    bid_volumes[i] = snapshots[i].all_bid_volume;
-    ask_volumes[i] = snapshots[i].all_ask_volume;
-
-    for (size_t j = 0; j < 10; ++j) {
-      bid_prices[j][i] = snapshots[i].bid_price_ticks[j];
-      ask_prices[j][i] = snapshots[i].ask_price_ticks[j];
-    }
-  }
-
-  // Delta encode
-  DeltaUtils::encode_deltas(hours.data(), count);
-  DeltaUtils::encode_deltas(minutes.data(), count);
-  DeltaUtils::encode_deltas(seconds.data(), count);
-  DeltaUtils::encode_deltas(closes.data(), count);
-  DeltaUtils::encode_deltas(bid_vwaps.data(), count);
-  DeltaUtils::encode_deltas(ask_vwaps.data(), count);
-  DeltaUtils::encode_deltas(bid_volumes.data(), count);
-  DeltaUtils::encode_deltas(ask_volumes.data(), count);
-
-  for (auto &vec : bid_prices) DeltaUtils::encode_deltas(vec.data(), count);
-  for (auto &vec : ask_prices) DeltaUtils::encode_deltas(vec.data(), count);
-
-  // Write back
-  for (size_t i = 0; i < count; ++i) {
-    snapshots[i].hour = hours[i];
-    snapshots[i].minute = minutes[i];
-    snapshots[i].second = seconds[i];
-    snapshots[i].close = closes[i];
-    snapshots[i].all_bid_vwap = bid_vwaps[i];
-    snapshots[i].all_ask_vwap = ask_vwaps[i];
-    snapshots[i].all_bid_volume = bid_volumes[i];
-    snapshots[i].all_ask_volume = ask_volumes[i];
-
-    for (size_t j = 0; j < 10; ++j) {
-      snapshots[i].bid_price_ticks[j] = bid_prices[j][i];
-      snapshots[i].ask_price_ticks[j] = ask_prices[j][i];
-    }
-  }
-}
-
-// Apply delta encoding to orders
-static void apply_delta_encoding_orders(std::vector<Order> &orders,
-                                       std::vector<uint8_t> &hours, std::vector<uint8_t> &minutes,
-                                       std::vector<uint8_t> &seconds, std::vector<uint8_t> &millis,
-                                       std::vector<uint16_t> &prices,
-                                       std::vector<uint32_t> &bid_ids, std::vector<uint32_t> &ask_ids) {
-  const size_t count = orders.size();
-  if (count <= 1) return;
-
-  // Resize buffers
-  hours.resize(count); minutes.resize(count); seconds.resize(count); millis.resize(count);
-  prices.resize(count); bid_ids.resize(count); ask_ids.resize(count);
-
-  // Extract data
-  for (size_t i = 0; i < count; ++i) {
-    hours[i] = orders[i].hour;
-    minutes[i] = orders[i].minute;
-    seconds[i] = orders[i].second;
-    millis[i] = orders[i].millisecond;
-    prices[i] = orders[i].price;
-    bid_ids[i] = orders[i].bid_order_id;
-    ask_ids[i] = orders[i].ask_order_id;
-  }
-
-  // Delta encode
-  DeltaUtils::encode_deltas(hours.data(), count);
-  DeltaUtils::encode_deltas(minutes.data(), count);
-  DeltaUtils::encode_deltas(seconds.data(), count);
-  DeltaUtils::encode_deltas(millis.data(), count);
-  DeltaUtils::encode_deltas(prices.data(), count);
-  DeltaUtils::encode_deltas(bid_ids.data(), count);
-  DeltaUtils::encode_deltas(ask_ids.data(), count);
-
-  // Write back
-  for (size_t i = 0; i < count; ++i) {
-    orders[i].hour = hours[i];
-    orders[i].minute = minutes[i];
-    orders[i].second = seconds[i];
-    orders[i].millisecond = millis[i];
-    orders[i].price = prices[i];
-    orders[i].bid_order_id = bid_ids[i];
-    orders[i].ask_order_id = ask_ids[i];
-  }
-}
-
 bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots, 
-                                        const std::string &filepath, bool use_delta) {
+                                        const std::string &filepath) {
   if (snapshots.empty()) {
     Logger::log_encoding("No snapshots to encode: " + filepath);
     return true;
   }
 
-  std::vector<Snapshot> data = snapshots;
-  const size_t count = data.size();
-
-  // Clear temp buffers before reuse
-  temp_snap_hours.clear();
-  temp_snap_minutes.clear();
-  temp_snap_seconds.clear();
-  temp_snap_closes.clear();
-  temp_snap_bid_vwaps.clear();
-  temp_snap_ask_vwaps.clear();
-  temp_snap_bid_volumes.clear();
-  temp_snap_ask_volumes.clear();
-  for (auto &vec : temp_snap_bid_prices) vec.clear();
-  for (auto &vec : temp_snap_ask_prices) vec.clear();
-
-  // Apply delta encoding
-  if (use_delta && count > 1) {
-    apply_delta_encoding_snapshots(data, temp_snap_hours, temp_snap_minutes, temp_snap_seconds,
-                                   temp_snap_closes, temp_snap_bid_prices, temp_snap_ask_prices,
-                                   temp_snap_bid_vwaps, temp_snap_ask_vwaps,
-                                   temp_snap_bid_volumes, temp_snap_ask_volumes);
-  }
+  const size_t count = snapshots.size();
 
   // Prepare buffer: header + data
   const size_t header_size = sizeof(count);
-  const size_t data_size = data.size() * sizeof(Snapshot);
+  const size_t data_size = snapshots.size() * sizeof(Snapshot);
   const size_t total_size = header_size + data_size;
 
   auto buffer = std::make_unique<char[]>(total_size);
   std::memcpy(buffer.get(), &count, header_size);
-  std::memcpy(buffer.get() + header_size, data.data(), data_size);
+  std::memcpy(buffer.get() + header_size, snapshots.data(), data_size);
 
   return compress_and_write_data(filepath, buffer.get(), total_size);
 }
 
 bool BinaryEncoder_L2::encode_orders(const std::vector<Order> &orders, 
-                                     const std::string &filepath, bool use_delta) {
+                                     const std::string &filepath) {
   if (orders.empty()) {
     Logger::log_encoding("No orders to encode: " + filepath);
     return false;
   }
 
-  std::vector<Order> data = orders;
-  const size_t count = data.size();
-
-  // Clear temp buffers before reuse
-  temp_order_hours.clear();
-  temp_order_minutes.clear();
-  temp_order_seconds.clear();
-  temp_order_millis.clear();
-  temp_order_prices.clear();
-  temp_order_bid_ids.clear();
-  temp_order_ask_ids.clear();
-
-  // Apply delta encoding
-  if (use_delta && count > 1) {
-    apply_delta_encoding_orders(data, temp_order_hours, temp_order_minutes, temp_order_seconds,
-                                temp_order_millis, temp_order_prices,
-                                temp_order_bid_ids, temp_order_ask_ids);
-  }
+  const size_t count = orders.size();
 
   // Prepare buffer: header + data
   const size_t header_size = sizeof(count);
-  const size_t data_size = data.size() * sizeof(Order);
+  const size_t data_size = orders.size() * sizeof(Order);
   const size_t total_size = header_size + data_size;
 
   auto buffer = std::make_unique<char[]>(total_size);
   std::memcpy(buffer.get(), &count, header_size);
-  std::memcpy(buffer.get() + header_size, data.data(), data_size);
+  std::memcpy(buffer.get() + header_size, orders.data(), data_size);
 
   return compress_and_write_data(filepath, buffer.get(), total_size);
 }
@@ -840,7 +691,7 @@ bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
 
     const std::string output_file = output_dir + "/" + stock_code + 
                                    "_snapshots_" + std::to_string(snapshots.size()) + ".bin";
-    if (!encode_snapshots(snapshots, output_file, ENABLE_DELTA_ENCODING)) return false;
+    if (!encode_snapshots(snapshots, output_file)) return false;
   }
 
   // Convert and encode orders + trades
@@ -881,7 +732,7 @@ bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
 
     const std::string output_file = output_dir + "/" + stock_code + 
                                    "_orders_" + std::to_string(all_orders.size()) + ".bin";
-    if (!encode_orders(all_orders, output_file, ENABLE_DELTA_ENCODING)) return false;
+    if (!encode_orders(all_orders, output_file)) return false;
   }
 
   // Release temporary memory after each day

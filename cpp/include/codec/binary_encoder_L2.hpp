@@ -124,11 +124,9 @@ public:
 
   // Encode and compress binary structures to file
   bool encode_snapshots(const std::vector<Snapshot> &snapshots, 
-                       const std::string &filepath, 
-                       bool use_delta = ENABLE_DELTA_ENCODING);
+                       const std::string &filepath);
   bool encode_orders(const std::vector<Order> &orders, 
-                    const std::string &filepath, 
-                    bool use_delta = ENABLE_DELTA_ENCODING);
+                    const std::string &filepath);
 
   // ------------------------------------------------------------
   // High-Level Interface

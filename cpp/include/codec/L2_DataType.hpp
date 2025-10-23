@@ -30,9 +30,6 @@ inline const char *TEMP_DIR = "../../../output/database";
 inline constexpr size_t DEFAULT_ENCODER_SNAPSHOT_SIZE = 5000; // 3秒全量快照 4*3600/3=4800
 inline constexpr size_t DEFAULT_ENCODER_ORDER_SIZE = 200000;   // 逐笔合并(增删改成交)
 
-// modern compression algo maynot benefit from delta encoding
-inline constexpr bool ENABLE_DELTA_ENCODING = false; // use Zstd for high compress ratio and fast decompress speed
-
 // Data Struct
 inline constexpr int BLEN = 100;            // default length for Cbuffers (feature computation)
 inline constexpr int SNAPSHOT_INTERVAL = 3; // 全量快照间隔
@@ -63,37 +60,36 @@ inline constexpr int RESAMPLE_EMA_DAYS_PERIOD = 5;   // shouldn't be too large, 
 struct ColumnMeta {
   std::string_view column_name; // 列名
   uint8_t bit_width;            // 实际存储 bit 宽度
-  bool use_delta;               // 是否存 delta 编码
 };
 
 // clang-format off
 constexpr ColumnMeta Snapshot_Schema[] = {
     // snapshot
-    {"hour",               5,   true  },// "取值范围 0-23，5bit 足够，取值连续, 使用delta编码"},
-    {"minute",             6,   true  },// "取值范围 0-59，6bit 足够，取值连续, 使用delta编码"},
-    {"second",             6,   true  },// "取值范围 0-59，6bit 足够，取值连续, 使用delta编码"},
-    {"trade_count",        8,   false },// "波动较大, 多数时候为0或小值, 直接存储"},
-    {"volume",             16,  false },// "波动较大，但也有大量0, 直接存储"},
-    {"turnover",           32,  false },// "波动较大，但也有大量0, 直接存储"},
-    {"close",              14,  true  },// "价格连续(0.01 RMB units)，使用delta编码"},
-    {"bid_price_ticks[10]",14,  true  },// "订单价长时间静态(0.01 RMB units)，局部跳变，使用delta编码"},
-    {"bid_volumes[10]",    14,  false },// "订单量长时间静态，局部跳变，直接存储"},
-    {"ask_price_ticks[10]",14,  true  },// "订单价长时间静态(0.01 RMB units)，局部跳变，使用delta编码"},
-    {"ask_volumes[10]",   14,  false },// "订单量长时间静态，局部跳变，直接存储"},
-    {"direction",         1,   false },// "仅买/卖两种值，直接存储"},
-    {"all_bid_vwap",      15,  true  },// "VWAP价格连续(0.001 RMB units)，使用delta编码"},
-    {"all_ask_vwap",      15,  true  },// "VWAP价格连续(0.001 RMB units)，使用delta编码"},
-    {"all_bid_volume",    22,  true  },// "总量变化平滑，使用delta编码"},
-    {"all_ask_volume",    22,  true  },// "总量变化平滑，使用delta编码"},
+    {"hour",               5  },// "取值范围 0-23，5bit 足够"},
+    {"minute",             6  },// "取值范围 0-59，6bit 足够"},
+    {"second",             6  },// "取值范围 0-59，6bit 足够"},
+    {"trade_count",        8  },// "波动较大, 多数时候为0或小值"},
+    {"volume",             16 },// "波动较大，但也有大量0"},
+    {"turnover",           32 },// "波动较大，但也有大量0"},
+    {"close",              14 },// "价格(0.01 RMB units)"},
+    {"bid_price_ticks[10]",14 },// "订单价(0.01 RMB units)"},
+    {"bid_volumes[10]",    14 },// "订单量"},
+    {"ask_price_ticks[10]",14 },// "订单价(0.01 RMB units)"},
+    {"ask_volumes[10]",   14  },// "订单量"},
+    {"direction",         1   },// "仅买/卖两种值"},
+    {"all_bid_vwap",      15  },// "VWAP价格(0.001 RMB units)"},
+    {"all_ask_vwap",      15  },// "VWAP价格(0.001 RMB units)"},
+    {"all_bid_volume",    22  },// "总量"},
+    {"all_ask_volume",    22  },// "总量"},
 
     // order
-    {"millisecond",       7,   true  },// "取值范围 0-127，7bit 足够，取值连续, 使用delta编码"},
-    {"order_type",        2,   false },// "仅增删改成交四种值，直接存储"},
-    {"order_dir",         1,   false },// "仅bid ask 两种值，直接存储"},
-    {"price",             14,  true  },// "价格连续(0.01 RMB units)，使用delta编码"},
-    {"volume",            16,  false },// "大部分绝对值小，直接存储"},
-    {"bid_order_id",      32,  true  },// "订单id大部分递增，局部跳变，使用delta编码"},
-    {"ask_order_id",      32,  true  },// "订单id大部分递增，局部跳变，使用delta编码"},
+    {"millisecond",       7   },// "取值范围 0-127，7bit 足够"},
+    {"order_type",        2   },// "仅增删改成交四种值"},
+    {"order_dir",         1   },// "仅bid ask 两种值"},
+    {"price",             14  },// "价格(0.01 RMB units)"},
+    {"volume",            16  },// "成交量"},
+    {"bid_order_id",      32  },// "订单id"},
+    {"ask_order_id",      32  },// "订单id"},
   };
 // clang-format on
 

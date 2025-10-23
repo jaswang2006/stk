@@ -17,8 +17,8 @@ public:
   BinaryDecoder_L2(size_t estimated_snapshots = 100000, size_t estimated_orders = 500000);
 
   // decoder functions
-  bool decode_snapshots(const std::string &filepath, std::vector<Snapshot> &snapshots, bool use_delta = ENABLE_DELTA_ENCODING);
-  bool decode_orders(const std::string &filepath, std::vector<Order> &orders, bool use_delta = ENABLE_DELTA_ENCODING);
+  bool decode_snapshots(const std::string &filepath, std::vector<Snapshot> &snapshots);
+  bool decode_orders(const std::string &filepath, std::vector<Order> &orders);
 
   // Zstandard decompression helper functions (pure standard decompression)
   static bool read_and_decompress_data(const std::string &filepath, void *data, size_t expected_size, size_t &actual_size);
