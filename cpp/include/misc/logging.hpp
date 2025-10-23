@@ -14,29 +14,27 @@
  * Usage:
  *   Logger::init(temp_base_path);
  *   Logger::log_decomp("Worker started");
- *   Logger::log_parsing_error("Failed to parse CSV: " + filepath);
+ *   Logger::log_encoding("Failed to parse CSV: " + filepath);
  *   Logger::close();
  */
 
 #pragma once
 
-#include <fstream>
-#include <mutex>
 #include <string>
 
 namespace Logger {
 
 // Initialize logging system with temp directory base path
-void init(const std::string& temp_base_path);
+void init(const std::string &temp_base_path);
 
 // Close all log files
 void close();
 
 // Decompression logging functions
-void log_decomp(const std::string& message);
+void log_decomp(const std::string &message);
 
-// Parsing error logging functions  
-void log_parsing_error(const std::string& message);
+// Parsing error logging functions
+void log_encoding(const std::string &message);
 
 // Check if logging is initialized
 bool is_initialized();

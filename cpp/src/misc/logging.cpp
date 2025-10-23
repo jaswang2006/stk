@@ -4,6 +4,8 @@
 #include <chrono>
 #include <iomanip>
 #include <sstream>
+#include <fstream>
+#include <mutex>
 
 namespace Logger {
 
@@ -47,7 +49,7 @@ void init(const std::string& temp_base_path) {
     }
     
     // Initialize parsing error log  
-    std::filesystem::path parsing_log_path = log_dir / "parsing_errors.log";
+    std::filesystem::path parsing_log_path = log_dir / "encoding.log";
     parsing_log.open(parsing_log_path);
     if (parsing_log.is_open()) {
         parsing_log << "[" << get_timestamp() << "] Parsing Error Log Started at: " << parsing_log_path << std::endl;
@@ -89,7 +91,7 @@ void log_decomp(const std::string& message) {
     }
 }
 
-void log_parsing_error(const std::string& message) {
+void log_encoding(const std::string& message) {
     if (!initialized) return;
     
     std::lock_guard<std::mutex> lock(parsing_log_mutex);

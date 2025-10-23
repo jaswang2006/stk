@@ -311,19 +311,6 @@ inline bool extract_and_encode(const std::string &archive_path, const std::strin
     return false;
   }
 
-  // Validate data counts
-  constexpr size_t MIN_EXPECTED_COUNT = 1000;
-  if (!snapshots.empty() && snapshots.size() < MIN_EXPECTED_COUNT) {
-    Logger::log_parsing_error("Abnormal snapshot count: " + asset_code + " " + date_str +
-                              " has only " + std::to_string(snapshots.size()) + " snapshots");
-    std::exit(1);
-  }
-  if (!orders.empty() && orders.size() < MIN_EXPECTED_COUNT) {
-    Logger::log_parsing_error("Abnormal order count: " + asset_code + " " + date_str +
-                              " has only " + std::to_string(orders.size()) + " orders");
-    std::exit(1);
-  }
-
   // Clean up CSV files
   for (const auto &entry : std::filesystem::directory_iterator(temp_asset_dir)) {
     if (entry.path().string().ends_with(".csv")) {
@@ -396,13 +383,20 @@ void encoding_worker(std::vector<AssetTask> &asset_queue, std::mutex &queue_mute
       const std::string temp_asset_dir = Utils::generate_temp_asset_dir(temp_dir, date_str, asset_task.asset_code);
       const BinaryFiles existing = Encoding::check_existing_binaries(temp_asset_dir, asset_task.asset_code);
 
+      // Skip if binary already exists
       if (existing.exists() && Config::SKIP_EXISTING_BINARIES) {
         progress_handle.update(i + 1, dates.size(), date_str);
         continue;
       }
 
-      // Encode (blocking on RAR lock if needed)
+      // Check archive exists before attempting extraction
       const std::string archive_path = Utils::generate_archive_path(l2_archive_base, date_str);
+      if (!std::filesystem::exists(archive_path)) {
+        progress_handle.update(i + 1, dates.size(), date_str);
+        continue;
+      }
+
+      // Encode (blocking on RAR lock if needed)
       bool success = Encoding::extract_and_encode(archive_path, asset_task.asset_code, date_str, temp_dir, encoder);
 
       // Always update progress regardless of success/failure
