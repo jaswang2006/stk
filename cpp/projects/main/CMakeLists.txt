@@ -89,7 +89,7 @@ set(HEADERS
     ../../include/codec/binary_encoder_L2.hpp
     ../../include/codec/L2_DataType.hpp
     # ../../include/AnalysisTechnical.hpp
-    ../../include/LimitOrderBook.hpp
+    ../../include/lob/LimitOrderBook.hpp
 )
 
 # Disable fast-math specifically for JSON library to avoid infinity issues

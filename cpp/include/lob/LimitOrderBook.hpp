@@ -465,12 +465,12 @@ public:
     is_bid_ = (order.order_dir == L2::OrderDirection::BID);
 
     // Update session state on tick change
-    if (new_tick_) [[unlikely]] {
+    if (new_tick_) {
       update_trading_session_state();
     }
 
     // Detect transition from matching period to continuous trading
-    static bool was_in_matching_period = false;
+    static bool was_in_matching_period = false; // only inited at 1st call of process(), persist across calls
     if (was_in_matching_period && !in_matching_period_ && !in_call_auction_) [[unlikely]] {
       flush_call_auction_flags();
     }
@@ -481,6 +481,8 @@ public:
 #endif
     prev_tick_ = curr_tick_;
 
+    bool result = update_lob(order);
+
     // Process resampling (only for TAKER orders)
     if (is_taker_) [[likely]] {
       if (resampler_.resample(curr_tick_, is_bid_, order.volume)) {
@@ -488,7 +490,6 @@ public:
       }
     }
 
-    bool result = update_lob(order);
     return result;
   };
 

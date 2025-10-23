@@ -1,4 +1,4 @@
-#include "LimitOrderBook.hpp"
+#include "lob/LimitOrderBook.hpp"
 #include "codec/L2_DataType.hpp"
 #include "codec/binary_decoder_L2.hpp"
 #include "codec/binary_encoder_L2.hpp"

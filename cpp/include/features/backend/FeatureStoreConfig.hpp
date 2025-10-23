@@ -8,24 +8,24 @@
 
 // Level 0: L2 tick level
 #define LEVEL_0_FIELDS(X)                                    \
-  X(last_price, float, "Last traded price")                  \
-  X(bid1, float, "Best bid price")                           \
-  X(ask1, float, "Best ask price")                           \
-  X(volume, uint32_t, "Trade volume")                        \
-  X(bid1_size, uint32_t, "Best bid size")                    \
-  X(ask1_size, uint32_t, "Best ask size")                    \
-  X(spread, float, "Bid-ask spread")                         \
-  X(mid_price, float, "Mid price")                           \
-  X(is_uptick, bool, "Is uptick indicator")                  \
-  X(micro_price, float, "Micro price")                       \
-  X(order_imbalance, float, "Order flow imbalance")          \
-  X(trade_sign, float, "Trade direction sign")               \
-  X(aggressive_buy_vol, uint32_t, "Aggressive buy volume")   \
-  X(aggressive_sell_vol, uint32_t, "Aggressive sell volume") \
-  X(effective_spread, float, "Effective spread")             \
-  X(realized_spread, float, "Realized spread")               \
-  X(price_impact, float, "Price impact")                     \
-  X(event_id, uint64_t, "Event identifier")
+  X(last_price,          float,     "Last traded price"     )\
+  X(bid1,                float,     "Best bid price"        )\
+  X(ask1,                float,     "Best ask price"        )\
+  X(volume,              uint32_t,  "Trade volume"          )\
+  X(bid1_size,           uint32_t,  "Best bid size"         )\
+  X(ask1_size,           uint32_t,  "Best ask size"         )\
+  X(spread,              float,     "Bid-ask spread"        )\
+  X(mid_price,           float,     "Mid price"             )\
+  X(is_uptick,           bool,      "Is uptick indicator"   )\
+  X(micro_price,         float,     "Micro price"           )\
+  X(order_imbalance,     float,     "Order flow imbalance"  )\
+  X(trade_sign,          float,     "Trade direction sign"  )\
+  X(aggressive_buy_vol,  uint32_t,  "Aggressive buy volume" )\
+  X(aggressive_sell_vol, uint32_t,  "Aggressive sell volume")\
+  X(effective_spread,    float,     "Effective spread"      )\
+  X(realized_spread,     float,     "Realized spread"       )\
+  X(price_impact,        float,     "Price impact"          )\
+  X(event_id,            uint64_t,  "Event identifier"      )
 
 // Level 1: intraday minute level
 #define LEVEL_1_FIELDS(X)                                 \
