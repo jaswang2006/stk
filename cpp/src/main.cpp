@@ -327,19 +327,21 @@ inline bool extract_and_encode(const std::string &archive_path, const std::strin
 // ============================================================================
 
 namespace Analysis {
-inline bool process_binary_files(const BinaryFiles &files, L2::BinaryDecoder_L2 &decoder, LimitOrderBook &analyzer) {
+inline size_t process_binary_files(const BinaryFiles &files, L2::BinaryDecoder_L2 &decoder, LimitOrderBook &analyzer) {
+  size_t order_count = 0;
   if (!files.orders_file.empty()) {
     std::vector<L2::Order> decoded_orders;
     if (!decoder.decode_orders(files.orders_file, decoded_orders)) {
-      return false;
+      return 0;
     }
 
+    order_count = decoded_orders.size();
     for (const auto &ord : decoded_orders) {
       analyzer.process(ord);
     }
     analyzer.clear();
   }
-  return true;
+  return order_count;
 }
 } // namespace Analysis
 
@@ -421,16 +423,28 @@ void process_analysis_for_asset(const std::string &asset_code, const std::vector
   L2::ExchangeType exchange_type = L2::infer_exchange_type(asset_code);
   LimitOrderBook analyzer(L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type);
 
+  size_t cumulative_orders = 0;
+  auto start_time = std::chrono::steady_clock::now();
+
   for (size_t i = 0; i < dates.size(); ++i) {
     const std::string &date_str = dates[i];
     const std::string temp_asset_dir = Utils::generate_temp_asset_dir(temp_dir, date_str, asset_code);
     const BinaryFiles files = Encoding::check_existing_binaries(temp_asset_dir, asset_code);
 
     if (files.exists()) {
-      Analysis::process_binary_files(files, decoder, analyzer);
+      cumulative_orders += Analysis::process_binary_files(files, decoder, analyzer);
     }
 
-    progress_handle.update(i + 1, dates.size(), date_str);
+    // Calculate cumulative statistics
+    auto current_time = std::chrono::steady_clock::now();
+    double elapsed_seconds = std::chrono::duration<double>(current_time - start_time).count();
+    double speed_M_per_sec = (elapsed_seconds > 0) ? (cumulative_orders / 1e6) / elapsed_seconds : 0.0;
+    double total_M = cumulative_orders / 1e6;
+    
+    char msg_buf[128];
+    snprintf(msg_buf, sizeof(msg_buf), "%s [%.1fM/s(%.0fM)]", date_str.c_str(), speed_M_per_sec, total_M);
+    
+    progress_handle.update(i + 1, dates.size(), msg_buf);
   }
 }
 
