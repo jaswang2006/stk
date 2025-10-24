@@ -127,6 +127,13 @@ constexpr uint16_t MIN_DISTANCE_FROM_TOB = 5; // Minimum distance from TOB to ch
 //    - OrderId id: 订单唯一标识
 //    - OrderFlags flags: 订单状态标记
 //
+// Level[0] 特殊档位:
+// --------------------------------------------------------------------------------
+// - 存放price=0的订单: SPECIAL_MAKER, ZERO_PRICE, UNKNOWN等
+// - 数量极少(<0.1%总订单数), 通常<10个订单
+// - O(n)遍历开销可忽略
+// - 统一接口: Level[0]和其他Level使用相同的操作(add/remove/move)
+//
 // Order Flags (订单状态标记):
 // --------------------------------------------------------------------------------
 // enum class OrderFlags : uint8_t {
@@ -138,13 +145,6 @@ constexpr uint16_t MIN_DISTANCE_FROM_TOB = 5; // Minimum distance from TOB to ch
 //   ZERO_PRICE,      // 零价格订单 (CANCEL等, price=0)
 //   ANOMALY_MATCH    // 异常撮合 (连续竞价时价格/方向不匹配)
 // };
-//
-// Level[0] 特殊档位:
-// --------------------------------------------------------------------------------
-// - 存放price=0的订单: SPECIAL_MAKER, ZERO_PRICE, UNKNOWN等
-// - 数量极少(<0.1%总订单数), 通常<10个订单
-// - O(n)遍历开销可忽略
-// - 统一接口: Level[0]和其他Level使用相同的操作(add/remove/move)
 //
 //========================================================================================
 // CORNER CASES SUMMARY
@@ -182,72 +182,82 @@ constexpr uint16_t MIN_DISTANCE_FROM_TOB = 5; // Minimum distance from TOB to ch
 //========================================================================================
 //
 // ┌─────────────────────────────────────────────────────────────────────────────────┐
-// │ MAKER FLOW (创建挂单)                                                            │
+// │ 1. MAKER FLOW (挂单)                                                            │
 // └─────────────────────────────────────────────────────────────────────────────────┘
 //
-// 1. 确定初始放置位置和flags:
-//    ┌─ price=0?           → Level[0],     flags=SPECIAL_MAKER
-//    ├─ 集合竞价期?        → Level[price], flags=CALL_AUCTION
-//    └─ 连续竞价正常       → Level[price], flags=NORMAL
+// 触发: order_type == MAKER
+// 特点: 永不进入循环，单次lookup → order_upsert → 返回
 //
-// 2. 检查order_lookup_[id]:
-//    ├─ 已存在 (OUT_OF_ORDER: TAKER/CANCEL先到)
-//    │  ├─ Order在Level[X], MAKER要求Level[Y], X≠Y?
-//    │  │  └─ move_order_by_id(id, Y)
-//    │  └─ order_upsert(抵扣qty, 更新flags)
-//    │
-//    └─ 不存在 (正常情况)
-//       └─ order_upsert(创建新Order, 设置flags)
+// 流程 (99%+):
+//   1. lookup(order_id) → not found
+//   2. order_upsert(创建Order, flags=NORMAL, 放置在Level[price])
+//   3. return
+//
+// 特殊情况 (1%-):
+//   - OUT_OF_ORDER: order已存在 → 迁移价格 + 补充qty
+//   - CALL_AUCTION: in_call_auction=true → flags=CALL_AUCTION
+//   - SPECIAL_MAKER: price=0 → 放置在Level[0]
 //
 // ┌─────────────────────────────────────────────────────────────────────────────────┐
-// │ TAKER FLOW (成交)                                                               │
+// │ 2. TAKER FLOW (成交)                                                            │
 // └─────────────────────────────────────────────────────────────────────────────────┘
 //
-// 交易所撮合机制差异 (SSE分时段, SZSE全天双边):
-// --------------------------------------------------------------------------------
-// SSE: 集合竞价撮合期 (9:25-9:30, 14:57-15:00) 双边, 连续竞价 (9:30-14:57) 单边
-// SZSE: 全天双边
+// 触发: order_type == TAKER
+// 交易所差异:
+//   - SSE: 集合竞价撮合期(9:25-9:30, 14:57-15:00)双边，连续竞价(9:30-14:57)单边
+//   - SZSE: 全天双边
 //
-// 1. 判断撮合类型 (条件: order.order_type == TAKER):
-//    ├─ 双边撮合?  need_bilateral_matching && bid_id != 0 && ask_id != 0
-//    │  └─ 执行 handle_bilateral_matching() → 返回
-//    │
-//    └─ 单边撮合 (默认路径)
-//       └─ 继续下面流程
+// 核心函数: process_taker_side(order, order_id, delta)
+//   - order_id: 对手方订单ID
+//   - delta: bid侧负值, ask侧正值
+//   - 返回: true=完全消耗, false=部分消耗或新创建
 //
-// 2. 单边撮合 - 获取target_id (被抵扣的maker):
-//    ├─ bid_id != 0 && ask_id != 0?  → target_id = min(bid_id, ask_id)  (更早的maker)
-//    └─ 只有一个ID != 0?             → target_id = 存在的那个ID
+// ─────────────────────────────────────────────────────────────────────────────────
+// 2.1 双边撮合
+// ─────────────────────────────────────────────────────────────────────────────────
+// 触发: need_bilateral && bid_id != 0 && ask_id != 0
 //
-// 3. 通过order_lookup_查找target_id:
-//    ├─ 找到Order (正常情况)
-//    │  ├─ Order在Level[X], TAKER成交价=Y, X≠Y?
-//    │  │  ├─ move_order_by_id(target_id, Y)
-//    │  │  └─ 连续竞价 && 价格不匹配? → flags=ANOMALY_MATCH
-//    │  │
-//    │  ├─ order_upsert(抵扣qty)
-//    │  └─ update_tob_after_trade(order, 是否完全消耗, 成交价)
-//    │
-//    └─ 未找到Order (OUT_OF_ORDER: TAKER先于MAKER到达)
-//       └─ order_upsert(预创建Order, flags=OUT_OF_ORDER)
+// 流程 (99%+):
+//   1. consumed_bid = process_taker_side(order, bid_id, -volume)
+//      → lookup(bid_id) → order_upsert(抵扣qty) → 返回是否完全消耗
+//   2. consumed_ask = process_taker_side(order, ask_id, +volume)
+//      → lookup(ask_id) → order_upsert(抵扣qty) → 返回是否完全消耗
+//   3. update_tob_one_side(is_active_bid, consumed_bid, price)
 //
-// 4. 处理self_order (仅市价单场景: !both_ids_present):
-//    └─ 己方MAKER可能在Level[0] → 查找并迁移 → 抵扣
+// 特殊情况 (1%-):
+//   - 价格不匹配 → order_move_to_price() + flags=ANOMALY_MATCH
+//   - OUT_OF_ORDER → 预创建Order于Level[0]
+//
+// ─────────────────────────────────────────────────────────────────────────────────
+// 2.2 单边撮合
+// ─────────────────────────────────────────────────────────────────────────────────
+// 触发: !need_bilateral || 只有一个ID != 0
+//
+// 流程 (99%+):
+//   1. order_extract_params(order) → (target_id, delta_qty, is_bid)
+//   2. consumed = process_taker_side(order, target_id, delta_qty)
+//      → lookup(target_id) → order_upsert(抵扣qty) → 返回是否完全消耗
+//   3. update_tob_one_side(is_bid, consumed, price)
+//
+// 特殊情况 (1%-): 与双边相同
 //
 // ┌─────────────────────────────────────────────────────────────────────────────────┐
-// │ CANCEL FLOW (撤单)                                                              │
+// │ 3. CANCEL FLOW (撤单)                                                           │
 // └─────────────────────────────────────────────────────────────────────────────────┘
 //
-// 1. 通过order_lookup_查找self_id:
-//    ├─ 找到Order
-//    │  ├─ Order在Level[0] && CANCEL有价格?
-//    │  │  └─ move_order_by_id(id, cancel_price)
-//    │  │
-//    │  └─ order_upsert(抵扣qty, CANCEL的signed_volume为负)
-//    │
-//    └─ 未找到Order (OUT_OF_ORDER或ZERO_PRICE)
-//       ├─ price=0? → Level[0], flags=ZERO_PRICE
-//       └─ price≠0? → Level[price], flags=OUT_OF_ORDER
+// 触发: order_type == CANCEL
+// 特点: 复用process_taker_side()，但不更新TOB
+//
+// 流程 (99%+):
+//   1. order_extract_params(order) → (target_id, delta_qty, is_bid)
+//   2. consumed = process_taker_side(order, target_id, delta_qty)
+//      → lookup(target_id) → order_upsert(减少qty) → 返回是否完全消耗
+//   3. return (不更新TOB)
+//
+// 特殊情况 (1%-):
+//   - ZERO_PRICE_CANCEL: price=0撤单 → 预创建于Level[0]
+//   - SPECIAL_MAKER撤单: 撤销Level[0]的订单
+//   - OUT_OF_ORDER → 预创建Order于Level[0]
 //
 //========================================================================================
 // SPECIAL HANDLING: CALL AUCTION (集合竞价)
@@ -279,7 +289,7 @@ constexpr uint16_t MIN_DISTANCE_FROM_TOB = 5; // Minimum distance from TOB to ch
 // Hot Path (95%+ orders): 正常连续竞价, 价格匹配
 // --------------------------------------------------------------------------------
 // MAKER:  1x hash lookup (order_lookup_) + create Order     → O(1)
-// TAKER:  1x hash lookup (order_lookup_) + deduct Order     → O(1)
+// TAKER:  1/2x hash lookup (order_lookup_) + deduct Order   → O(1/2)
 // CANCEL: 1x hash lookup (order_lookup_) + deduct Order     → O(1)
 //
 // Cold Path (5%- orders): Corner cases, 需要迁移或特殊处理
@@ -293,9 +303,11 @@ constexpr uint16_t MIN_DISTANCE_FROM_TOB = 5; // Minimum distance from TOB to ch
 //
 // Memory:
 // --------------------------------------------------------------------------------
-// - 所有Order统一存储于Levels, 无额外队列
-// - order_lookup_提供O(1)全局索引
-// - 内存占用: ~16 bytes/Order (compact design)
+// Order 对象:      16 bytes (含padding, cache-aligned)
+// Level 对象:      64 bytes (cache-line aligned)
+// 全局索引:        order_lookup_ (O(1) 查找, 超低load factor)
+// 总体占用:        ~20 bytes/Order (含索引和level开销)
+// 内存布局:        所有Order统一存储于Levels, 无额外队列
 //
 //========================================================================================
 // LOB_FEATURE N-LEVEL DEPTH MAINTENANCE (真正的O(1)增量更新)
@@ -314,7 +326,6 @@ constexpr uint16_t MIN_DISTANCE_FROM_TOB = 5; // Minimum distance from TOB to ch
 // - feature_bid_bottom_price_:             bid第N档价格 (边界值，离TOB最远，主干维护)
 // - feature_ask_top_price_:                ask第N档价格 (边界值，离TOB最远，主干维护)
 // - feature_depth_valid_:                  深度数据是否有效的标志位
-// - new_sec_:                              新秒标志，用于控制重建频率
 //
 // 核心优化思想 (基于边界值的O(1)判断):
 // --------------------------------------------------------------------------------
@@ -512,19 +523,8 @@ public:
     // Parse timestamp
     curr_tick_ = (order.hour << 24) | (order.minute << 16) | (order.second << 8) | order.millisecond;
     new_tick_ = curr_tick_ != prev_tick_;
-
-    // Check for new second (used for feature snapshot update)
-    const uint32_t curr_sec_ = (curr_tick_ >> 8); // Remove millisecond
+    curr_sec_ = (curr_tick_ >> 8);
     new_sec_ = curr_sec_ != prev_sec_;
-    if (new_sec_) {
-      prev_sec_ = curr_sec_;
-    }
-
-    // Parse order metadata (cache for reuse)
-    is_maker_ = (order.order_type == L2::OrderType::MAKER);
-    is_taker_ = (order.order_type == L2::OrderType::TAKER);
-    is_cancel_ = (order.order_type == L2::OrderType::CANCEL);
-    is_bid_ = (order.order_dir == L2::OrderDirection::BID);
 
     // Update feature timestamp (only on new tick)
     if (new_tick_) {
@@ -534,6 +534,12 @@ public:
       LOB_feature_.millisecond = order.millisecond;
       update_trading_session_state();
     }
+
+    // Parse order metadata (cache for reuse)
+    is_maker_ = (order.order_type == L2::OrderType::MAKER);
+    is_taker_ = (order.order_type == L2::OrderType::TAKER);
+    is_cancel_ = (order.order_type == L2::OrderType::CANCEL);
+    is_bid_ = (order.order_dir == L2::OrderDirection::BID);
 
     // Update feature order metadata (every order)
     LOB_feature_.is_maker = is_maker_;
@@ -553,114 +559,108 @@ public:
 #if DEBUG_BOOK_PRINT
     print_book(order);
 #endif
-    prev_tick_ = curr_tick_;
 
     bool result = update_lob(order);
 
     // Process resampling (only for TAKER orders)
-    if (is_taker_) [[likely]] {
+    if (is_taker_)  {
       if (resampler_.resample(curr_tick_, is_bid_, order.volume)) {
         // std::cout << "[RESAMPLE] Bar formed at " << format_time() << std::endl;
       }
     }
 
+    prev_tick_ = curr_tick_;
+    prev_sec_ = curr_tick_ >> 8;
+
     return result;
   };
 
-  // Handle bilateral matching (both bid and ask deducted)
-  HOT_NOINLINE bool handle_bilateral_matching(const L2::Order &order) {
-    const Price trade_price = order.price;
-    const Quantity volume = order.volume;
+  // Helper: Process one taker side (for bilateral or unilateral)
+  // Returns: true if order was fully consumed
+  HOT_INLINE bool process_taker_side(
+      const L2::Order &order,
+      OrderId order_id,
+      Quantity delta) {
+    
+    auto it = order_lookup_.find(order_id);
+    const bool found = (it != order_lookup_.end());
 
-    // Determine active side: smaller ID = maker (earlier), larger ID = taker (newer)
-    const bool is_active_bid = (order.bid_order_id > order.ask_order_id);
-
-    // Perform both lookups back-to-back for better cache locality
-    auto bid_it = order_lookup_.find(order.bid_order_id);
-    auto ask_it = order_lookup_.find(order.ask_order_id);
-
-    bool maker_fully_consumed = false;
-
-    // Get or create trade_price level once (shared by both sides)
-    Level *trade_level = level_find(trade_price);
-
-    // Process bid order (apply -volume) - hot path assumes order exists
-    if (bid_it != order_lookup_.end()) [[likely]] {
-      if (bid_it->second.level->price != trade_price) [[unlikely]] {
-        order_move_to_price(bid_it, trade_price);
+    // FAST PATH: found && correct price && not in call auction
+    if (found && !in_call_auction_) [[likely]] {
+      Level *level = it->second.level;
+      if (level->price == order.price) [[likely]] {
+        return order_upsert(order_id, order.price, delta, it, OrderFlags::NORMAL, level);
       }
-      bool consumed = order_upsert(order.bid_order_id, trade_price, -volume, bid_it, OrderFlags::NORMAL, trade_level);
-      maker_fully_consumed = !is_active_bid && consumed;
     }
 
-    // Process ask order (apply +volume) - hot path assumes order exists
-    if (ask_it != order_lookup_.end()) [[likely]] {
-      if (ask_it->second.level->price != trade_price) [[unlikely]] {
-        order_move_to_price(ask_it, trade_price);
-      }
-      bool consumed = order_upsert(order.ask_order_id, trade_price, +volume, ask_it, OrderFlags::NORMAL, trade_level);
-      if (is_active_bid)
-        maker_fully_consumed = consumed;
-    }
-
-    // Update TOB: only the maker side (consumed side) needs update
-    actual_price_ = trade_price;
-    update_tob_one_side(is_active_bid, maker_fully_consumed, trade_price);
-    return true;
+    // DEFERRED PATH: Handle corner cases
+    target_id_ = order_id;
+    delta_qty_ = delta;
+    return update_lob_deferred(order, it, found, in_call_auction_, in_matching_period_);
   }
 
   HOT_NOINLINE bool update_lob(const L2::Order &order) {
-    // Check for bilateral matching (SSE matching period or SZSE all day)
-    const bool need_bilateral_matching = (exchange_type_ == ExchangeType::SZSE) || (exchange_type_ == ExchangeType::SSE && in_matching_period_);
-
-    if (is_taker_ && need_bilateral_matching && order.bid_order_id != 0 && order.ask_order_id != 0) {
-      return handle_bilateral_matching(order);
-    }
-
-    // Extract operation parameters (using cached is_maker_/is_taker_/is_cancel_ and is_bid_)
-    order_extract_params(order);
-    if (delta_qty_ == 0 || target_id_ == 0) [[unlikely]]
-      return false;
-
 #if DEBUG_ANOMALY_PRINT
     debug_.last_order = &order;
 #endif
 
-    // Lookup target order (single hash operation)
-    auto it = order_lookup_.find(target_id_);
-    const bool found = (it != order_lookup_.end());
-
     //====================================================================================
-    // FAST PATH: TAKER/CANCEL with existing order
+    // MAKER: Always unilateral, never enters loop
     //====================================================================================
-    if ((is_taker_ || is_cancel_) && found && !in_call_auction_) [[likely]] {
-      Level *existing_level = it->second.level;
-      actual_price_ = existing_level->price;
+    if (is_maker_) {
+      order_extract_params(order);
+      if (delta_qty_ == 0 || target_id_ == 0) [[unlikely]]
+        return false;
 
-      if (actual_price_ == order.price) [[likely]] {
-        bool was_fully_consumed = order_upsert(target_id_, actual_price_, delta_qty_, it, OrderFlags::NORMAL, existing_level);
-        if (is_taker_) {
-          update_tob_after_trade(was_fully_consumed, actual_price_);
+      // FAST PATH: Normal maker with price
+      if (!in_call_auction_ && order.price != 0) [[likely]] {
+        auto it = order_lookup_.find(target_id_);
+        if (it == order_lookup_.end()) [[likely]] {
+          actual_price_ = order.price;
+          order_upsert(target_id_, actual_price_, delta_qty_, it, OrderFlags::NORMAL);
+          return true;
         }
-        return true;
       }
-      // Price mismatch: fall through to slow path
+
+      // DEFERRED PATH: Special cases (out-of-order, call auction, price=0)
+      auto it = order_lookup_.find(target_id_);
+      return update_lob_deferred(order, it, it != order_lookup_.end(), in_call_auction_, in_matching_period_);
     }
 
     //====================================================================================
-    // FAST PATH: MAKER (most common case)
+    // TAKER/CANCEL: May be bilateral or unilateral
     //====================================================================================
-    if (is_maker_ && !in_call_auction_ && order.price != 0 && !found) {
+    const bool need_bilateral = (exchange_type_ == ExchangeType::SZSE) || (exchange_type_ == ExchangeType::SSE && in_matching_period_);
+    const bool is_bilateral = is_taker_ && need_bilateral && order.bid_order_id != 0 && order.ask_order_id != 0;
+
+    if (is_bilateral) {
+      //==================================================================================
+      // BILATERAL TAKER: Process both bid and ask sides (symmetrically)
+      //==================================================================================
+      const bool is_active_bid = (order.bid_order_id > order.ask_order_id);
+      
+      bool consumed_bid = process_taker_side(order, order.bid_order_id, -static_cast<Quantity>(order.volume));
+      bool consumed_ask = process_taker_side(order, order.ask_order_id, +static_cast<Quantity>(order.volume));
+
       actual_price_ = order.price;
-      // For MAKER, we may need to create level, so don't pass hint
-      order_upsert(target_id_, actual_price_, delta_qty_, it, OrderFlags::NORMAL);
+      update_tob_one_side(is_active_bid, is_active_bid ? consumed_ask : consumed_bid, actual_price_);
+      return true;
+
+    } else {
+      //==================================================================================
+      // UNILATERAL TAKER/CANCEL: Single target
+      //==================================================================================
+      order_extract_params(order);
+      if (delta_qty_ == 0 || target_id_ == 0) [[unlikely]]
+        return false;
+
+      bool consumed = process_taker_side(order, target_id_, delta_qty_);
+      
+      if (is_taker_) {
+        update_tob_one_side(is_bid_, consumed, actual_price_);
+      }
       return true;
     }
-
-    //====================================================================================
-    // SLOW PATH: Corner cases
-    //====================================================================================
-    return update_lob_deferred(order, it, found, in_call_auction_, in_matching_period_);
   };
 
   // Slow path: handle corner cases (out-of-order, call auction, special prices)
@@ -717,6 +717,7 @@ public:
       const bool both_ids_present = (order.bid_order_id != 0 && order.ask_order_id != 0);
 
       // Handle target order (counterparty)
+      bool was_fully_consumed = false;
       if (found) {
         Price target_price = it->second.level->price;
 
@@ -735,12 +736,12 @@ public:
         }
 
         actual_price_ = order.price;
-        bool was_fully_consumed = order_upsert(target_id_, actual_price_, delta_qty_, it);
-        update_tob_after_trade(was_fully_consumed, actual_price_);
+        was_fully_consumed = order_upsert(target_id_, actual_price_, delta_qty_, it);
       } else {
         // OUT_OF_ORDER: create placeholder
         actual_price_ = order.price;
         order_upsert(target_id_, actual_price_, delta_qty_, it, OrderFlags::OUT_OF_ORDER);
+        was_fully_consumed = false;
       }
 
       // Handle self order (market orders from Level[0])
@@ -762,7 +763,7 @@ public:
         }
       }
 
-      return true;
+      return was_fully_consumed;
     }
 
     //====================================================================================
@@ -908,7 +909,6 @@ public:
     prev_tick_ = 0;
     curr_tick_ = 0;
     new_tick_ = false;
-    prev_sec_ = 0;
     new_sec_ = false;
     in_call_auction_ = false;
     in_matching_period_ = false;
@@ -960,11 +960,12 @@ private:
   MemPool::MemoryPool<Order> order_memory_pool_;                         // Memory pool for Order object allocation
 
   // Market timestamp tracking (hour|minute|second|millisecond)
-  uint32_t prev_tick_ = 0;       // Previous tick timestamp
-  uint32_t curr_tick_ = 0;       // Current tick timestamp
-  bool new_tick_ = false;        // Flag: entered new tick
-  uint32_t prev_sec_ = 0;        // Previous second timestamp (without millisecond)
-  mutable bool new_sec_ = false; // Flag: entered new second (for feature snapshot update)
+  uint32_t prev_tick_ = 0; // Previous tick timestamp
+  uint32_t curr_tick_ = 0; // Current tick timestamp
+  uint32_t prev_sec_ = 0;  // Previous second timestamp
+  uint32_t curr_sec_ = 0;  // Current second timestamp
+  bool new_tick_ = false;  // Flag: entered new tick
+  bool new_sec_ = false;   // Flag: entered new second (for feature snapshot update)
 
   // Trading session state cache (computed once per order)
   bool in_call_auction_ = false;
@@ -1374,12 +1375,6 @@ private:
       }
     }
     tob_dirty_ = false;
-  }
-
-  // Update TOB after single-side trade (SSE continuous trading)
-  // NOTE: Uses cached is_bid_ from process()
-  HOT_INLINE void update_tob_after_trade(bool was_fully_consumed, Price trade_price) {
-    update_tob_one_side(is_bid_, was_fully_consumed, trade_price);
   }
 
   //======================================================================================
