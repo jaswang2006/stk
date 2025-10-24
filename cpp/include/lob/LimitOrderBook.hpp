@@ -39,7 +39,7 @@
 #define DEBUG_ORDER_PRINT 0         // Print every order processing
 #define DEBUG_ORDER_FLAGS_CREATE 0  // Print when order with special flags is created
 #define DEBUG_ORDER_FLAGS_RESOLVE 0 // Print when order with special flags is resolved/migrated
-#define DEBUG_BOOK_PRINT 1          // Print order book snapshot
+#define DEBUG_BOOK_PRINT 0          // Print order book snapshot
 #define DEBUG_BOOK_BY_SECOND 1      // 0: by tick, 1: every 1 second, 2: every 2 seconds, ...
 #define DEBUG_BOOK_AS_AMOUNT 1      // 0: 股, 1: 1万元, 2: 2万元, 3: 3万元, ...
 #define DEBUG_ANOMALY_PRINT 1       // Print max unmatched order with creation timestamp
@@ -90,7 +90,7 @@ constexpr size_t LEVEL_WIDTH = 12;        // Width for each price level display
 
 // Anomaly detection parameters
 namespace AnomalyDetection {
-constexpr uint16_t MIN_DISTANCE_FROM_TOB = 2; // Minimum distance from TOB to check anomalies
+constexpr uint16_t MIN_DISTANCE_FROM_TOB = 5; // Minimum distance from TOB to check anomalies
 }
 
 //========================================================================================
@@ -929,7 +929,7 @@ private:
 
   // Price level storage (stable memory addresses via deque)
   std::deque<Level> level_storage_;                // All price levels (deque guarantees stable pointers)
-  MemPool::BumpDict<Price, Level *> price_levels_; // Price -> Level* mapping for O(1) lookup (bump allocator, no real deallocation)
+  MemPool::BumpDict<Price, Level *> price_levels_; // Price -> Level* mapping for O(1) lookup (few erases, BumpDict is fine)
 
   // Visible price tracking (prices with non-zero net_quantity)
   std::bitset<PRICE_RANGE_SIZE> visible_price_bitmap_; // Bitmap for O(1) visibility check
@@ -951,9 +951,9 @@ private:
   mutable Price feature_ask_top_price_ = 0;                           // Nth ask level price (farthest from TOB) - 主干维护
   mutable bool feature_depth_valid_ = false;                          // Whether depth is valid
 
-  // Order tracking infrastructure
-  MemPool::BumpDict<OrderId, Location, OrderIdHash> order_lookup_; // OrderId -> Location(Level*, index) for O(1) order lookup (bump allocator, stable pointers)
-  MemPool::BumpPool<Order> order_memory_pool_;                     // Memory pool for Order object allocation (bump allocator)
+  // Order tracking infrastructure (BumpDict/Pool for per-day reset pattern, ~10x faster than Bitmap)
+  MemPool::BumpDict<OrderId, Location, OrderIdHash> order_lookup_; // OrderId -> Location(Level*, index) for O(1) order lookup (bump allocator, batch reset at EOD)
+  MemPool::BumpPool<Order> order_memory_pool_;                     // Memory pool for Order object allocation (bump allocator, batch reset at EOD)
 
   // Market timestamp tracking (hour|minute|second|millisecond)
   uint32_t prev_tick_ = 0; // Previous tick timestamp
@@ -1190,9 +1190,10 @@ private:
         LOB_feature_.all_bid_volume -= (old_qty > 0) ? abs_qty : 0;
         LOB_feature_.all_ask_volume -= (old_qty < 0) ? abs_qty : 0;
 
-        // Remove order from level
+        // Remove order from level (BumpPool doesn't need individual deallocation)
         level->remove(order_index);
         order_lookup_.erase(order_id);
+        // order_memory_pool_.deallocate(order); // No-op for BumpPool, memory reclaimed at EOD clear()
 
         // Fix up order_lookup_ index for moved order (swap-and-pop side effect)
         if (order_index < level->orders.size()) {
