@@ -57,7 +57,7 @@ namespace Config {
 static constexpr size_t CACHE_LINE_SIZE = 64;      // 缓存行大小
 static constexpr size_t DEFAULT_CAPACITY = 10000;  // 默认初始容量
 static constexpr size_t MIN_BUCKET_COUNT = 16;     // HashMap最小桶数
-static constexpr double TARGET_LOAD_FACTOR = 0.67; // HashMap目标负载因子
+static constexpr double TARGET_LOAD_FACTOR = 0.50; // HashMap目标负载因子 (降低以减少冲突)
 
 // 自适应块大小：根据对象大小自动选择，目标 ~1MB/块
 template <typename T>
@@ -655,9 +655,18 @@ public:
   // ─────────────────────────────────────────────────────────────────────────
 
   // 1. 查找：返回值指针（nullptr表示不存在）
-  [[nodiscard, gnu::hot]]
-  Value *find(const Key &key) {
-    Node *node = buckets_[hasher_(key) & bucket_mask_];
+  [[nodiscard, gnu::hot, gnu::always_inline]]
+  inline Value *find(const Key &key) {
+    size_t bucket_idx = hasher_(key) & bucket_mask_;
+    Node *node = buckets_[bucket_idx];
+    
+    // Unroll first iteration (most common case: empty or single node)
+    if (node == nullptr) [[unlikely]]
+      return nullptr;
+    if (node->key == key) [[likely]]
+      return &node->value;
+    
+    node = node->next;
     while (node) {
       if (node->key == key)
         return &node->value;
@@ -666,8 +675,8 @@ public:
     return nullptr;
   }
 
-  [[nodiscard, gnu::hot]]
-  const Value *find(const Key &key) const {
+  [[nodiscard, gnu::hot, gnu::always_inline]]
+  inline const Value *find(const Key &key) const {
     return const_cast<HashMap *>(this)->find(key);
   }
 
@@ -695,12 +704,21 @@ public:
   }
 
   // 3. 尝试插入：存在则返回现有值，不存在则插入
-  [[gnu::hot]]
-  std::pair<Value *, bool> try_emplace(const Key &key, const Value &value) {
+  [[gnu::hot, gnu::always_inline]]
+  inline std::pair<Value *, bool> try_emplace(const Key &key, const Value &value) {
     size_t bucket_idx = hasher_(key) & bucket_mask_;
     Node *node = buckets_[bucket_idx];
 
-    // 查找是否已存在
+    // Unroll first iteration (most common: empty bucket or first node match)
+    if (node == nullptr) [[unlikely]] {
+      goto insert_new;
+    }
+    if (node->key == key) [[likely]] {
+      return {&node->value, false}; // 已存在
+    }
+
+    // 查找是否已存在（继续遍历链表）
+    node = node->next;
     while (node) {
       if (node->key == key) {
         return {&node->value, false}; // 已存在
@@ -708,6 +726,7 @@ public:
       node = node->next;
     }
 
+  insert_new:
     // 插入新节点（头插法）
     Node *new_node = node_pool_.construct(key, value);
     new_node->next = buckets_[bucket_idx];

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <algorithm>
-#include <bitset>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -14,6 +13,7 @@
 #include <vector>
 
 #include "codec/L2_DataType.hpp"
+#include "define/FastBitmap.hpp"
 #include "define/MemPool.hpp"
 // #include "features/backend/FeatureStoreConfig.hpp"
 #include "math/sample/ResampleRunBar.hpp"
@@ -433,6 +433,18 @@ struct alignas(CACHE_LINE_SIZE) Level {
   explicit Level(Price p) : price(p) {
     orders.reserve(EXPECTED_QUEUE_SIZE);
   }
+  
+  // Move constructor (for deque reallocation optimization)
+  Level(Level &&other) noexcept
+      : price(other.price),
+        net_quantity(other.net_quantity),
+        order_count(other.order_count),
+        orders(std::move(other.orders)) {}
+  
+  // Disable copy to prevent accidental expensive copies
+  Level(const Level &) = delete;
+  Level &operator=(const Level &) = delete;
+  Level &operator=(Level &&) = delete;
 
   // High-performance order management
   HOT_INLINE void add(Order *order) {
@@ -469,12 +481,13 @@ struct alignas(CACHE_LINE_SIZE) Level {
   }
 };
 
-// Order location tracking
+// Order location tracking (POD for fast construction)
 struct Location {
   Level *level;
   size_t index;
 
-  Location(Level *l, size_t i) : level(l), index(i) {}
+  Location() = default;
+  constexpr Location(Level *l, size_t i) noexcept : level(l), index(i) {}
 };
 
 // Fast identity hash for OrderId (uint32_t) - avoids std::hash overhead
@@ -932,9 +945,9 @@ private:
   MemPool::BumpDict<Price, Level *> price_levels_; // Price -> Level* mapping for O(1) lookup (few erases, BumpDict is fine)
 
   // Visible price tracking (prices with non-zero net_quantity)
-  std::bitset<PRICE_RANGE_SIZE> visible_price_bitmap_; // Bitmap for O(1) visibility check
-  mutable std::vector<Price> cached_visible_prices_;   // Sorted cache for fast iteration
-  mutable bool cache_dirty_ = false;                   // Cache needs refresh flag
+  FastBitmap<PRICE_RANGE_SIZE> visible_price_bitmap_; // Fast bitmap for O(1) visibility check
+  mutable std::vector<Price> cached_visible_prices_;  // Sorted cache for fast iteration
+  mutable bool cache_dirty_ = false;                  // Cache needs refresh flag
 
   // Top of book tracking
   mutable Price best_bid_ = 0;    // Best bid price (highest buy price with visible quantity)
@@ -997,7 +1010,8 @@ private:
   }
 
   // Optimized: Get level or create atomically (single hash lookup)
-  HOT_INLINE Level *level_get_or_create(Price price) {
+  [[gnu::hot, gnu::always_inline]]
+  inline Level *level_get_or_create(Price price) {
     auto [level_ptr, inserted] = price_levels_.try_emplace(price, nullptr);
     if (inserted) [[unlikely]] {
       level_storage_.emplace_back(price);
@@ -1034,13 +1048,15 @@ private:
       return;
 
     cached_visible_prices_.clear();
-    for (uint32_t price_u32 = 0; price_u32 < PRICE_RANGE_SIZE; ++price_u32) {
-      Price price = static_cast<Price>(price_u32);
-      if (visible_price_bitmap_[price]) {
-        cached_visible_prices_.push_back(price);
-      }
-    }
+    visible_price_bitmap_.for_each_set([this](size_t price) {
+      cached_visible_prices_.push_back(static_cast<Price>(price));
+    });
     cache_dirty_ = false;
+  }
+
+  // Helper: Check if price bit is set
+  HOT_INLINE bool visibility_is_visible(Price price) const {
+    return visible_price_bitmap_.test(price);
   }
 
   // Mark: Set price as visible (unchecked, assumes not already visible)
@@ -1051,19 +1067,19 @@ private:
 
   // Mark: Set price as invisible (unchecked, assumes currently visible)
   HOT_INLINE void visibility_mark_invisible(Price price) {
-    visible_price_bitmap_.reset(price);
+    visible_price_bitmap_.clear(price);
     cache_dirty_ = true;
   }
 
   // Safe: Set visibility with duplicate check
   HOT_INLINE void visibility_mark_visible_safe(Price price) {
-    if (!visible_price_bitmap_[price]) {
+    if (!visibility_is_visible(price)) {
       visibility_mark_visible(price);
     }
   }
 
   HOT_INLINE void visibility_mark_invisible_safe(Price price) {
-    if (visible_price_bitmap_[price]) {
+    if (visibility_is_visible(price)) {
       visibility_mark_invisible(price);
     }
   }
@@ -1079,25 +1095,14 @@ private:
 
   // Find next visible ask price above given price (ascending scan)
   HOT_INLINE Price next_ask_above(Price from_price) const {
-    for (uint32_t price_u32 = static_cast<uint32_t>(from_price) + 1; price_u32 < PRICE_RANGE_SIZE; ++price_u32) {
-      Price price = static_cast<Price>(price_u32);
-      if (visible_price_bitmap_[price]) {
-        return price;
-      }
-    }
-    return 0;
+    size_t next = visible_price_bitmap_.find_next(from_price);
+    return (next < PRICE_RANGE_SIZE) ? static_cast<Price>(next) : 0;
   }
 
   // Find next visible bid price below given price (descending scan)
   HOT_INLINE Price next_bid_below(Price from_price) const {
-    if (from_price == 0)
-      return 0;
-    for (Price price = from_price - 1; price != UINT16_MAX; --price) {
-      if (visible_price_bitmap_[price]) {
-        return price;
-      }
-    }
-    return 0;
+    size_t prev = visible_price_bitmap_.find_prev(from_price);
+    return (prev < PRICE_RANGE_SIZE) ? static_cast<Price>(prev) : 0;
   }
 
   // Get minimum visible price (from sorted cache)
@@ -1167,8 +1172,8 @@ private:
       OrderFlags flags = OrderFlags::NORMAL,
       Level *level_hint = nullptr) {
 
-    if (loc != nullptr) {
-      // ORDER EXISTS - Update existing order
+    if (loc != nullptr) [[likely]] {
+      // ORDER EXISTS - Update existing order (HOT PATH)
       Level *level = loc->level;
       size_t order_index = loc->index;
       Order *order = level->orders[order_index];
@@ -1177,8 +1182,8 @@ private:
       const Quantity old_qty = order->qty;
       const Quantity new_qty = old_qty + quantity_delta;
 
-      if (new_qty == 0) {
-        // FULLY CONSUMED - Remove order completely
+      if (new_qty == 0) [[unlikely]] {
+        // FULLY CONSUMED - Remove order completely (COLD PATH)
 #if DEBUG_ORDER_FLAGS_RESOLVE
         if (order->flags != OrderFlags::NORMAL) {
           print_order_flags_resolve(order_id, price, price, old_qty, 0, order->flags, OrderFlags::NORMAL, "CONSUME   ");
@@ -1204,16 +1209,18 @@ private:
         }
 
         // Cleanup: Remove empty level or update visibility
-        const bool was_visible = level->has_visible_quantity();
-        if (level->empty()) {
-          level_remove(level, was_visible);
-        } else if (was_visible != level->has_visible_quantity()) {
-          visibility_update_from_level(level);
+        if (level->empty()) [[unlikely]] {
+          level_remove(level, level->has_visible_quantity());
+        } else {
+          const bool was_visible = level->has_visible_quantity();
+          if (was_visible != level->has_visible_quantity()) [[unlikely]] {
+            visibility_update_from_level(level);
+          }
         }
 
         return true; // Fully consumed
       } else {
-        // PARTIALLY CONSUMED - Update order quantity
+        // PARTIALLY CONSUMED - Update order quantity (HOT PATH)
         const bool was_visible = level->has_visible_quantity();
         level->net_quantity += quantity_delta;
         order->qty = new_qty;
@@ -1223,10 +1230,10 @@ private:
         LOB_feature_.all_bid_volume += (quantity_delta > 0) ? abs_delta : 0;
         LOB_feature_.all_ask_volume += (quantity_delta < 0) ? abs_delta : 0;
 
-        // Update flags if needed
-        [[maybe_unused]] OrderFlags old_flags = order->flags;
-        if (flags != OrderFlags::NORMAL || order->flags != OrderFlags::NORMAL) {
+        // Update flags if needed (rare)
+        if ((flags != OrderFlags::NORMAL || order->flags != OrderFlags::NORMAL)) [[unlikely]] {
 #if DEBUG_ORDER_FLAGS_RESOLVE
+          [[maybe_unused]] OrderFlags old_flags = order->flags;
           if (old_flags != flags) {
             print_order_flags_resolve(order_id, price, price, old_qty, new_qty, old_flags, flags, "UPDATE_FLG");
           }
@@ -1234,18 +1241,18 @@ private:
           order->flags = flags;
         }
 
-        // Update visibility only if it changed
-        if (was_visible != level->has_visible_quantity()) {
+        // Update visibility only if it changed (rare)
+        if (was_visible != level->has_visible_quantity()) [[unlikely]] {
           visibility_update_from_level(level);
         }
         return false; // Partially consumed
       }
 
     } else {
-      // ORDER DOESN'T EXIST - Create new order
+      // ORDER DOESN'T EXIST - Create new order (LESS FREQUENT)
       const uint32_t ts = DEBUG_ANOMALY_PRINT ? curr_tick_ : 0;
       Order *new_order = order_memory_pool_.construct(quantity_delta, order_id, ts, flags);
-      if (!new_order)
+      if (!new_order) [[unlikely]]
         return false;
 
       // Get level: use hint if provided (optimization), otherwise get or create atomically
@@ -1254,7 +1261,7 @@ private:
       // Add order to level and register in lookup table
       size_t order_index = level->orders.size();
       level->add(new_order);
-      order_lookup_.try_emplace(order_id, Location(level, order_index));
+      order_lookup_.try_emplace(order_id, Location{level, order_index});
 
       // Update feature all_volume (incremental) for new order
       const uint32_t abs_delta = std::abs(quantity_delta);
@@ -1262,7 +1269,7 @@ private:
       LOB_feature_.all_ask_volume += (quantity_delta < 0) ? abs_delta : 0;
 
       // Update visibility if level just became visible
-      if (quantity_delta != 0 && !visible_price_bitmap_[level->price]) {
+      if (quantity_delta != 0 && !visibility_is_visible(level->price)) [[likely]] {
         visibility_mark_visible(level->price);
       }
 

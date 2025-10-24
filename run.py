@@ -22,7 +22,7 @@ CPUPROFILE_FREQUENCY = 1000000                 # Profiler sampling rate (Hz)
 PROFILER_LIB = '/usr/lib/x86_64-linux-gnu/libprofiler.so.0'
 
 # Profiler report settings
-TARGET_NAMESPACE = "AssetProcessor"            # Focus namespace
+TARGET_NAMESPACE = "Analysis"            # Focus namespace
 PPROF_PORT = 8080                              # Web GUI port
 PPROF_IGNORE = "std::|__gnu_cxx::"             # Filter standard library
 
