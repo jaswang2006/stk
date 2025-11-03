@@ -38,7 +38,7 @@
 #define DEBUG_ORDER_PRINT 0         // Print every order processing
 #define DEBUG_ORDER_FLAGS_CREATE 0  // Print when order with special flags is created
 #define DEBUG_ORDER_FLAGS_RESOLVE 0 // Print when order with special flags is resolved/migrated
-#define DEBUG_BOOK_PRINT 0          // Print order book snapshot when effective TOB updated
+#define DEBUG_BOOK_PRINT 1          // Print order book snapshot when effective TOB updated
 #define DEBUG_BOOK_AS_AMOUNT 1      // 0: 股, 1: 1万元, 2: 2万元, 3: 3万元, ...
 #define DEBUG_ANOMALY_PRINT 1       // Print max unmatched order with creation timestamp
 
@@ -505,6 +505,13 @@ public:
       sync_tob_to_depth_center();
     }
 
+#if DEBUG_BOOK_PRINT
+    // Time-driven book printing (independent time schedule)
+    if (new_tick_ && curr_tick_ >= next_depth_update_tick_) {
+      print_book();
+    }
+#endif
+
     prev_tick_ = curr_tick_;
     prev_sec_ = curr_tick_ >> 8;
 
@@ -793,7 +800,11 @@ private:
 
   // Clear CALL_AUCTION flags at 9:30:00 (orders stay at current levels)
   HOT_NOINLINE void flush_call_auction_flags() {
-    price_levels_.for_each([](const Price &price, Level *const &level) {
+    price_levels_.for_each([
+#if DEBUG_ORDER_FLAGS_RESOLVE
+        this
+#endif
+    ](const Price &price, Level *const &level) {
       for (Order *order : level->orders) {
         if (order->flags == OrderFlags::CALL_AUCTION) {
 #if DEBUG_ORDER_FLAGS_RESOLVE
@@ -1462,10 +1473,6 @@ private:
     // Mark update time
     last_depth_update_tick_ = curr_tick_;
     next_depth_update_tick_ = curr_tick_ + (EffectiveTOBFilter::MIN_TIME_INTERVAL_MS / 10);
-
-#if DEBUG_BOOK_PRINT
-    print_book();
-#endif
   }
 
   //======================================================================================
@@ -1505,7 +1512,7 @@ private:
               << " | ID=" << std::setw(7) << std::right << order_id
               << " Price=" << std::setw(5) << std::right << price
               << " Qty=" << std::setw(6) << std::right << qty
-              << " | TotalOrders=" << std::setw(5) << std::right << (total_orders() + 1)
+              << " | TotalOrders=" << std::setw(5) << std::right << (order_lookup_.size() + 1)
               << "\033[0m\n";
   }
 #endif
@@ -1541,7 +1548,7 @@ private:
       std::cout << " Qty=" << std::setw(6) << std::right << new_qty << "      ";
     }
 
-    std::cout << " | TotalOrders=" << std::setw(5) << std::right << total_orders()
+    std::cout << " | TotalOrders=" << std::setw(5) << std::right << order_lookup_.size()
               << "\033[0m\n";
   }
 #endif
@@ -1636,140 +1643,128 @@ private:
 
 #if DEBUG_BOOK_PRINT
 
-  // Display current market depth
-  void inline print_book() const {
-    // Only print during continuous trading
-    if (!in_continuous_trading_)
-      return;
-
-    // Highlight time if > 10 seconds since last depth update
-    const bool highlight_time = (last_depth_update_tick_ > 0) && (tick_to_ms(curr_tick_) - tick_to_ms(last_depth_update_tick_) > 10000);
-
-    std::ostringstream book_output;
-    if (highlight_time) {
-      book_output << "\033[33m[" << format_time() << "]\033[0m"; // Yellow
-    } else {
-      book_output << "[" << format_time() << "]";
+  // Helper: Calculate display width excluding ANSI codes
+  inline size_t display_width(const std::string &s) const {
+    size_t width = 0;
+    bool in_ansi = false;
+    for (char c : s) {
+      if (c == '\033') {
+        in_ansi = true;
+      } else if (in_ansi && c == 'm') {
+        in_ansi = false;
+      } else if (!in_ansi) {
+        ++width;
+      }
     }
-    Level *level0 = level_find(0);
-    book_output << " [" << std::setfill('0') << std::setw(3)
-                << (level0 ? level0->order_count : 0) << std::setfill(' ') << "] ";
+    return width;
+  }
+
+  // Helper: Format level string for display
+  inline std::string format_level(Price price, int32_t volume) const {
+    const bool is_anomaly = (volume < 0);
+#if DEBUG_BOOK_AS_AMOUNT == 0
+    const std::string qty_str = std::to_string(volume);
+#else
+    const double amount = volume * price / (DEBUG_BOOK_AS_AMOUNT * 10000.0);
+    const std::string qty_str = (volume < 0 ? "-" : "") + std::to_string(static_cast<int>(std::abs(amount) + 0.5));
+#endif
+    const std::string level_str = std::to_string(price) + "x" + qty_str;
+    return is_anomaly ? "\033[31m" + level_str + "\033[0m" : level_str;
+  }
+
+  // Real-time depth printer: Compute N levels directly from TOB + bitmap (golden reference)
+  void inline print_book_realtime() const {
+    if (!in_continuous_trading_) return;
 
     using namespace BookDisplay;
-    constexpr size_t display_levels = std::min(MAX_DISPLAY_LEVELS, L2::LOB_FEATURE_DEPTH_LEVELS);
+    constexpr size_t N = std::min(MAX_DISPLAY_LEVELS, L2::LOB_FEATURE_DEPTH_LEVELS);
 
-    // Fill empty space on the left if display_levels < MAX_DISPLAY_LEVELS
-    for (size_t i = 0; i < MAX_DISPLAY_LEVELS - display_levels; ++i) {
-      book_output << std::setw(LEVEL_WIDTH) << " ";
+    std::ostringstream out;
+    out << "\033[32m[RT] " << format_time() << "\033[0m [" 
+        << std::setfill('0') << std::setw(3) << (level_find(0) ? level_find(0)->order_count : 0) 
+        << std::setfill(' ') << "] ";
+
+    // Collect ask/bid levels
+    auto collect = [&](Price start, auto next_func, size_t count) {
+      std::vector<std::pair<Price, int32_t>> levels;
+      for (Price p = start; levels.size() < count && p > 0; p = next_func(p)) {
+        if (Level *lv = level_find(p); lv && lv->has_visible_quantity())
+          levels.push_back({lv->price, lv->net_quantity});
+      }
+      return levels;
+    };
+
+    auto asks = collect(best_ask_, [&](Price p) { return next_ask_above(p); }, N);
+    auto bids = collect(best_bid_, [&](Price p) { return next_bid_below(p); }, N);
+
+    // Display asks (reverse)
+    for (size_t i = 0; i < MAX_DISPLAY_LEVELS - N; ++i) out << std::setw(LEVEL_WIDTH) << " ";
+    for (int i = asks.size() - 1; i >= 0; --i) {
+      std::string level_str = format_level(asks[i].first, -asks[i].second);
+      out << level_str << std::string(LEVEL_WIDTH > display_width(level_str) ? LEVEL_WIDTH - display_width(level_str) : 0, ' ');
     }
+    for (size_t i = asks.size(); i < N; ++i) out << std::setw(LEVEL_WIDTH) << " ";
 
-    // Display ask levels (left side, from LOB_feature_)
-    // Reverse display: show ask[display_levels-1] ... ask[1] ask[0]
-    for (int i = display_levels - 1; i >= 0; --i) {
-      const Price price = LOB_feature_.ask_price_ticks[i];
-      const int32_t volume = LOB_feature_.ask_volumes[i];
+    out << " (" << std::setw(4) << best_ask_ << ")ASK | BID(" << std::setw(4) << best_bid_ << ") ";
 
-      if (price == 0) {
-        book_output << std::setw(LEVEL_WIDTH) << " ";
-        continue;
-      }
-
-      const int32_t display_volume = -volume;       // Negate: normal negative -> positive for display
-      const bool is_anomaly = (display_volume < 0); // Any negative display value is anomaly
-
-#if DEBUG_BOOK_AS_AMOUNT == 0
-      const std::string qty_str = std::to_string(display_volume);
-#else
-      const double amount = display_volume * price / (DEBUG_BOOK_AS_AMOUNT * 10000.0);
-      const std::string qty_str = (display_volume < 0 ? "-" : "") + std::to_string(static_cast<int>(std::abs(amount) + 0.5));
-#endif
-      const std::string level_str = std::to_string(price) + "x" + qty_str;
-
-      if (is_anomaly) {
-        book_output << "\033[31m" << std::setw(LEVEL_WIDTH) << std::left << level_str << "\033[0m";
-      } else {
-        book_output << std::setw(LEVEL_WIDTH) << std::left << level_str;
-      }
+    // Display bids
+    for (size_t i = 0; i < bids.size(); ++i) {
+      std::string level_str = format_level(bids[i].first, bids[i].second);
+      out << level_str << std::string(LEVEL_WIDTH > display_width(level_str) ? LEVEL_WIDTH - display_width(level_str) : 0, ' ');
     }
+    for (size_t i = bids.size(); i < MAX_DISPLAY_LEVELS; ++i) out << std::setw(LEVEL_WIDTH) << " ";
 
-    // Display header with ASK and BID labels
-    book_output << " (" << std::setw(4) << best_ask_ << ")ASK | BID("
-                << std::setw(4) << best_bid_ << ") ";
-
-    // Display bid levels (right side, from LOB_feature_)
-    for (size_t i = 0; i < display_levels; ++i) {
-      const Price price = LOB_feature_.bid_price_ticks[i];
-      const int32_t volume = LOB_feature_.bid_volumes[i];
-
-      if (price == 0) {
-        book_output << std::setw(LEVEL_WIDTH) << " ";
-        continue;
-      }
-
-      const int32_t display_volume = volume;        // Bid displays as-is (should be positive)
-      const bool is_anomaly = (display_volume < 0); // Any negative display value is anomaly
-
-#if DEBUG_BOOK_AS_AMOUNT == 0
-      const std::string qty_str = std::to_string(display_volume);
-#else
-      const double amount = display_volume * price / (DEBUG_BOOK_AS_AMOUNT * 10000.0);
-      const std::string qty_str = (display_volume < 0 ? "-" : "") + std::to_string(static_cast<int>(std::abs(amount) + 0.5));
-#endif
-      const std::string level_str = std::to_string(price) + "x" + qty_str;
-
-      if (is_anomaly) {
-        book_output << "\033[31m" << std::setw(LEVEL_WIDTH) << std::left << level_str << "\033[0m";
-      } else {
-        book_output << std::setw(LEVEL_WIDTH) << std::left << level_str;
-      }
-    }
-
-    // Fill empty space on the right if display_levels < MAX_DISPLAY_LEVELS
-    for (size_t i = 0; i < MAX_DISPLAY_LEVELS - display_levels; ++i) {
-      book_output << std::setw(LEVEL_WIDTH) << " ";
-    }
-
-    // Count anomalies: wrong sign on non-TOB levels (excluding level 0)
-    size_t anomaly_count = 0;
-    visible_price_bitmap_.for_each_set([&](size_t price_idx) {
-      Price price = static_cast<Price>(price_idx);
-
-      // Skip level 0 (special level)
-      if (price == 0)
-        return;
-
-      // Skip TOB area
-      if (price >= best_bid_ && price <= best_ask_)
-        return;
-
-      const Level *level = level_find(price);
-      if (!level || !level->has_visible_quantity())
-        return;
-
-      // BID side (< best_bid) should be positive, ASK side (> best_ask) should be negative
-      if ((price < best_bid_ && level->net_quantity < 0) || (price > best_ask_ && level->net_quantity > 0)) {
-        ++anomaly_count;
-      }
-    });
-
-    if (anomaly_count > 0) {
-      book_output << " \033[31m[" << anomaly_count << " anomalies]\033[0m";
-    }
-
-    std::cout << book_output.str() << "\n";
-
-#if DEBUG_ANOMALY_PRINT
-    // Check anomalies for ALL visible levels (proactive detection, excluding level 0)
-    visible_price_bitmap_.for_each_set([&](size_t price_idx) {
-      Price price = static_cast<Price>(price_idx);
-      if (price == 0)
-        return; // Skip level 0 (special level)
-      Level *level = level_find(price);
-      if (level && level->has_visible_quantity()) {
-        check_anomaly(level);
-      }
-    });
-#endif
+    std::cout << out.str() << "\n";
   }
+
+  // Depth-buffer-based printer: Display from LOB_feature_ (buffered depth)
+  void inline print_book_buffered() const {
+    if (!in_continuous_trading_) return;
+
+    using namespace BookDisplay;
+    constexpr size_t N = std::min(MAX_DISPLAY_LEVELS, L2::LOB_FEATURE_DEPTH_LEVELS);
+
+    std::ostringstream out;
+    out << "\033[34m[BUF]" << format_time() << "\033[0m [" 
+        << std::setfill('0') << std::setw(3) << (level_find(0) ? level_find(0)->order_count : 0) 
+        << std::setfill(' ') << "] ";
+
+    // Display asks (reverse)
+    for (size_t i = 0; i < MAX_DISPLAY_LEVELS - N; ++i) out << std::setw(LEVEL_WIDTH) << " ";
+    for (int i = N - 1; i >= 0; --i) {
+      Price p = LOB_feature_.ask_price_ticks[i];
+      int32_t v = LOB_feature_.ask_volumes[i];
+      if (p) {
+        std::string level_str = format_level(p, -v);
+        out << level_str << std::string(LEVEL_WIDTH > display_width(level_str) ? LEVEL_WIDTH - display_width(level_str) : 0, ' ');
+      } else {
+        out << std::setw(LEVEL_WIDTH) << " ";
+      }
+    }
+
+    out << " (" << std::setw(4) << best_ask_ << ")ASK | BID(" << std::setw(4) << best_bid_ << ") ";
+
+    // Display bids
+    for (size_t i = 0; i < N; ++i) {
+      Price p = LOB_feature_.bid_price_ticks[i];
+      int32_t v = LOB_feature_.bid_volumes[i];
+      if (p) {
+        std::string level_str = format_level(p, v);
+        out << level_str << std::string(LEVEL_WIDTH > display_width(level_str) ? LEVEL_WIDTH - display_width(level_str) : 0, ' ');
+      } else {
+        out << std::setw(LEVEL_WIDTH) << " ";
+      }
+    }
+    for (size_t i = N; i < MAX_DISPLAY_LEVELS; ++i) out << std::setw(LEVEL_WIDTH) << " ";
+
+    std::cout << out.str() << "\n";
+  }
+
+  // Unified printer: calls both real-time and buffered for comparison
+  void inline print_book() const {
+    print_book_realtime();
+    print_book_buffered();
+  }
+
 #endif // DEBUG_BOOK_PRINT
 };
