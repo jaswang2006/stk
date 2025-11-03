@@ -81,13 +81,10 @@ public:
     }
     was_in_matching_period = in_matching_period_;
 
-    depth_update_ = new_tick_ && curr_tick_ >= next_depth_update_tick_;
-    if (depth_update_) {
-      sync_tob_to_depth_center();
+    sync_tob_to_depth_center();
 #if DEBUG_BOOK_PRINT
-      print_book();
+    print_book();
 #endif
-    }
 
     bool result = update_lob(order);
 
@@ -178,7 +175,7 @@ private:
   mutable LOB_Feature LOB_feature_; // Feature depth data with integrated depth_buffer
 
   // Time-driven depth update control
-  mutable bool depth_update_ = false;           // TOB refreshed flag
+  mutable bool depth_updated_ = false;          // TOB refreshed flag
   mutable uint32_t last_depth_update_tick_ = 0; // Last tick when depth was updated
   mutable uint32_t next_depth_update_tick_ = 0; // Next allowed tick for depth update
 
@@ -248,7 +245,8 @@ private:
   // Remove: Delete empty level from book
   HOT_INLINE void level_remove(Level *level, bool update_visibility = true) {
     Price price = level->price;
-    price_levels_.erase(price);
+    // Don't erase from price_levels_ - keep Level* pointer alive for depth_buffer stability
+    // Just mark as invisible, level will be reused when orders come back to this price
     if (update_visibility) {
       visibility_mark_invisible_safe(price);
     }
@@ -963,12 +961,17 @@ private:
 
   // Update depth if TOB is valid (called from process() when time interval reached)
   HOT_NOINLINE void sync_tob_to_depth_center() {
+    if (!(new_tick_ && curr_tick_ >= next_depth_update_tick_)) {
+      depth_updated_ = false;
+      return;
+    }
 
     Level *bid_level = level_find(best_bid_);
     Level *ask_level = level_find(best_ask_);
 
     // Check conditions: TOB valid AND buffer ready
     if (!(best_bid_ < best_ask_ && bid_level && bid_level->net_quantity > 0 && ask_level && ask_level->net_quantity < 0)) {
+      depth_updated_ = false;
       return; // LOB broken, wait for next update
     }
 
@@ -978,52 +981,63 @@ private:
     Price depth_low = (current_depth > 0 && LOB_feature_.depth_buffer.back()) ? LOB_feature_.depth_buffer.back()->price : 0;
 
     // Check if complete rebuild needed: insufficient depth or TOB out of range
-    bool need_rebuild = (current_depth <= 2) || 
+    bool need_rebuild = (current_depth <= 2) ||
                         (best_bid_ >= depth_high || best_bid_ <= depth_low) ||
                         (best_ask_ >= depth_high || best_ask_ <= depth_low);
 
     if (need_rebuild) {
       // Complete rebuild: clear and refill N levels on each side
       LOB_feature_.depth_buffer.clear();
-      
+
       // Fill ask side: N levels from best_ask upward
       Price price = best_ask_;
       for (size_t i = 0; i < LOB_FEATURE_DEPTH_LEVELS && price > 0; ++i) {
-        Level* level = level_find(price);
-        LOB_feature_.depth_buffer.push_front(level && level->has_visible_quantity() ? level : nullptr);
+        Level *level = level_find(price);
+        LOB_feature_.depth_buffer.push_front(level);
         price = next_ask_above(price);
       }
-      
+
       // Fill bid side: N levels from best_bid downward
       price = best_bid_;
       for (size_t i = 0; i < LOB_FEATURE_DEPTH_LEVELS && price > 0; ++i) {
-        Level* level = level_find(price);
-        LOB_feature_.depth_buffer.push_back(level && level->has_visible_quantity() ? level : nullptr);
+        Level *level = level_find(price);
+        LOB_feature_.depth_buffer.push_back(level);
         price = next_bid_below(price);
       }
     } else {
       // Normal case: incremental fill based on bid position
       size_t bid_idx = depth_binary_search(best_bid_);
       int left_need = static_cast<int>(LOB_FEATURE_DEPTH_LEVELS) - static_cast<int>(bid_idx);
-      int right_need = static_cast<int>(bid_idx + 1 + LOB_FEATURE_DEPTH_LEVELS) - static_cast<int>(current_depth);
+      int right_need = static_cast<int>(bid_idx + LOB_FEATURE_DEPTH_LEVELS) - static_cast<int>(current_depth);
 
       // Fill left (ask side) if needed
       for (int i = 0; i < left_need; ++i) {
         Price next = next_ask_above(depth_high);
-        if (next == 0) break;
-        Level* level = level_find(next);
-        LOB_feature_.depth_buffer.push_front(level && level->has_visible_quantity() ? level : nullptr);
+        if (next == 0)
+          break;
+        Level *level = level_find(next);
+        LOB_feature_.depth_buffer.push_front(level);
         depth_high = next;
       }
 
       // Fill right (bid side) if needed
       for (int i = 0; i < right_need; ++i) {
         Price next = next_bid_below(depth_low);
-        if (next == 0) break;
-        Level* level = level_find(next);
-        LOB_feature_.depth_buffer.push_back(level && level->has_visible_quantity() ? level : nullptr);
+        if (next == 0)
+          break;
+        Level *level = level_find(next);
+        LOB_feature_.depth_buffer.push_back(level);
         depth_low = next;
       }
+    }
+
+    // Check if best_ask is at index N-1 (TOB is centered correctly)
+    if (LOB_feature_.depth_buffer.size() >= LOB_FEATURE_DEPTH_LEVELS &&
+        LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1] &&
+        LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1]->price == best_ask_) {
+      depth_updated_ = true;
+    } else {
+      depth_updated_ = false;
     }
 
     // Mark update time
@@ -1296,7 +1310,7 @@ private:
       if (buf_idx < LOB_feature_.depth_buffer.size() && LOB_feature_.depth_buffer[buf_idx]) {
         Price p = LOB_feature_.depth_buffer[buf_idx]->price;
         int32_t v = LOB_feature_.depth_buffer[buf_idx]->net_quantity;
-        std::string level_str = format_level(p, v);
+        std::string level_str = format_level(p, -v);
         out << level_str << std::string(LEVEL_WIDTH > display_width(level_str) ? LEVEL_WIDTH - display_width(level_str) : 0, ' ');
       } else {
         out << std::setw(LEVEL_WIDTH) << " ";
@@ -1325,8 +1339,10 @@ private:
 
   // Unified printer: calls both real-time and buffered for comparison
   void inline print_book() const {
-    print_book_realtime();
-    print_book_buffered();
+    if (depth_updated_) {
+      print_book_realtime();
+      print_book_buffered();
+    }
   }
 
 #endif // DEBUG_BOOK_PRINT
