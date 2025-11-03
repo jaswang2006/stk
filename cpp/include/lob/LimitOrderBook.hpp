@@ -94,13 +94,14 @@ namespace EffectiveTOBFilter {
 constexpr uint32_t MIN_TIME_INTERVAL_MS = 100; // Minimum time interval in milliseconds for effective TOB update
 }
 
-// 设计理念: 抵扣模型 + Order迁移机制
+// 设计理念: 抵扣模型 + Order迁移机制 + 增量depth维护
 // --------------------------------------------------------------------------------
 // - TAKER成交价是最终真相, MAKER挂价可能不准确
 // - 不要尝试维护完全准确的TOB, TOB用最近的成交价定义, 如果吃空则顺延
 // - 所有Order都存在于某个Level中 (包括Level[0]特殊档位)
 // - Order携带flags标记状态, 支持在Level间迁移
 // - 通过order_lookup_全局索引实现O(1)定位和迁移
+// - 通过类似Cbuffer/Dequeue结构, 动态维护depth多档信息
 //
 //========================================================================================
 // CORE DATA STRUCTURES
@@ -491,6 +492,14 @@ public:
     }
     was_in_matching_period = in_matching_period_;
 
+    depth_update_ = new_tick_ && curr_tick_ >= next_depth_update_tick_;
+    if (depth_update_) {
+      sync_tob_to_depth_center();
+#if DEBUG_BOOK_PRINT
+      print_book();
+#endif
+    }
+
     bool result = update_lob(order);
 
     // Process resampling (only for TAKER orders)
@@ -499,18 +508,6 @@ public:
         // std::cout << "[RESAMPLE] Bar formed at " << format_time() << std::endl;
       }
     }
-
-    // Time-driven depth update (check if it's time to update)
-    if (curr_tick_ >= next_depth_update_tick_) {
-      sync_tob_to_depth_center();
-    }
-
-#if DEBUG_BOOK_PRINT
-    // Time-driven book printing (independent time schedule)
-    if (new_tick_ && curr_tick_ >= next_depth_update_tick_) {
-      print_book();
-    }
-#endif
 
     prev_tick_ = curr_tick_;
     prev_sec_ = curr_tick_ >> 8;
@@ -597,6 +594,7 @@ private:
   CBuffer<Level *, 2 * DEPTH_N> depth_buffer_; // Level* pointers for efficient depth tracking
 
   // Time-driven depth update control
+  mutable bool depth_update_ = false;           // TOB refreshed flag
   mutable uint32_t last_depth_update_tick_ = 0; // Last tick when depth was updated
   mutable uint32_t next_depth_update_tick_ = 0; // Next allowed tick for depth update
 
@@ -687,7 +685,7 @@ private:
     // Order-driven depth update: level became visible
     Level *level = level_find(price);
     if (level) {
-      depth_on_level_add(level);
+      depth_on_level_add_remove(level, true);
     }
   }
 
@@ -697,7 +695,7 @@ private:
     // Order-driven depth update: level became invisible
     Level *level = level_find(price);
     if (level) {
-      depth_on_level_remove(level);
+      depth_on_level_add_remove(level, false);
     }
   }
 
@@ -802,7 +800,7 @@ private:
   HOT_NOINLINE void flush_call_auction_flags() {
     price_levels_.for_each([
 #if DEBUG_ORDER_FLAGS_RESOLVE
-        this
+                               this
 #endif
     ](const Price &price, Level *const &level) {
       for (Order *order : level->orders) {
@@ -1353,14 +1351,9 @@ private:
   }
 
   // Order-driven: Add level to depth buffer
-  HOT_INLINE void depth_on_level_add(Level *level) {
-    if (level->price == 0) [[unlikely]]
+  HOT_INLINE void depth_on_level_add_remove(Level *level, bool add) {
+    if (level->price == 0 || (depth_buffer_.size() <= 2)) [[unlikely]]
       return;
-
-    if (depth_buffer_.empty()) [[unlikely]] {
-      depth_buffer_.push_back(level);
-      return;
-    }
 
     // Check if price is within current range
     Price high_price = depth_buffer_.front()->price;
@@ -1371,39 +1364,12 @@ private:
     // Binary search to find insert position
     size_t idx = depth_binary_search(level->price);
 
-    // Just insert, CBuffer will auto-pop front when full
-    depth_buffer_.insert(idx, level);
-  }
-
-  // Order-driven: Remove level from depth buffer
-  HOT_INLINE void depth_on_level_remove(Level *level) {
-    if (level->price == 0 || depth_buffer_.empty()) [[unlikely]]
-      return;
-
-    // Find level in buffer
-    size_t idx = depth_binary_search(level->price);
-    if (idx >= depth_buffer_.size() || depth_buffer_[idx] != level)
-      return;
-
-    // Determine which side
-    bool is_ask_side = (idx < depth_buffer_.size() / 2);
-
-    // Remove level
-    depth_buffer_.erase(idx);
-
-    // Refill from bitmap
-    if (is_ask_side && !depth_buffer_.empty()) {
-      Price boundary = depth_buffer_.front()->price;
-      auto new_levels = depth_find_levels_beyond(true, boundary, 1);
-      if (!new_levels.empty()) {
-        depth_buffer_.push_front(new_levels[0]);
-      }
-    } else if (!is_ask_side && !depth_buffer_.empty()) {
-      Price boundary = depth_buffer_.back()->price;
-      auto new_levels = depth_find_levels_beyond(false, boundary, 1);
-      if (!new_levels.empty()) {
-        depth_buffer_.push_back(new_levels[0]);
-      }
+    if (add) {
+      // Just insert, CBuffer will auto-pop front when full
+      depth_buffer_.insert(idx, level);
+    } else {
+      // Just remove, CBuffer will auto-pop back when empty
+      depth_buffer_.erase(idx);
     }
   }
 
@@ -1413,15 +1379,13 @@ private:
 
   // Update depth if TOB is valid (called from process() when time interval reached)
   HOT_NOINLINE void sync_tob_to_depth_center() {
-    init_tob();
 
     Level *bid_level = level_find(best_bid_);
     Level *ask_level = level_find(best_ask_);
 
     // Check conditions: TOB valid AND buffer ready
-    if (!(best_bid_ < best_ask_ && bid_level && bid_level->net_quantity > 0 &&
-          ask_level && ask_level->net_quantity < 0 && depth_buffer_.size() == 2 * DEPTH_N)) {
-      return; // Wait for next update
+    if (!(best_bid_ < best_ask_ && bid_level && bid_level->net_quantity > 0 && ask_level && ask_level->net_quantity < 0)) {
+      return; // LOB broken, wait for next update
     }
 
     // Use best_bid as anchor: should be at index N
@@ -1570,8 +1534,6 @@ private:
     if (level->price == 0)
       return;
 
-    init_tob();
-
     // Step 1: Distance filter - only check far levels (N+ ticks from TOB)
     const bool is_far_below_bid = (best_bid_ > 0 && level->price < best_bid_ - MIN_DISTANCE_FROM_TOB);
     const bool is_far_above_ask = (best_ask_ > 0 && level->price > best_ask_ + MIN_DISTANCE_FROM_TOB);
@@ -1674,14 +1636,15 @@ private:
 
   // Real-time depth printer: Compute N levels directly from TOB + bitmap (golden reference)
   void inline print_book_realtime() const {
-    if (!in_continuous_trading_) return;
+    if (!in_continuous_trading_)
+      return;
 
     using namespace BookDisplay;
     constexpr size_t N = std::min(MAX_DISPLAY_LEVELS, L2::LOB_FEATURE_DEPTH_LEVELS);
 
     std::ostringstream out;
-    out << "\033[32m[RT] " << format_time() << "\033[0m [" 
-        << std::setfill('0') << std::setw(3) << (level_find(0) ? level_find(0)->order_count : 0) 
+    out << "\033[32m[RT] " << format_time() << "\033[0m ["
+        << std::setfill('0') << std::setw(3) << (level_find(0) ? level_find(0)->order_count : 0)
         << std::setfill(' ') << "] ";
 
     // Collect ask/bid levels
@@ -1698,12 +1661,14 @@ private:
     auto bids = collect(best_bid_, [&](Price p) { return next_bid_below(p); }, N);
 
     // Display asks (reverse)
-    for (size_t i = 0; i < MAX_DISPLAY_LEVELS - N; ++i) out << std::setw(LEVEL_WIDTH) << " ";
+    for (size_t i = 0; i < MAX_DISPLAY_LEVELS - N; ++i)
+      out << std::setw(LEVEL_WIDTH) << " ";
     for (int i = asks.size() - 1; i >= 0; --i) {
       std::string level_str = format_level(asks[i].first, -asks[i].second);
       out << level_str << std::string(LEVEL_WIDTH > display_width(level_str) ? LEVEL_WIDTH - display_width(level_str) : 0, ' ');
     }
-    for (size_t i = asks.size(); i < N; ++i) out << std::setw(LEVEL_WIDTH) << " ";
+    for (size_t i = asks.size(); i < N; ++i)
+      out << std::setw(LEVEL_WIDTH) << " ";
 
     out << " (" << std::setw(4) << best_ask_ << ")ASK | BID(" << std::setw(4) << best_bid_ << ") ";
 
@@ -1712,25 +1677,28 @@ private:
       std::string level_str = format_level(bids[i].first, bids[i].second);
       out << level_str << std::string(LEVEL_WIDTH > display_width(level_str) ? LEVEL_WIDTH - display_width(level_str) : 0, ' ');
     }
-    for (size_t i = bids.size(); i < MAX_DISPLAY_LEVELS; ++i) out << std::setw(LEVEL_WIDTH) << " ";
+    for (size_t i = bids.size(); i < MAX_DISPLAY_LEVELS; ++i)
+      out << std::setw(LEVEL_WIDTH) << " ";
 
     std::cout << out.str() << "\n";
   }
 
   // Depth-buffer-based printer: Display from LOB_feature_ (buffered depth)
   void inline print_book_buffered() const {
-    if (!in_continuous_trading_) return;
+    if (!in_continuous_trading_)
+      return;
 
     using namespace BookDisplay;
     constexpr size_t N = std::min(MAX_DISPLAY_LEVELS, L2::LOB_FEATURE_DEPTH_LEVELS);
 
     std::ostringstream out;
-    out << "\033[34m[BUF]" << format_time() << "\033[0m [" 
-        << std::setfill('0') << std::setw(3) << (level_find(0) ? level_find(0)->order_count : 0) 
+    out << "\033[34m[BUF]" << format_time() << "\033[0m ["
+        << std::setfill('0') << std::setw(3) << (level_find(0) ? level_find(0)->order_count : 0)
         << std::setfill(' ') << "] ";
 
     // Display asks (reverse)
-    for (size_t i = 0; i < MAX_DISPLAY_LEVELS - N; ++i) out << std::setw(LEVEL_WIDTH) << " ";
+    for (size_t i = 0; i < MAX_DISPLAY_LEVELS - N; ++i)
+      out << std::setw(LEVEL_WIDTH) << " ";
     for (int i = N - 1; i >= 0; --i) {
       Price p = LOB_feature_.ask_price_ticks[i];
       int32_t v = LOB_feature_.ask_volumes[i];
@@ -1755,7 +1723,8 @@ private:
         out << std::setw(LEVEL_WIDTH) << " ";
       }
     }
-    for (size_t i = N; i < MAX_DISPLAY_LEVELS; ++i) out << std::setw(LEVEL_WIDTH) << " ";
+    for (size_t i = N; i < MAX_DISPLAY_LEVELS; ++i)
+      out << std::setw(LEVEL_WIDTH) << " ";
 
     std::cout << out.str() << "\n";
   }
