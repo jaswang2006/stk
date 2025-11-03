@@ -5,7 +5,6 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
-#include <unordered_set>
 #include <vector>
 
 #include "codec/L2_DataType.hpp"
@@ -14,6 +13,10 @@
 #include "define/MemPool.hpp"
 #include "lob/LimitOrderBookDefine.hpp"
 #include "math/sample/ResampleRunBar.hpp"
+
+#if DEBUG_ANOMALY_PRINT == 1
+#include <unordered_set>
+#endif
 
 //========================================================================================
 // Use ExchangeType from L2 namespace (defined in L2_DataType.hpp)
@@ -82,6 +85,7 @@ public:
     was_in_matching_period = in_matching_period_;
 
     sync_tob_to_depth_center();
+
 #if DEBUG_BOOK_PRINT
     print_book();
 #endif
@@ -961,86 +965,64 @@ private:
 
   // Update depth if TOB is valid (called from process() when time interval reached)
   HOT_NOINLINE void sync_tob_to_depth_center() {
-    if (!(new_tick_ && curr_tick_ >= next_depth_update_tick_)) {
-      depth_updated_ = false;
+    depth_updated_ = false;
+
+    if (!(new_tick_ && curr_tick_ >= next_depth_update_tick_))
       return;
-    }
 
     Level *bid_level = level_find(best_bid_);
     Level *ask_level = level_find(best_ask_);
+    if (!(best_bid_ < best_ask_ && bid_level && bid_level->net_quantity > 0 && ask_level && ask_level->net_quantity < 0))
+      return;
 
-    // Check conditions: TOB valid AND buffer ready
-    if (!(best_bid_ < best_ask_ && bid_level && bid_level->net_quantity > 0 && ask_level && ask_level->net_quantity < 0)) {
-      depth_updated_ = false;
-      return; // LOB broken, wait for next update
+    // Determine if rebuild needed
+    size_t current_depth = LOB_feature_.depth_buffer.size();
+    bool need_rebuild = current_depth <= 2;
+    if (!need_rebuild) {
+      Price depth_high = LOB_feature_.depth_buffer.front()->price;
+      Price depth_low = LOB_feature_.depth_buffer.back()->price;
+      need_rebuild = (best_ask_ <= depth_low || best_ask_ >= depth_high ||
+                      best_bid_ <= depth_low || best_bid_ >= depth_high);
     }
 
-    // Calculate depth buffer fill requirements
-    size_t current_depth = LOB_feature_.depth_buffer.size();
-    Price depth_high = (current_depth > 0 && LOB_feature_.depth_buffer.front()) ? LOB_feature_.depth_buffer.front()->price : 0;
-    Price depth_low = (current_depth > 0 && LOB_feature_.depth_buffer.back()) ? LOB_feature_.depth_buffer.back()->price : 0;
+    // Calculate insertion counts
+    size_t bid_idx = need_rebuild ? 0 : depth_binary_search(best_bid_);
+    int ask_count = need_rebuild ? LOB_FEATURE_DEPTH_LEVELS : static_cast<int>(LOB_FEATURE_DEPTH_LEVELS) - static_cast<int>(bid_idx);
+    int bid_count = need_rebuild ? LOB_FEATURE_DEPTH_LEVELS : static_cast<int>(bid_idx + LOB_FEATURE_DEPTH_LEVELS) - static_cast<int>(current_depth);
 
-    // Check if complete rebuild needed: insufficient depth or TOB out of range
-    bool need_rebuild = (current_depth <= 2) ||
-                        (best_bid_ >= depth_high || best_bid_ <= depth_low) ||
-                        (best_ask_ >= depth_high || best_ask_ <= depth_low);
-
-    if (need_rebuild) {
-      // Complete rebuild: clear and refill N levels on each side
+    if (need_rebuild)
       LOB_feature_.depth_buffer.clear();
 
-      // Fill ask side: N levels from best_ask upward
-      Price price = best_ask_;
-      for (size_t i = 0; i < LOB_FEATURE_DEPTH_LEVELS && price > 0; ++i) {
-        Level *level = level_find(price);
-        LOB_feature_.depth_buffer.push_front(level);
+    // Fill ask side (upper half)
+    Price price = need_rebuild ? best_ask_ : LOB_feature_.depth_buffer.front()->price;
+    for (int i = 0; i < ask_count && price > 0; ++i) {
+      if (!need_rebuild) {
         price = next_ask_above(price);
+        if (price == 0)
+          break;
       }
+      LOB_feature_.depth_buffer.push_front(level_find(price));
+      if (need_rebuild)
+        price = next_ask_above(price);
+    }
 
-      // Fill bid side: N levels from best_bid downward
-      price = best_bid_;
-      for (size_t i = 0; i < LOB_FEATURE_DEPTH_LEVELS && price > 0; ++i) {
-        Level *level = level_find(price);
-        LOB_feature_.depth_buffer.push_back(level);
+    // Fill bid side (lower half)
+    price = need_rebuild ? best_bid_ : LOB_feature_.depth_buffer.back()->price;
+    for (int i = 0; i < bid_count && price > 0; ++i) {
+      if (!need_rebuild) {
         price = next_bid_below(price);
-      }
-    } else {
-      // Normal case: incremental fill based on bid position
-      size_t bid_idx = depth_binary_search(best_bid_);
-      int left_need = static_cast<int>(LOB_FEATURE_DEPTH_LEVELS) - static_cast<int>(bid_idx);
-      int right_need = static_cast<int>(bid_idx + LOB_FEATURE_DEPTH_LEVELS) - static_cast<int>(current_depth);
-
-      // Fill left (ask side) if needed
-      for (int i = 0; i < left_need; ++i) {
-        Price next = next_ask_above(depth_high);
-        if (next == 0)
+        if (price == 0)
           break;
-        Level *level = level_find(next);
-        LOB_feature_.depth_buffer.push_front(level);
-        depth_high = next;
       }
-
-      // Fill right (bid side) if needed
-      for (int i = 0; i < right_need; ++i) {
-        Price next = next_bid_below(depth_low);
-        if (next == 0)
-          break;
-        Level *level = level_find(next);
-        LOB_feature_.depth_buffer.push_back(level);
-        depth_low = next;
-      }
+      LOB_feature_.depth_buffer.push_back(level_find(price));
+      if (need_rebuild)
+        price = next_bid_below(price);
     }
 
-    // Check if best_ask is at index N-1 (TOB is centered correctly)
-    if (LOB_feature_.depth_buffer.size() >= LOB_FEATURE_DEPTH_LEVELS &&
-        LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1] &&
-        LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1]->price == best_ask_) {
-      depth_updated_ = true;
-    } else {
-      depth_updated_ = false;
-    }
-
-    // Mark update time
+    // Verify centering and mark update time
+    depth_updated_ = (LOB_feature_.depth_buffer.size() >= LOB_FEATURE_DEPTH_LEVELS &&
+                      LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1]->price == best_ask_ &&
+                      LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS]->price == best_bid_);
     last_depth_update_tick_ = curr_tick_;
     next_depth_update_tick_ = curr_tick_ + (EffectiveTOBFilter::MIN_TIME_INTERVAL_MS / 10);
   }
