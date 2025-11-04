@@ -86,7 +86,7 @@ public:
     }
     was_in_matching_period = in_matching_period_;
 
-    sync_tob_to_depth_center();
+    LOB_feature_.depth_updated = sync_tob_to_depth_center();
     // ==================== depth update triggered =======================
 
     // Process resampling (only for TAKER orders)
@@ -97,13 +97,13 @@ public:
     }
 
     // 计算特征（depth 更新后）
-    if (depth_updated_) {
+    if (LOB_feature_.depth_updated) {
 #if DEBUG_BOOK_PRINT
       print_book();
 #endif
-
-      features_tick_.update();
     }
+
+    features_tick_.update();
 
     // ========================= lob update ==============================
     bool result = update_lob(order);
@@ -188,7 +188,6 @@ private:
   mutable LOB_Feature LOB_feature_; // Feature depth data with integrated depth_buffer
 
   // Time-driven depth update control
-  mutable bool depth_updated_ = false;          // TOB refreshed flag
   mutable uint32_t last_depth_update_tick_ = 0; // Last tick when depth was updated
   mutable uint32_t next_depth_update_tick_ = 0; // Next allowed tick for depth update
 
@@ -976,16 +975,15 @@ private:
   //======================================================================================
 
   // Update depth if TOB is valid (called from process() when time interval reached)
-  HOT_NOINLINE void sync_tob_to_depth_center() {
-    depth_updated_ = false;
+  HOT_NOINLINE bool sync_tob_to_depth_center() {
 
     if (!(new_tick_ && curr_tick_ >= next_depth_update_tick_))
-      return;
+      return false;
 
     Level *bid_level = level_find(best_bid_);
     Level *ask_level = level_find(best_ask_);
     if (!(best_bid_ < best_ask_ && bid_level && bid_level->net_quantity > 0 && ask_level && ask_level->net_quantity < 0))
-      return;
+      return false;
 
     // Determine if rebuild needed
     size_t current_depth = LOB_feature_.depth_buffer.size();
@@ -1031,12 +1029,12 @@ private:
         price = next_bid_below(price);
     }
 
-    // Verify centering and mark update time
-    depth_updated_ = (LOB_feature_.depth_buffer.size() >= LOB_FEATURE_DEPTH_LEVELS &&
-                      LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1]->price == best_ask_ &&
-                      LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS]->price == best_bid_);
     last_depth_update_tick_ = curr_tick_;
     next_depth_update_tick_ = curr_tick_ + (EffectiveTOBFilter::MIN_TIME_INTERVAL_MS / 10);
+
+    return (LOB_feature_.depth_buffer.size() >= LOB_FEATURE_DEPTH_LEVELS &&
+            LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1]->price == best_ask_ &&
+            LOB_feature_.depth_buffer[LOB_FEATURE_DEPTH_LEVELS]->price == best_bid_);
   }
 
   //======================================================================================

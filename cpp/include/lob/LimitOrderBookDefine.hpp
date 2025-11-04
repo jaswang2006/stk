@@ -452,4 +452,5 @@ struct LOB_Feature {
   // N-level depth buffer (订单+时间双驱动):
   // CBuffer: [0]:卖N, [N-1]:卖1, [N]:买1, ..., [2N-1]:买N, 价格单调下降
   CBuffer<Level *, 2 * LOB_FEATURE_DEPTH_LEVELS> depth_buffer;
+  bool depth_updated; // 低频条件过滤, 表示depth_buffer已更新, 可以进行相关特征计算
 };
