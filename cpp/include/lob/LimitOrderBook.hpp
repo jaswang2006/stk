@@ -11,6 +11,7 @@
 #include "define/CBuffer.hpp"
 #include "define/FastBitmap.hpp"
 #include "define/MemPool.hpp"
+#include "features/FeaturesTick.hpp"
 #include "lob/LimitOrderBookDefine.hpp"
 #include "math/sample/ResampleRunBar.hpp"
 
@@ -38,7 +39,8 @@ public:
       : price_levels_(10),
         order_lookup_(ORDER_SIZE),      // BumpDict with pre-allocated capacity
         order_memory_pool_(ORDER_SIZE), // BumpPool for Order objects
-        exchange_type_(exchange_type) {
+        exchange_type_(exchange_type),
+        features_tick_(&LOB_feature_) { // Pass pointer to LOB_Feature
     // Depth is updated in time-driven manner
   }
 
@@ -85,12 +87,7 @@ public:
     was_in_matching_period = in_matching_period_;
 
     sync_tob_to_depth_center();
-
-#if DEBUG_BOOK_PRINT
-    print_book();
-#endif
-
-    bool result = update_lob(order);
+    // ==================== depth update triggered =======================
 
     // Process resampling (only for TAKER orders)
     if (is_taker_) {
@@ -98,6 +95,18 @@ public:
         // std::cout << "[RESAMPLE] Bar formed at " << format_time() << std::endl;
       }
     }
+
+    // 计算特征（depth 更新后）
+    if (depth_updated_) {
+#if DEBUG_BOOK_PRINT
+      print_book();
+#endif
+
+      features_tick_.update();
+    }
+
+    // ========================= lob update ==============================
+    bool result = update_lob(order);
 
     prev_tick_ = curr_tick_;
     prev_sec_ = curr_tick_ >> 8;
@@ -216,6 +225,9 @@ private:
 
   // Resampling components
   ResampleRunBar resampler_;
+
+  // Feature update component
+  FeaturesTick features_tick_;
 
   //======================================================================================
   // LEVEL MANAGEMENT (价格档位基础操作)
@@ -1321,10 +1333,8 @@ private:
 
   // Unified printer: calls both real-time and buffered for comparison
   void inline print_book() const {
-    if (depth_updated_) {
-      // print_book_realtime();
-      print_book_buffered();
-    }
+    // print_book_realtime();
+    print_book_buffered();
   }
 
 #endif // DEBUG_BOOK_PRINT
