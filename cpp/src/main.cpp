@@ -2,11 +2,11 @@
 #include "codec/binary_decoder_L2.hpp"
 #include "codec/binary_encoder_L2.hpp"
 #include "codec/json_config.hpp"
+#include "features/backend/FeatureStore.hpp"
+#include "lob/LimitOrderBook.hpp"
 #include "misc/affinity.hpp"
 #include "misc/logging.hpp"
 #include "misc/progress_parallel.hpp"
-#include "lob/LimitOrderBook.hpp"
-#include "features/backend/FeatureStore.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -19,6 +19,7 @@
 #include <mutex>
 #include <random>
 #include <regex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -235,6 +236,7 @@ public:
 // ============================================================================
 
 struct AssetTask {
+  size_t asset_id;
   std::string asset_code;
   std::string asset_name;
   std::vector<std::string> dates;
@@ -420,49 +422,111 @@ void encoding_worker(std::vector<AssetTask> &asset_queue, std::mutex &queue_mute
 }
 
 // ============================================================================
-// PHASE 2: ANALYSIS PROCESSOR
+// PHASE 2: ANALYSIS PROCESSOR (DATE-FIRST TRAVERSAL)
 // ============================================================================
 
-void process_analysis_for_asset(const std::string &asset_code,
-                                const std::vector<std::string> &dates,
-                                const std::string &temp_dir,
-                                misc::ProgressHandle progress_handle,
-                                GlobalFeatureStore *feature_store,
-                                size_t asset_id) {
-  L2::BinaryDecoder_L2 decoder(L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE);
-  L2::ExchangeType exchange_type = L2::infer_exchange_type(asset_code);
-
-  // Create LOB with feature store context (set once per asset)
-  LimitOrderBook lob(L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type, feature_store, asset_id);
-
-  size_t cumulative_orders = 0;
-  auto start_time = std::chrono::steady_clock::now();
-
-  for (size_t i = 0; i < dates.size(); ++i) {
-    const std::string &date_str = dates[i];
-
-    // Set current date in store for this asset (store manages date internally)
-    if (feature_store) {
-      feature_store->set_current_date(asset_id, date_str);
+// Worker context: manages multiple assets with date-first processing
+struct AnalysisWorkerContext {
+  std::vector<size_t> asset_ids;
+  std::vector<std::string> asset_codes;
+  std::vector<std::string> asset_names;
+  std::vector<std::unique_ptr<LimitOrderBook>> lobs;
+  std::vector<std::unique_ptr<L2::BinaryDecoder_L2>> decoders;
+  
+  AnalysisWorkerContext(const std::vector<AssetTask> &assigned_assets, GlobalFeatureStore *feature_store) {
+    for (const auto &asset : assigned_assets) {
+      asset_ids.push_back(asset.asset_id);
+      asset_codes.push_back(asset.asset_code);
+      asset_names.push_back(asset.asset_name);
+      
+      L2::ExchangeType exchange_type = L2::infer_exchange_type(asset.asset_code);
+      lobs.push_back(std::make_unique<LimitOrderBook>(
+          L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type, feature_store, asset.asset_id));
+      decoders.push_back(std::make_unique<L2::BinaryDecoder_L2>(
+          L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE));
     }
+  }
+};
 
+// Process one date for all assets in this worker's batch
+size_t process_date_for_asset_batch(AnalysisWorkerContext &ctx,
+                                     const std::string &date_str,
+                                     const std::string &temp_dir,
+                                     GlobalFeatureStore *feature_store,
+                                     const std::vector<std::set<std::string>> &asset_date_sets) {
+  
+  size_t total_orders = 0;
+  
+  for (size_t i = 0; i < ctx.asset_ids.size(); ++i) {
+    // Skip if this asset doesn't have data for this date
+    if (asset_date_sets[i].find(date_str) == asset_date_sets[i].end()) {
+      continue;
+    }
+    
+    const size_t asset_id = ctx.asset_ids[i];
+    const std::string &asset_code = ctx.asset_codes[i];
+    
+    // Set current date for this asset
+    feature_store->set_current_date(asset_id, date_str);
+    
+    // Load and process binary files
     const std::string temp_asset_dir = Utils::generate_temp_asset_dir(temp_dir, date_str, asset_code);
     const BinaryFiles files = Encoding::check_existing_binaries(temp_asset_dir, asset_code);
-
+    
     if (files.exists()) {
-      cumulative_orders += Analysis::process_binary_files(files, decoder, lob);
+      total_orders += Analysis::process_binary_files(files, *ctx.decoders[i], *ctx.lobs[i]);
     }
+  }
+  
+  // Cross-sectional feature computation point (all assets at same date)
+  // TODO: Insert cross-sectional factor calculation here
+  
+  return total_orders;
+}
 
-    // Calculate cumulative statistics
+// Worker function: processes assigned assets with date-first order
+void analysis_worker_date_first(const std::vector<AssetTask> &assigned_assets,
+                                 const std::vector<std::string> &all_dates,
+                                 const std::string &temp_dir,
+                                 GlobalFeatureStore *feature_store,
+                                 misc::ProgressHandle progress_handle) {
+  
+  // Initialize worker context
+  AnalysisWorkerContext ctx(assigned_assets, feature_store);
+  
+  // Precompute date sets for each asset (for fast lookup)
+  std::vector<std::set<std::string>> asset_date_sets;
+  for (const auto &asset : assigned_assets) {
+    asset_date_sets.emplace_back(asset.dates.begin(), asset.dates.end());
+  }
+  
+  // Build progress label: "  N Assets: CODE1(NAME1)"
+  char label_buf[128];
+  snprintf(label_buf, sizeof(label_buf), "%3zu Assets: %s(%s)", 
+           assigned_assets.size(),
+           assigned_assets[0].asset_code.c_str(),
+           assigned_assets[0].asset_name.c_str());
+  progress_handle.set_label(label_buf);
+  
+  size_t cumulative_orders = 0;
+  auto start_time = std::chrono::steady_clock::now();
+  
+  // Date-first traversal
+  for (size_t date_idx = 0; date_idx < all_dates.size(); ++date_idx) {
+    const std::string &date_str = all_dates[date_idx];
+    
+    // Process this date for all assigned assets
+    size_t date_orders = process_date_for_asset_batch(ctx, date_str, temp_dir, feature_store, asset_date_sets);
+    cumulative_orders += date_orders;
+    
+    // Update progress
     auto current_time = std::chrono::steady_clock::now();
     double elapsed_seconds = std::chrono::duration<double>(current_time - start_time).count();
     double speed_M_per_sec = (elapsed_seconds > 0) ? (cumulative_orders / 1e6) / elapsed_seconds : 0.0;
-    double total_M = cumulative_orders / 1e6;
-
+    
     char msg_buf[128];
-    snprintf(msg_buf, sizeof(msg_buf), "%s [%.1fM/s(%.0fM)]", date_str.c_str(), speed_M_per_sec, total_M);
-
-    progress_handle.update(i + 1, dates.size(), msg_buf);
+    snprintf(msg_buf, sizeof(msg_buf), "%s [%.1fM/s]", date_str.c_str(), speed_M_per_sec);
+    progress_handle.update(date_idx + 1, all_dates.size(), msg_buf);
   }
 }
 
@@ -527,6 +591,7 @@ int main() {
     // Build asset queue and count total tasks
     std::vector<AssetTask> asset_queue;
 
+    size_t asset_id = 0;
     for (const auto &[asset_code, stock_info] : stock_info_map) {
       const auto effective_start = std::max(std::chrono::year_month_day{stock_info.start_date / std::chrono::day{1}}, app_config.start_date);
       const auto effective_end = std::min(std::chrono::year_month_day{stock_info.end_date / std::chrono::last}, app_config.end_date);
@@ -534,7 +599,7 @@ int main() {
       const auto dates = Utils::generate_date_range(JsonConfig::FormatYearMonthDay(effective_start), JsonConfig::FormatYearMonthDay(effective_end), l2_archive_base);
 
       if (!dates.empty()) {
-        asset_queue.push_back({asset_code, stock_info.name, dates});
+        asset_queue.push_back({asset_id++, asset_code, stock_info.name, dates});
       }
     }
 
@@ -560,51 +625,45 @@ int main() {
     std::cout << "Encoding complete: " << encoding_completed_assets << " / " << asset_queue_for_analysis.size() << " assets\n\n";
 
     // ========================================================================
-    // PHASE 2: ANALYSIS (strictly sequential per asset)
+    // PHASE 2: ANALYSIS
     // ========================================================================
-    std::cout << "=== Phase 2: Analysis (with Feature Storage) ===" << "\n";
+    std::cout << "=== Phase 2: Analysis ===" << "\n";
 
-    // Initialize global feature store
-    std::vector<std::string> all_asset_codes;
+    // Calculate sorted unique dates
+    std::set<std::string> unique_dates_set;
     for (const auto &asset : asset_queue_for_analysis) {
-      all_asset_codes.push_back(asset.asset_code);
+      unique_dates_set.insert(asset.dates.begin(), asset.dates.end());
+    }
+    std::vector<std::string> all_dates(unique_dates_set.begin(), unique_dates_set.end());
+    
+    std::cout << "Date range: " << all_dates.front() << " → " << all_dates.back() 
+              << " (" << all_dates.size() << " trading days)\n";
+
+    // Initialize global feature store with preallocated blocks
+    GlobalFeatureStore feature_store(asset_queue_for_analysis.size(), all_dates.size());
+
+    // Distribute assets evenly across workers
+    std::vector<std::vector<AssetTask>> worker_asset_batches(num_workers);
+    for (size_t i = 0; i < asset_queue_for_analysis.size(); ++i) {
+      worker_asset_batches[i % num_workers].push_back(asset_queue_for_analysis[i]);
     }
 
-    GlobalFeatureStore feature_store(all_asset_codes.size());
-
-    std::cout << "Feature Store: " << num_workers << " cores, "
-              << all_asset_codes.size() << " assets\n\n";
-
+    // Launch workers with date-first processing
     auto analysis_progress = std::make_shared<misc::ParallelProgress>(num_workers);
-    std::vector<std::future<void>> analysis_tasks;
+    std::vector<std::future<void>> analysis_workers;
 
-    for (size_t asset_idx = 0; asset_idx < asset_queue_for_analysis.size(); ++asset_idx) {
-      const auto &asset = asset_queue_for_analysis[asset_idx];
-
-      // Wait for available slot
-      while (analysis_tasks.size() >= num_workers) {
-        analysis_tasks.erase(
-            std::remove_if(analysis_tasks.begin(), analysis_tasks.end(),
-                           [](std::future<void> &f) { return f.wait_for(std::chrono::seconds(0)) == std::future_status::ready; }),
-            analysis_tasks.end());
-        if (analysis_tasks.size() >= num_workers) {
-          analysis_tasks.front().wait();
-          analysis_tasks.erase(analysis_tasks.begin());
-        }
-      }
-
-      analysis_tasks.push_back(std::async(std::launch::async,
-                                          process_analysis_for_asset,
-                                          asset.asset_code,
-                                          asset.dates,
-                                          temp_dir,
-                                          analysis_progress->acquire_slot(asset.asset_code + " (" + asset.asset_name + ")"),
-                                          &feature_store,
-                                          asset_idx)); // asset_id
+    for (unsigned int i = 0; i < num_workers; ++i) {
+      analysis_workers.push_back(std::async(std::launch::async,
+                                            analysis_worker_date_first,
+                                            std::cref(worker_asset_batches[i]),
+                                            std::cref(all_dates),
+                                            std::cref(temp_dir),
+                                            &feature_store,
+                                            analysis_progress->acquire_slot("")));
     }
 
-    for (auto &task : analysis_tasks) {
-      task.wait();
+    for (auto &worker : analysis_workers) {
+      worker.wait();
     }
     analysis_progress->stop();
 

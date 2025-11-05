@@ -88,7 +88,7 @@ private:
     std::atomic<size_t> total{0};
     std::atomic<bool> dirty{false};
     std::atomic<bool> active{false};  // Slot is in use
-    char label[32] = {0};
+    char label[64] = {0};
     char message[96] = {0};
   };
 

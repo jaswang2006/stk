@@ -11,6 +11,8 @@
 #include "define/FastBitmap.hpp"
 #include "define/MemPool.hpp"
 #include "features/FeaturesTick.hpp"
+#include "features/FeaturesMinute.hpp"
+#include "features/FeaturesHour.hpp"
 #include "features/backend/FeatureStore.hpp"
 #include "lob/LimitOrderBookDefine.hpp"
 #include "math/sample/ResampleRunBar.hpp"
@@ -43,7 +45,9 @@ public:
         order_lookup_(ORDER_SIZE),      // BumpDict with pre-allocated capacity
         order_memory_pool_(ORDER_SIZE), // BumpPool for Order objects
         exchange_type_(exchange_type),
-        features_tick_(&LOB_feature_) {
+        features_tick_(&LOB_feature_),
+        features_minute_(&LOB_feature_, feature_store, asset_id),
+        features_hour_(&LOB_feature_, feature_store, asset_id) {
     // Set feature store context if provided
     if (feature_store) {
       features_tick_.set_store_context(feature_store, asset_id);
@@ -108,7 +112,10 @@ public:
       print_book();
 #endif
 
-      features_tick_.compute_and_store();
+      // // Trigger all 3 levels (each extracts everything from LOB_Feature internally)
+      // features_tick_.compute_and_store();
+      // features_minute_.compute_and_store();
+      // features_hour_.compute_and_store();
     }
 
     // ========================= lob update ==============================
@@ -231,8 +238,10 @@ private:
   // Resampling components
   ResampleRunBar resampler_;
 
-  // Feature update component
+  // Feature update components (all 3 levels)
   FeaturesTick features_tick_;
+  FeaturesMinute features_minute_;
+  FeaturesHour features_hour_;
 
   //======================================================================================
   // LEVEL MANAGEMENT (价格档位基础操作)

@@ -32,7 +32,8 @@ static std::ifstream open_csv_with_gbk(const std::string &filepath) {
 
 // Fast integer parsing (avoids std::stoul/stoull overhead)
 static inline uint32_t fast_parse_u32(std::string_view s) {
-  if (s.empty()) return 0;
+  if (s.empty())
+    return 0;
   uint32_t val = 0;
   for (char c : s) {
     if (c >= '0' && c <= '9') {
@@ -43,7 +44,8 @@ static inline uint32_t fast_parse_u32(std::string_view s) {
 }
 
 static inline uint64_t fast_parse_u64(std::string_view s) {
-  if (s.empty()) return 0;
+  if (s.empty())
+    return 0;
   uint64_t val = 0;
   for (char c : s) {
     if (c >= '0' && c <= '9') {
@@ -56,28 +58,32 @@ static inline uint64_t fast_parse_u64(std::string_view s) {
 // Generic number string parser with whitespace handling
 // Returns parsed integer, divided by specified divisor
 static inline uint64_t parse_numeric_field(std::string_view str, uint32_t divisor) {
-  if (str.empty()) return 0;
-  
-  const char* p = str.data();
-  const char* end = p + str.size();
-  
+  if (str.empty())
+    return 0;
+
+  const char *p = str.data();
+  const char *end = p + str.size();
+
   // Skip leading whitespace (handles \x20, \x00, \t, \n, \r)
-  while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0')) ++p;
-  if (p == end) return 0;
-  
+  while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r' || *p == '\0'))
+    ++p;
+  if (p == end)
+    return 0;
+
   // Parse integer part
   uint64_t value = 0;
   while (p < end && *p >= '0' && *p <= '9') {
     value = value * 10 + (*p - '0');
     ++p;
   }
-  
+
   // Skip decimal part if present (not used)
   if (p < end && *p == '.') {
     ++p;
-    while (p < end && *p >= '0' && *p <= '9') ++p;
+    while (p < end && *p >= '0' && *p <= '9')
+      ++p;
   }
-  
+
   return value == 0 ? 0 : value / divisor;
 }
 
@@ -101,14 +107,14 @@ static inline uint8_t extract_millisecond_10ms(uint32_t time_ms) {
 // Market detection
 static inline bool is_shenzhen_market(const std::string &stock_code) {
   if (stock_code.size() >= 3) {
-    const char* suffix = stock_code.data() + stock_code.size() - 3;
+    const char *suffix = stock_code.data() + stock_code.size() - 3;
     // Check for .SZ or .sz
-    if (suffix[0] == '.' && (suffix[1] == 'S' || suffix[1] == 's') && 
+    if (suffix[0] == '.' && (suffix[1] == 'S' || suffix[1] == 's') &&
         (suffix[2] == 'Z' || suffix[2] == 'z')) {
       return true;
     }
     // Check for .SH or .sh
-    if (suffix[0] == '.' && (suffix[1] == 'S' || suffix[1] == 's') && 
+    if (suffix[0] == '.' && (suffix[1] == 'S' || suffix[1] == 's') &&
         (suffix[2] == 'H' || suffix[2] == 'h')) {
       return false;
     }
@@ -118,20 +124,20 @@ static inline bool is_shenzhen_market(const std::string &stock_code) {
 }
 
 // Order type determination based on exchange rules
-static inline uint8_t determine_order_type(char csv_order_type, char csv_trade_code, 
-                                          bool is_trade, bool is_shenzhen) {
+static inline uint8_t determine_order_type(char csv_order_type, char csv_trade_code,
+                                           bool is_trade, bool is_shenzhen) {
   if (is_trade) {
     // Trade: cancel(1) or taker(3)
     return (is_shenzhen && csv_trade_code == 'C') ? 1 : 3;
   }
-  
+
   // Order: all maker(0) for SZSE; maker(0) or cancel(1) for SSE
   if (is_shenzhen) {
     return 0; // SZSE orders are all maker
   } else {
     // SSE: A/a=add/maker, D/d=delete/cancel
-    return (csv_order_type == 'A' || csv_order_type == 'a') ? 0 : 
-           (csv_order_type == 'D' || csv_order_type == 'd') ? 1 : 0;
+    return (csv_order_type == 'A' || csv_order_type == 'a') ? 0 : (csv_order_type == 'D' || csv_order_type == 'd') ? 1
+                                                                                                                   : 0;
   }
 }
 
@@ -148,22 +154,22 @@ static inline bool determine_order_direction(char side_flag) {
 std::vector<std::string_view> BinaryEncoder_L2::split_csv_line_view(std::string_view line) {
   std::vector<std::string_view> fields;
   fields.reserve(70); // Typical snapshot has ~65 fields
-  
+
   size_t start = 0;
   const size_t len = line.length();
-  
+
   for (size_t pos = 0; pos < len; ++pos) {
     if (line[pos] == ',') {
       fields.emplace_back(line.data() + start, pos - start);
       start = pos + 1;
     }
   }
-  
+
   // Last field
   if (start <= len) {
     fields.emplace_back(line.data() + start, len - start);
   }
-  
+
   return fields;
 }
 
@@ -175,7 +181,7 @@ uint32_t BinaryEncoder_L2::parse_time_to_ms(uint32_t time_int) {
   time_int /= 100;
   uint32_t min = time_int % 100;
   uint32_t hour = time_int / 100;
-  
+
   return hour * 3600000 + min * 60000 + sec * 1000 + ms;
 }
 
@@ -202,40 +208,48 @@ inline uint64_t BinaryEncoder_L2::parse_turnover_to_fen(std::string_view str) {
 // Helper: Detect CSV line delimiter (find first line ending)
 static char detect_csv_delimiter(const std::string &filepath) {
   std::ifstream file(filepath, std::ios::binary);
-  if (!file.is_open()) return '\n';
-  
+  if (!file.is_open())
+    return '\n';
+
   char ch;
   while (file.get(ch)) {
-    if (ch == '\r') return '\r';
-    if (ch == '\n') return '\n';
+    if (ch == '\r')
+      return '\r';
+    if (ch == '\n')
+      return '\n';
   }
   return '\n';
 }
 
 // Helper: Parse CSV with detected delimiter
-template<typename ParseFunc>
+template <typename ParseFunc>
 static bool parse_csv_with_delimiter(const std::string &filepath, char delimiter, ParseFunc parse_func) {
   auto file = open_csv_with_gbk(filepath);
-  if (!file.is_open()) return false;
+  if (!file.is_open())
+    return false;
 
   std::string line;
-  if (!std::getline(file, line, delimiter)) return false;
+  if (!std::getline(file, line, delimiter))
+    return false;
   // Remove trailing \n or \r if present (handle mixed line endings)
-  while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
+  while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+    line.pop_back();
 
   size_t line_count = 0;
   while (std::getline(file, line, delimiter)) {
-    while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
-    if (line.empty()) continue;
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
+      line.pop_back();
+    if (line.empty())
+      continue;
     parse_func(line);
     line_count++;
   }
-  
+
   return line_count > 0;
 }
 
 // Parse snapshot CSV file
-bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath, 
+bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath,
                                           std::vector<CSVSnapshot> &snapshots) {
   uint32_t prev_trade_count = 0;
   size_t line_number = 1;
@@ -243,7 +257,8 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath,
   auto parse_line = [&](const std::string &line) {
     ++line_number;
     auto fields = split_csv_line_view(line);
-    if (fields.size() < 65) return;
+    if (fields.size() < 65)
+      return;
 
     try {
       CSVSnapshot snap = {};
@@ -297,11 +312,12 @@ bool BinaryEncoder_L2::parse_snapshot_csv(const std::string &filepath,
 }
 
 // Parse order CSV file
-bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath, 
+bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath,
                                        std::vector<CSVOrder> &orders) {
   auto parse_line = [&](const std::string &line) {
     auto fields = split_csv_line_view(line);
-    if (fields.size() < 10) return;
+    if (fields.size() < 10)
+      return;
 
     try {
       CSVOrder order = {};
@@ -348,11 +364,12 @@ bool BinaryEncoder_L2::parse_order_csv(const std::string &filepath,
 }
 
 // Parse trade CSV file
-bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath, 
+bool BinaryEncoder_L2::parse_trade_csv(const std::string &filepath,
                                        std::vector<CSVTrade> &trades) {
   auto parse_line = [&](const std::string &line) {
     auto fields = split_csv_line_view(line);
-    if (fields.size() < 12) return;
+    if (fields.size() < 12)
+      return;
 
     try {
       CSVTrade trade = {};
@@ -446,13 +463,11 @@ Order BinaryEncoder_L2::csv_to_order(const CSVOrder &csv) {
   // Order attributes
   bool is_szse = is_shenzhen_market(csv.stock_code);
   order.order_type = SchemaUtils::clamp_to_bound(
-    determine_order_type(csv.order_type, '0', false, is_szse), 
-    SchemaUtils::ORDER_TYPE_BOUND
-  );
+      determine_order_type(csv.order_type, '0', false, is_szse),
+      SchemaUtils::ORDER_TYPE_BOUND);
   order.order_dir = SchemaUtils::clamp_to_bound(
-    determine_order_direction(csv.order_side), 
-    SchemaUtils::ORDER_DIR_BOUND
-  );
+      determine_order_direction(csv.order_side),
+      SchemaUtils::ORDER_DIR_BOUND);
   order.price = SchemaUtils::clamp_to_bound(csv.price, SchemaUtils::PRICE_BOUND);
   order.volume = SchemaUtils::clamp_to_bound(csv.volume, SchemaUtils::VOLUME_BOUND);
 
@@ -481,24 +496,21 @@ Order BinaryEncoder_L2::csv_to_trade(const CSVTrade &csv) {
   // Trade attributes
   bool is_szse = is_shenzhen_market(csv.stock_code);
   order.order_type = SchemaUtils::clamp_to_bound(
-    determine_order_type('0', csv.trade_code, true, is_szse), 
-    SchemaUtils::ORDER_TYPE_BOUND
-  );
-  
+      determine_order_type('0', csv.trade_code, true, is_szse),
+      SchemaUtils::ORDER_TYPE_BOUND);
+
   // Direction: for SZSE cancellation (bs_flag empty), infer from bid_order_id
   if (is_szse && (csv.bs_flag == ' ' || csv.bs_flag == '\0')) {
     char effective_side = (csv.bid_order_id != 0) ? 'B' : 'S';
     order.order_dir = SchemaUtils::clamp_to_bound(
-      determine_order_direction(effective_side), 
-      SchemaUtils::ORDER_DIR_BOUND
-    );
+        determine_order_direction(effective_side),
+        SchemaUtils::ORDER_DIR_BOUND);
   } else {
     order.order_dir = SchemaUtils::clamp_to_bound(
-      determine_order_direction(csv.bs_flag), 
-      SchemaUtils::ORDER_DIR_BOUND
-    );
+        determine_order_direction(csv.bs_flag),
+        SchemaUtils::ORDER_DIR_BOUND);
   }
-  
+
   order.price = SchemaUtils::clamp_to_bound(csv.price, SchemaUtils::PRICE_BOUND);
   order.volume = SchemaUtils::clamp_to_bound(csv.volume, SchemaUtils::VOLUME_BOUND);
 
@@ -525,8 +537,10 @@ BinaryEncoder_L2::BinaryEncoder_L2(size_t est_snapshots, size_t est_orders) {
   temp_snap_bid_volumes.reserve(est_snapshots);
   temp_snap_ask_volumes.reserve(est_snapshots);
 
-  for (auto &vec : temp_snap_bid_prices) vec.reserve(est_snapshots);
-  for (auto &vec : temp_snap_ask_prices) vec.reserve(est_snapshots);
+  for (auto &vec : temp_snap_bid_prices)
+    vec.reserve(est_snapshots);
+  for (auto &vec : temp_snap_ask_prices)
+    vec.reserve(est_snapshots);
 
   // Order buffers
   temp_order_hours.reserve(est_orders);
@@ -536,7 +550,7 @@ BinaryEncoder_L2::BinaryEncoder_L2(size_t est_snapshots, size_t est_orders) {
   temp_order_prices.reserve(est_orders);
   temp_order_bid_ids.reserve(est_orders);
   temp_order_ask_ids.reserve(est_orders);
-  
+
   // Initialize ZSTD compression context
   zstd_ctx_ = ZSTD_createCCtx();
   assert(zstd_ctx_ && "Failed to create ZSTD context");
@@ -550,7 +564,7 @@ BinaryEncoder_L2::~BinaryEncoder_L2() {
   }
 }
 
-bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots, 
+bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots,
                                         const std::string &filepath) {
   if (snapshots.empty()) {
     Logger::log_encode("No snapshots to encode: " + filepath);
@@ -571,7 +585,7 @@ bool BinaryEncoder_L2::encode_snapshots(const std::vector<Snapshot> &snapshots,
   return compress_and_write_data(filepath, buffer.get(), total_size);
 }
 
-bool BinaryEncoder_L2::encode_orders(const std::vector<Order> &orders, 
+bool BinaryEncoder_L2::encode_orders(const std::vector<Order> &orders,
                                      const std::string &filepath) {
   if (orders.empty()) {
     Logger::log_encode("No orders to encode: " + filepath);
@@ -597,7 +611,7 @@ size_t BinaryEncoder_L2::calculate_compression_bound(size_t data_size) {
   return ZSTD_compressBound(data_size);
 }
 
-bool BinaryEncoder_L2::compress_and_write_data(const std::string &filepath, 
+bool BinaryEncoder_L2::compress_and_write_data(const std::string &filepath,
                                                const void *data, size_t data_size) {
   std::ofstream file(filepath, std::ios::binary);
   if (!file.is_open()) [[unlikely]] {
@@ -609,8 +623,7 @@ bool BinaryEncoder_L2::compress_and_write_data(const std::string &filepath,
   const size_t bound = calculate_compression_bound(data_size);
   auto compressed = std::make_unique<char[]>(bound);
   const size_t compressed_size = ZSTD_compress2(
-    zstd_ctx_, compressed.get(), bound, data, data_size
-  );
+      zstd_ctx_, compressed.get(), bound, data, data_size);
 
   if (ZSTD_isError(compressed_size)) [[unlikely]] {
     Logger::log_encode("Compression failed: " + std::string(ZSTD_getErrorName(compressed_size)));
@@ -618,8 +631,8 @@ bool BinaryEncoder_L2::compress_and_write_data(const std::string &filepath,
   }
 
   // Write header + compressed data
-  file.write(reinterpret_cast<const char*>(&data_size), sizeof(data_size));
-  file.write(reinterpret_cast<const char*>(&compressed_size), sizeof(compressed_size));
+  file.write(reinterpret_cast<const char *>(&data_size), sizeof(data_size));
+  file.write(reinterpret_cast<const char *>(&compressed_size), sizeof(compressed_size));
   if (file.fail()) [[unlikely]] {
     Logger::log_encode("Failed to write header: " + filepath);
     return false;
@@ -660,15 +673,18 @@ bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
   const std::string trade_file = stock_dir + "/逐笔成交.csv";
 
   if (std::filesystem::exists(snap_file)) {
-    if (!parse_snapshot_csv(snap_file, csv_snaps)) return false;
+    if (!parse_snapshot_csv(snap_file, csv_snaps))
+      return false;
   }
 
   if (std::filesystem::exists(order_file)) {
-    if (!parse_order_csv(order_file, csv_orders)) return false;
+    if (!parse_order_csv(order_file, csv_orders))
+      return false;
   }
 
   if (std::filesystem::exists(trade_file)) {
-    if (!parse_trade_csv(trade_file, csv_trades)) return false;
+    if (!parse_trade_csv(trade_file, csv_trades))
+      return false;
   }
 
   // Convert and encode snapshots
@@ -683,39 +699,48 @@ bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
     constexpr size_t MIN_EXPECTED_COUNT = 1000;
     if (snapshots.size() < MIN_EXPECTED_COUNT) {
       Logger::log_encode("Abnormal snapshot count: " + stock_code + " " + stock_dir +
-                                " has only " + std::to_string(snapshots.size()) + " snapshots");
-      std::exit(1);
+                         " has only " + std::to_string(snapshots.size()) + " snapshots");
+      // std::exit(1);
+      return false;
     }
 
-    if (out_snapshots) *out_snapshots = snapshots;
+    if (out_snapshots)
+      *out_snapshots = snapshots;
 
-    const std::string output_file = output_dir + "/" + stock_code + 
-                                   "_snapshots_" + std::to_string(snapshots.size()) + ".bin";
-    if (!encode_snapshots(snapshots, output_file)) return false;
+    const std::string output_file = output_dir + "/" + stock_code +
+                                    "_snapshots_" + std::to_string(snapshots.size()) + ".bin";
+    if (!encode_snapshots(snapshots, output_file))
+      return false;
   }
 
   // Convert and encode orders + trades
   std::vector<Order> all_orders;
   all_orders.reserve(csv_orders.size() + csv_trades.size());
 
-  for (const auto &csv : csv_orders) all_orders.push_back(csv_to_order(csv));
-  for (const auto &csv : csv_trades) all_orders.push_back(csv_to_trade(csv));
+  for (const auto &csv : csv_orders)
+    all_orders.push_back(csv_to_order(csv));
+  for (const auto &csv : csv_trades)
+    all_orders.push_back(csv_to_trade(csv));
 
   // Sort by time, then by priority (maker → taker → cancel)
   std::sort(all_orders.begin(), all_orders.end(), [](const Order &a, const Order &b) {
     const uint32_t time_a = a.hour * 3600000 + a.minute * 60000 + a.second * 1000 + a.millisecond * 10;
     const uint32_t time_b = b.hour * 3600000 + b.minute * 60000 + b.second * 1000 + b.millisecond * 10;
-    
-    if (time_a != time_b) return time_a < time_b;
-    
+
+    if (time_a != time_b)
+      return time_a < time_b;
+
     // Priority: maker(0)=0, taker(3)=1, cancel(1)=2
     auto priority = [](uint8_t type) -> uint8_t {
-      if (type == 0) return 0;
-      if (type == 3) return 1;
-      if (type == 1) return 2;
+      if (type == 0)
+        return 0;
+      if (type == 3)
+        return 1;
+      if (type == 1)
+        return 2;
       return 3;
     };
-    
+
     return priority(a.order_type) < priority(b.order_type);
   });
 
@@ -724,15 +749,17 @@ bool BinaryEncoder_L2::process_stock_data(const std::string &stock_dir,
     constexpr size_t MIN_EXPECTED_COUNT = 1000;
     if (all_orders.size() < MIN_EXPECTED_COUNT) {
       Logger::log_encode("Abnormal order count: " + stock_code + " " + stock_dir +
-                                " has only " + std::to_string(all_orders.size()) + " orders");
+                         " has only " + std::to_string(all_orders.size()) + " orders");
       std::exit(1);
     }
 
-    if (out_orders) *out_orders = all_orders;
+    if (out_orders)
+      *out_orders = all_orders;
 
-    const std::string output_file = output_dir + "/" + stock_code + 
-                                   "_orders_" + std::to_string(all_orders.size()) + ".bin";
-    if (!encode_orders(all_orders, output_file)) return false;
+    const std::string output_file = output_dir + "/" + stock_code +
+                                    "_orders_" + std::to_string(all_orders.size()) + ".bin";
+    if (!encode_orders(all_orders, output_file))
+      return false;
   }
 
   // Release temporary memory after each day

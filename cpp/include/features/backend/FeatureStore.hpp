@@ -2,9 +2,11 @@
 
 #include "FeatureStoreConfig.hpp"
 #include <algorithm>
+#include <atomic>
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -46,11 +48,8 @@ private:
   size_t num_assets_;         // Number of assets
   size_t capacity_per_asset_; // Pre-allocated time steps per asset
   
-  // Per-asset time tracking (each asset independently increments)
-  std::vector<size_t> per_asset_time_idx_;
-  
-  // Dynamic expansion configuration
-  static constexpr size_t EXPANSION_CHUNK = 100'000; // Expand by 100K rows each time
+  // Per-asset write tracking (tracks max written index, -1 means no data written)
+  std::vector<int64_t> per_asset_max_written_idx_;
 
 public:
   // ============================================================================
@@ -85,8 +84,8 @@ public:
     num_assets_ = num_assets;
     capacity_per_asset_ = capacity_per_asset;
     
-    // Initialize per-asset time indices
-    per_asset_time_idx_.assign(num_assets, 0);
+    // Initialize per-asset max written indices (-1 means no data written yet)
+    per_asset_max_written_idx_.assign(num_assets, -1);
 
     // Allocate feature data: time × asset × feature
     const size_t total_floats = capacity_per_asset * num_assets * num_features;
@@ -102,54 +101,14 @@ public:
   }
   
   // ============================================================================
-  // CAPACITY MANAGEMENT
-  // ============================================================================
-  
-  // Check if specific asset needs expansion
-  bool needs_expansion(size_t asset_id) const {
-    return per_asset_time_idx_[asset_id] >= capacity_per_asset_;
-  }
-  
-  // Expand capacity by EXPANSION_CHUNK rows
-  void expand_capacity() {
-    const size_t old_capacity = capacity_per_asset_;
-    const size_t new_capacity = old_capacity + EXPANSION_CHUNK;
-    
-    // Reallocate data array
-    const size_t old_total_floats = old_capacity * num_assets_ * num_features_;
-    const size_t new_total_floats = new_capacity * num_assets_ * num_features_;
-    
-    float *new_data = static_cast<float *>(std::aligned_alloc(64, new_total_floats * sizeof(float)));
-    assert(new_data && "aligned_alloc failed during expansion");
-    
-    std::memcpy(new_data, data_, old_total_floats * sizeof(float));
-    std::memset(new_data + old_total_floats, 0, (new_total_floats - old_total_floats) * sizeof(float));
-    std::free(data_);
-    data_ = new_data;
-    
-    // Reallocate parent indices
-    const size_t old_total_slots = old_capacity * num_assets_;
-    const size_t new_total_slots = new_capacity * num_assets_;
-    
-    size_t *new_parent_indices = static_cast<size_t *>(std::aligned_alloc(64, new_total_slots * sizeof(size_t)));
-    assert(new_parent_indices && "aligned_alloc failed during expansion");
-    
-    std::memcpy(new_parent_indices, parent_indices_, old_total_slots * sizeof(size_t));
-    std::memset(new_parent_indices + old_total_slots, 0, (new_total_slots - old_total_slots) * sizeof(size_t));
-    std::free(parent_indices_);
-    parent_indices_ = new_parent_indices;
-    
-    capacity_per_asset_ = new_capacity;
-  }
-
-  // ============================================================================
   // WRITE OPERATIONS
   // ============================================================================
 
-  // Push complete row for specific asset (MACRO-GENERATED specializations below)
-  // Auto-increments per-asset time index after write
+  // Push complete row for specific asset at explicit time index
+  // - Write-protected: ignores attempts to overwrite existing indices
+  // - Gap-filling: fills all indices from last written to current with same data
   template <typename LevelData>
-  void push_row(size_t asset_id, const LevelData &data, size_t parent_row_idx);
+  void push_row(size_t asset_id, size_t time_idx, const LevelData &data, size_t parent_row_idx);
 
   // ============================================================================
   // PARENT LINKAGE ACCESS
@@ -169,13 +128,22 @@ public:
   // TIME INDEX MANAGEMENT (Per-asset)
   // ============================================================================
 
-  size_t get_time_idx(size_t asset_id) const { 
-    return per_asset_time_idx_[asset_id]; 
+  // Get max written index for asset (-1 if no data written)
+  int64_t get_max_written_idx(size_t asset_id) const { 
+    return per_asset_max_written_idx_[asset_id]; 
   }
   
+  // Get next available index for asset (for compatibility)
+  size_t get_time_idx(size_t asset_id) const {
+    return static_cast<size_t>(per_asset_max_written_idx_[asset_id] + 1);
+  }
+  
+  // Get maximum time index across all assets
   size_t get_max_time_idx() const {
-    return per_asset_time_idx_.empty() ? 0 : 
-           *std::max_element(per_asset_time_idx_.begin(), per_asset_time_idx_.end());
+    if (per_asset_max_written_idx_.empty()) return 0;
+    auto max_it = std::max_element(per_asset_max_written_idx_.begin(), 
+                                    per_asset_max_written_idx_.end());
+    return *max_it < 0 ? 0 : static_cast<size_t>(*max_it + 1);
   }
 
   // ============================================================================
@@ -241,6 +209,7 @@ public:
   // ============================================================================
 
   const std::string &get_date() const { return date_; }
+  void set_date(const std::string &date) { date_ = date; }
   size_t get_num_assets() const { return num_assets_; }
 };
 
@@ -253,9 +222,13 @@ public:
 
 class GlobalFeatureStore {
 private:
-  // Date-sharded storage (ordered for chronological export)
-  std::map<std::string, std::unique_ptr<DailyFeatureTensor>> daily_tensors_;
-  mutable std::shared_mutex map_mutex_; // Protects map structure only
+  // Pre-allocated tensor pool
+  std::vector<std::unique_ptr<DailyFeatureTensor>> tensor_pool_;
+  std::atomic<size_t> next_tensor_idx_{0};
+  
+  // Date to tensor mapping (for fast lookup)
+  std::map<std::string, DailyFeatureTensor*> date_to_tensor_;
+  mutable std::shared_mutex map_mutex_;
   
   size_t num_assets_;
 
@@ -268,10 +241,40 @@ public:
   // INITIALIZATION
   // ============================================================================
 
-  explicit GlobalFeatureStore(size_t num_assets)
+  explicit GlobalFeatureStore(size_t num_assets, size_t preallocated_blocks = 50)
       : num_assets_(num_assets), 
         current_tensors_(num_assets, nullptr),
-        current_dates_(num_assets) {}
+        current_dates_(num_assets) {
+    
+    // Calculate memory per level
+    size_t total_features = 0;
+    size_t level_sizes[LEVEL_COUNT];
+    for (size_t lvl = 0; lvl < LEVEL_COUNT; ++lvl) {
+      level_sizes[lvl] = MAX_ROWS_PER_LEVEL[lvl] * num_assets * FIELDS_PER_LEVEL[lvl] * sizeof(float);
+      total_features += FIELDS_PER_LEVEL[lvl];
+    }
+    size_t bytes_per_day = 0;
+    for (size_t lvl = 0; lvl < LEVEL_COUNT; ++lvl) {
+      bytes_per_day += level_sizes[lvl];
+    }
+    
+    // Print allocation info
+    std::cout << "Preallocating Feature Store:\n";
+    std::cout << "  Daily: ";
+    for (size_t lvl = 0; lvl < LEVEL_COUNT; ++lvl) {
+      std::cout << "L" << lvl << "(" << (level_sizes[lvl] / (1024.0 * 1024.0)) << "MB)";
+      if (lvl + 1 < LEVEL_COUNT) std::cout << " + ";
+    }
+    std::cout << " × " << preallocated_blocks << " days = " 
+              << (bytes_per_day * preallocated_blocks / (1024.0 * 1024.0 * 1024.0)) << " GB\n";
+    std::cout << "  Features: " << total_features << "\n\n";
+    
+    // Preallocate tensor blocks (no date assigned yet)
+    tensor_pool_.reserve(preallocated_blocks);
+    for (size_t i = 0; i < preallocated_blocks; ++i) {
+      tensor_pool_.emplace_back(std::make_unique<DailyFeatureTensor>("", num_assets));
+    }
+  }
 
   // ============================================================================
   // DATE SWITCHING (Called by main.cpp when asset moves to next date)
@@ -282,29 +285,37 @@ public:
     assert(asset_id < num_assets_ && "Invalid asset_id");
     current_dates_[asset_id] = date;
     
-    // Double-checked locking for tensor creation
-    DailyFeatureTensor* tensor;
+    // Fast path: check if date already bound
     {
       std::shared_lock lock(map_mutex_);
-      auto it = daily_tensors_.find(date);
-      if (it != daily_tensors_.end()) {
-        tensor = it->second.get();
-        current_tensors_[asset_id] = tensor;
+      auto it = date_to_tensor_.find(date);
+      if (it != date_to_tensor_.end()) {
+        current_tensors_[asset_id] = it->second;
         return;
       }
     }
     
-    // Need to create new tensor
+    // Slow path: allocate tensor from pool (lock-free for pool access)
+    size_t idx = next_tensor_idx_.fetch_add(1, std::memory_order_relaxed);
+    DailyFeatureTensor* tensor;
+    
+    if (idx < tensor_pool_.size()) {
+      // Use preallocated block
+      tensor = tensor_pool_[idx].get();
+    } else {
+      // Pool exhausted, allocate new block on demand
+      std::unique_lock lock(map_mutex_);
+      tensor_pool_.emplace_back(std::make_unique<DailyFeatureTensor>("", num_assets_));
+      tensor = tensor_pool_.back().get();
+    }
+    
+    // Bind date to tensor
+    tensor->set_date(date);
+    
+    // Register mapping (write lock)
     {
       std::unique_lock lock(map_mutex_);
-      auto it = daily_tensors_.find(date);
-      if (it == daily_tensors_.end()) {
-        auto new_tensor = std::make_unique<DailyFeatureTensor>(date, num_assets_);
-        tensor = new_tensor.get();
-        daily_tensors_.emplace(date, std::move(new_tensor));
-      } else {
-        tensor = it->second.get();
-      }
+      date_to_tensor_[date] = tensor;
     }
     
     current_tensors_[asset_id] = tensor;
@@ -320,10 +331,10 @@ public:
   // HOT PATH: ULTRA-FAST PUSH (Called billions of times)
   // ============================================================================
   
-  // Single-line push with automatic parent linking and time increment
+  // Push with explicit time index - caller manages time granularity
   // No map lookup, no string comparison - just cached pointer dereference
   template <typename LevelData>
-  inline void push(size_t level_idx, size_t asset_id, const LevelData* data) {
+  inline void push(size_t level_idx, size_t asset_id, size_t time_idx, const LevelData* data) {
     DailyFeatureTensor* tensor = current_tensors_[asset_id];
     assert(tensor && "Call switch_date before push");
     
@@ -335,7 +346,7 @@ public:
       parent_idx = tensor->get_level(level_idx - 1).get_time_idx(asset_id);
     }
     
-    level.push_row(asset_id, *data, parent_idx);
+    level.push_row(asset_id, time_idx, *data, parent_idx);
   }
 
   // ============================================================================
@@ -344,8 +355,8 @@ public:
 
   DailyFeatureTensor* get_tensor(const std::string &date) const {
     std::shared_lock lock(map_mutex_);
-    auto it = daily_tensors_.find(date);
-    return it != daily_tensors_.end() ? it->second.get() : nullptr;
+    auto it = date_to_tensor_.find(date);
+    return it != date_to_tensor_.end() ? it->second : nullptr;
   }
   
   const std::string& get_current_date(size_t asset_id) const {
@@ -412,7 +423,7 @@ public:
   
   size_t get_num_dates() const { 
     std::shared_lock lock(map_mutex_);
-    return daily_tensors_.size(); 
+    return date_to_tensor_.size(); 
   }
 };
 
@@ -421,32 +432,35 @@ public:
 // ============================================================================
 // Fully macro-driven generation - automatically scales to all levels
 // Each specialization performs:
-// 1. Check capacity and auto-expand if needed
-// 2. Get per-asset time index (independent for each asset)
+// 1. Write protection: return if time_idx already written
+// 2. Gap filling: fill all indices from (max_written + 1) to time_idx
 // 3. Compute flat array offset: (time × num_assets + asset) × num_features
-// 4. Memcpy struct fields to destination
+// 4. Memcpy struct fields to destination for all filled indices
 // 5. Record parent row index for hierarchical linking
-// 6. Auto-increment per-asset time index
+// 6. Update max_written_idx for this asset
 
 #define GENERATE_PUSH_ROW_SPECIALIZATION(level_name, level_num, fields)            \
   template <>                                                                      \
   inline void LevelStorage::push_row<Level##level_num##Data>(                      \
       size_t asset_id,                                                             \
+      size_t time_idx,                                                             \
       const Level##level_num##Data &data,                                          \
       size_t parent_row_idx) {                                                     \
-    /* Auto-expand if this asset needs more capacity */                            \
-    if (needs_expansion(asset_id)) [[unlikely]] {                                  \
-      expand_capacity();                                                           \
-    }                                                                              \
-    /* Use per-asset time index */                                                 \
-    const size_t time_idx = per_asset_time_idx_[asset_id];                         \
-    const size_t row_offset = (time_idx * num_assets_ + asset_id) * num_features_; \
-    float *dest = data_ + row_offset;                                              \
+    assert(time_idx < capacity_per_asset_ && "time_idx exceeds capacity");         \
+    /* Write protection: ignore if already written */                              \
+    const int64_t max_written = per_asset_max_written_idx_[asset_id];              \
+    if (static_cast<int64_t>(time_idx) <= max_written) return;                     \
+    /* Gap filling: write same data to all indices from (max_written+1) to time_idx */ \
+    const size_t start_idx = static_cast<size_t>(max_written + 1);                 \
     const float *src = reinterpret_cast<const float *>(&data);                     \
-    std::memcpy(dest, src, num_features_ * sizeof(float));                         \
-    parent_indices_[time_idx * num_assets_ + asset_id] = parent_row_idx;           \
-    /* Auto-increment this asset's time index */                                   \
-    per_asset_time_idx_[asset_id]++;                                               \
+    for (size_t idx = start_idx; idx <= time_idx; ++idx) {                         \
+      const size_t row_offset = (idx * num_assets_ + asset_id) * num_features_;    \
+      float *dest = data_ + row_offset;                                            \
+      std::memcpy(dest, src, num_features_ * sizeof(float));                       \
+      parent_indices_[idx * num_assets_ + asset_id] = parent_row_idx;              \
+    }                                                                              \
+    /* Update max written index */                                                 \
+    per_asset_max_written_idx_[asset_id] = static_cast<int64_t>(time_idx);         \
   }
 
 // Generate specializations for all levels

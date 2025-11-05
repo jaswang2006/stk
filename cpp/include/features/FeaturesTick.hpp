@@ -20,6 +20,9 @@ private:
   GlobalFeatureStore* global_store_;
   size_t asset_id_;
   
+  // Time index tracking
+  size_t last_time_idx_ = 0;
+  
   RollingZScore<float, ZSCORE_WINDOW> zs_spread_;
   RollingZScore<float, ZSCORE_WINDOW> zs_tobi_;
   RollingZScore<float, ZSCORE_WINDOW> zs_mpg_;
@@ -36,21 +39,27 @@ public:
     asset_id_ = asset_id;
   }
 
-  // Compute and store - clean like old architecture
+  // Compute and store - called every tick, handles time index internally
   void compute_and_store() {
     if (!lob_feature_->depth_updated || !global_store_) {
       return;
     }
+
+    const size_t curr_time_idx = time_to_L0_index(lob_feature_->hour, lob_feature_->minute, 
+                                                   lob_feature_->second, lob_feature_->millisecond);
+    
+    // Only compute on time index change
+    if (curr_time_idx == last_time_idx_) {
+      return;
+    }
+    last_time_idx_ = curr_time_idx;
 
     const auto &depth_buffer = lob_feature_->depth_buffer;
     if (depth_buffer.size() < 2 * LOB_FEATURE_DEPTH_LEVELS) [[unlikely]] {
       return;
     }
 
-    // Step 1: Create data structure
-    Level0Data data = {};
-
-    // Step 2: Extract LOB data
+    // Extract LOB data
     const Level *best_ask_level = depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1];
     const Level *best_bid_level = depth_buffer[LOB_FEATURE_DEPTH_LEVELS];
 
@@ -59,8 +68,9 @@ public:
     const float best_bid_volume = static_cast<float>(std::abs(best_bid_level->net_quantity));
     const float best_ask_volume = static_cast<float>(std::abs(best_ask_level->net_quantity));
 
-    // Step 3: Compute all features and fill struct
-    data.timestamp = 0;  // TODO: from LOB
+    // Compute all features
+    Level0Data data = {};
+    data.timestamp = 0;  // TODO
     
     data.mid_price = (best_bid_price + best_ask_price) * 0.5f;
     data.spread = best_ask_price - best_bid_price;
@@ -77,7 +87,7 @@ public:
     data.mpg = data.micro_price - data.mid_price;
     data.mpg_z = zs_mpg_.update(data.mpg);
 
-    // Step 4: Ultra-fast single-line push (billions of calls optimized!)
-    global_store_->push(L0_INDEX, asset_id_, &data);
+    // Push with explicit time_idx
+    global_store_->push(L0_INDEX, asset_id_, curr_time_idx, &data);
   }
 };
