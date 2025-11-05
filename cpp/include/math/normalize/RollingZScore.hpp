@@ -63,6 +63,7 @@ public:
 
 #ifdef KDE_ESTIMATE
     // Use histogram for z-score computation
+    const T range = kde_max - kde_min;
     T sum_x = 0, sum_x2 = 0;
     const T bin_width = range / NUM_BINS;
     for (int i = 0; i < NUM_BINS; ++i) {

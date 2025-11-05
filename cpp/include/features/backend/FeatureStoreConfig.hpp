@@ -1,104 +1,98 @@
 #pragma once
 
+#include "../FeaturesDefine.hpp"
 #include <cstddef>
-#include <cstdint>
-#include <cstring>
 
-// Event-driven feature level definitions
+// ============================================================================
+// FEATURE STORE CONFIGURATION - AUTO-GENERATED FROM SCHEMA
+// ============================================================================
+// Fully macro-driven code generation:
+// - Level metadata (count, indices)
+// - Field metadata (count, offsets)
+// - Data structures (LevelNData structs)
+// - Capacity configuration
+//
+// All features stored as float (normalized distribution assumption)
+// ============================================================================
 
-// Level 0: L2 tick level
-#define LEVEL_0_FIELDS(X)                                    \
-  X(last_price,          float,     "Last traded price"     )\
-  X(bid1,                float,     "Best bid price"        )\
-  X(ask1,                float,     "Best ask price"        )\
-  X(volume,              uint32_t,  "Trade volume"          )\
-  X(bid1_size,           uint32_t,  "Best bid size"         )\
-  X(ask1_size,           uint32_t,  "Best ask size"         )\
-  X(spread,              float,     "Bid-ask spread"        )\
-  X(mid_price,           float,     "Mid price"             )\
-  X(is_uptick,           bool,      "Is uptick indicator"   )\
-  X(micro_price,         float,     "Micro price"           )\
-  X(order_imbalance,     float,     "Order flow imbalance"  )\
-  X(trade_sign,          float,     "Trade direction sign"  )\
-  X(aggressive_buy_vol,  uint32_t,  "Aggressive buy volume" )\
-  X(aggressive_sell_vol, uint32_t,  "Aggressive sell volume")\
-  X(effective_spread,    float,     "Effective spread"      )\
-  X(realized_spread,     float,     "Realized spread"       )\
-  X(price_impact,        float,     "Price impact"          )\
-  X(event_id,            uint64_t,  "Event identifier"      )
+// ============================================================================
+// LEVEL METADATA - AUTO-GENERATED
+// ============================================================================
 
-// Level 1: intraday minute level
-#define LEVEL_1_FIELDS(X)                                 \
-  X(vwap, double, "Volume weighted average price")        \
-  X(twap, double, "Time weighted average price")          \
-  X(high, double, "High price")                           \
-  X(low, double, "Low price")                             \
-  X(open, double, "Open price")                           \
-  X(close, double, "Close price")                         \
-  X(total_volume, uint64_t, "Total volume")               \
-  X(total_trades, uint64_t, "Total number of trades")     \
-  X(buy_trades, uint32_t, "Number of buy trades")         \
-  X(sell_trades, uint32_t, "Number of sell trades")       \
-  X(price_volatility, double, "Price volatility")         \
-  X(volume_volatility, double, "Volume volatility")       \
-  X(skewness, double, "Price distribution skewness")      \
-  X(kurtosis, double, "Price distribution kurtosis")      \
-  X(avg_spread, double, "Average spread")                 \
-  X(avg_depth, double, "Average depth")                   \
-  X(order_flow_imbalance, double, "Order flow imbalance") \
-  X(rsi, double, "Relative strength index")               \
-  X(momentum_short, double, "Short-term momentum")        \
-  X(momentum_long, double, "Long-term momentum")          \
-  X(event_id, uint64_t, "Event identifier")
+// Count total number of levels
+#define COUNT_LEVEL(level_name, level_num, fields) +1
+constexpr size_t LEVEL_COUNT = 0 ALL_LEVELS(COUNT_LEVEL);
 
-// Level 2: intraday day level
-#define LEVEL_2_FIELDS(X)                                    \
-  X(vwap, double, "Volume weighted average price")           \
-  X(high, double, "High price")                              \
-  X(low, double, "Low price")                                \
-  X(open, double, "Open price")                              \
-  X(close, double, "Close price")                            \
-  X(total_volume, uint64_t, "Total volume")                  \
-  X(total_trades, uint64_t, "Total number of trades")        \
-  X(volatility, double, "Long-term volatility")              \
-  X(return_rate, double, "Return rate")                      \
-  X(volume_profile_shape, double, "Volume profile shape")    \
-  X(participation_rate, double, "Market participation rate") \
-  X(sector_correlation, double, "Sector correlation")        \
-  X(market_beta, double, "Market beta")                      \
-  X(relative_strength, double, "Relative strength")          \
-  X(funding_rate_impact, double, "Funding rate impact")      \
-  X(options_flow_impact, double, "Options flow impact")      \
-  X(event_id, uint64_t, "Event identifier")
-
-// All levels definition - USER EXTENDS HERE for L4/5/6/7
-#define ALL_LEVELS(X)                      \
-  X(L0, 0, LEVEL_0_FIELDS, Level0Features) \
-  X(L1, 1, LEVEL_1_FIELDS, Level1Features) \
-  X(L2, 2, LEVEL_2_FIELDS, Level2Features)
-
-// =================================================================
-// AUTO-GENERATED CODE - ALL EXTENSIONS HANDLED BY MACROS
-// =================================================================
-
-// Auto-generate level count and indices
-#define COUNT_LEVELS(level_name, level_num, fields, struct_name) +1
-constexpr size_t LEVEL_COUNT = 0 ALL_LEVELS(COUNT_LEVELS);
-
-#define GET_LEVEL_INDEX(level_name, level_num, fields, struct_name) \
+// Generate level index constants: L0_INDEX, L1_INDEX, L2_INDEX, ...
+#define GENERATE_LEVEL_INDEX(level_name, level_num, fields) \
   constexpr size_t level_name##_INDEX = level_num;
-ALL_LEVELS(GET_LEVEL_INDEX)
+ALL_LEVELS(GENERATE_LEVEL_INDEX)
 
-// =================================================================
-// USER MACROS - ONLY WHAT USER NEEDS FOR EXTENSION
-// =================================================================
+// ============================================================================
+// FIELD METADATA - AUTO-GENERATED
+// ============================================================================
 
-// Basic struct field generation (used by level struct generation)
-#define STRUCT_FIELD(name, type, comment) type name;
+// Count fields in each level
+#define COUNT_FIELD(name, comment) +1
 
-// Auto-generate level structures - USER ONLY NEEDS TO MODIFY ALL_LEVELS
-#define GENERATE_LEVEL_STRUCT(level_name, level_num, fields, struct_name) \
-  struct struct_name {                                                    \
-    fields(STRUCT_FIELD)                                                  \
+#define GENERATE_FIELD_COUNT_FOR_LEVEL(level_name, level_num, fields) \
+  constexpr size_t level_name##_FIELD_COUNT = 0 fields(COUNT_FIELD);
+ALL_LEVELS(GENERATE_FIELD_COUNT_FOR_LEVEL)
+
+// Generate field offset enums for each level (scoped to avoid name collisions)
+#define GENERATE_OFFSET_ENUM_FOR_LEVEL(level_name, level_num, fields)     \
+  namespace level_name##_FieldOffset {                                     \
+    enum : size_t {                                                        \
+      fields(GENERATE_FIELD_OFFSET_##level_name)                           \
+    };                                                                     \
+  }
+
+#define GENERATE_FIELD_OFFSET_L0(name, comment) name,
+#define GENERATE_FIELD_OFFSET_L1(name, comment) name,
+#define GENERATE_FIELD_OFFSET_L2(name, comment) name,
+
+ALL_LEVELS(GENERATE_OFFSET_ENUM_FOR_LEVEL)
+
+// ============================================================================
+// DATA STRUCTURES - AUTO-GENERATED
+// ============================================================================
+
+// Generate LevelNData structs with all fields as float
+#define GENERATE_STRUCT_FIELD(name, comment) float name;
+
+#define GENERATE_LEVEL_DATA_STRUCT(level_name, level_num, fields) \
+  struct Level##level_num##Data {                                  \
+    fields(GENERATE_STRUCT_FIELD)                                  \
   };
-ALL_LEVELS(GENERATE_LEVEL_STRUCT)
+ALL_LEVELS(GENERATE_LEVEL_DATA_STRUCT)
+
+// ============================================================================
+// CAPACITY CONFIGURATION
+// ============================================================================
+
+// Default row capacities per asset per day per level
+#ifndef MAX_L0_ROWS_PER_ASSET_PER_DAY
+  constexpr size_t MAX_L0_ROWS_PER_ASSET_PER_DAY = 1'000'000;  // 1M ticks
+#endif
+
+#ifndef MAX_L1_ROWS_PER_ASSET_PER_DAY
+  constexpr size_t MAX_L1_ROWS_PER_ASSET_PER_DAY = 10'000;     // 10K minutes
+#endif
+
+#ifndef MAX_L2_ROWS_PER_ASSET_PER_DAY
+  constexpr size_t MAX_L2_ROWS_PER_ASSET_PER_DAY = 1'000;      // 1K hours
+#endif
+
+// Aggregate into array for runtime access
+#define GENERATE_CAPACITY_ENTRY(level_name, level_num, fields) \
+  MAX_##level_name##_ROWS_PER_ASSET_PER_DAY,
+constexpr size_t MAX_ROWS_PER_LEVEL[LEVEL_COUNT] = {
+  ALL_LEVELS(GENERATE_CAPACITY_ENTRY)
+};
+
+// Aggregate field counts into array for runtime access
+#define GENERATE_FIELD_COUNT_ENTRY(level_name, level_num, fields) \
+  level_name##_FIELD_COUNT,
+constexpr size_t FIELDS_PER_LEVEL[LEVEL_COUNT] = {
+  ALL_LEVELS(GENERATE_FIELD_COUNT_ENTRY)
+};

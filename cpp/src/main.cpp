@@ -2,10 +2,11 @@
 #include "codec/binary_decoder_L2.hpp"
 #include "codec/binary_encoder_L2.hpp"
 #include "codec/json_config.hpp"
-#include "lob/LimitOrderBook.hpp"
 #include "misc/affinity.hpp"
 #include "misc/logging.hpp"
 #include "misc/progress_parallel.hpp"
+#include "lob/LimitOrderBook.hpp"
+#include "features/backend/FeatureStore.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -329,7 +330,9 @@ inline bool extract_and_encode(const std::string &archive_path, const std::strin
 // ============================================================================
 
 namespace Analysis {
-inline size_t process_binary_files(const BinaryFiles &files, L2::BinaryDecoder_L2 &decoder, LimitOrderBook &analyzer) {
+inline size_t process_binary_files(const BinaryFiles &files,
+                                   L2::BinaryDecoder_L2 &decoder,
+                                   LimitOrderBook &lob) {
   size_t order_count = 0;
   if (!files.orders_file.empty()) {
     std::vector<L2::Order> decoded_orders;
@@ -339,9 +342,9 @@ inline size_t process_binary_files(const BinaryFiles &files, L2::BinaryDecoder_L
 
     order_count = decoded_orders.size();
     for (const auto &ord : decoded_orders) {
-      analyzer.process(ord);
+      lob.process(ord);
     }
-    analyzer.clear();
+    lob.clear();
   }
   return order_count;
 }
@@ -420,21 +423,34 @@ void encoding_worker(std::vector<AssetTask> &asset_queue, std::mutex &queue_mute
 // PHASE 2: ANALYSIS PROCESSOR
 // ============================================================================
 
-void process_analysis_for_asset(const std::string &asset_code, const std::vector<std::string> &dates, const std::string &temp_dir, misc::ProgressHandle progress_handle) {
+void process_analysis_for_asset(const std::string &asset_code,
+                                const std::vector<std::string> &dates,
+                                const std::string &temp_dir,
+                                misc::ProgressHandle progress_handle,
+                                GlobalFeatureStore *feature_store,
+                                size_t asset_id) {
   L2::BinaryDecoder_L2 decoder(L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE);
   L2::ExchangeType exchange_type = L2::infer_exchange_type(asset_code);
-  LimitOrderBook analyzer(L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type);
+
+  // Create LOB with feature store context (set once per asset)
+  LimitOrderBook lob(L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type, feature_store, asset_id);
 
   size_t cumulative_orders = 0;
   auto start_time = std::chrono::steady_clock::now();
 
   for (size_t i = 0; i < dates.size(); ++i) {
     const std::string &date_str = dates[i];
+
+    // Set current date in store for this asset (store manages date internally)
+    if (feature_store) {
+      feature_store->set_current_date(asset_id, date_str);
+    }
+
     const std::string temp_asset_dir = Utils::generate_temp_asset_dir(temp_dir, date_str, asset_code);
     const BinaryFiles files = Encoding::check_existing_binaries(temp_asset_dir, asset_code);
 
     if (files.exists()) {
-      cumulative_orders += Analysis::process_binary_files(files, decoder, analyzer);
+      cumulative_orders += Analysis::process_binary_files(files, decoder, lob);
     }
 
     // Calculate cumulative statistics
@@ -546,12 +562,25 @@ int main() {
     // ========================================================================
     // PHASE 2: ANALYSIS (strictly sequential per asset)
     // ========================================================================
-    std::cout << "=== Phase 2: Analysis ===" << "\n";
+    std::cout << "=== Phase 2: Analysis (with Feature Storage) ===" << "\n";
+
+    // Initialize global feature store
+    std::vector<std::string> all_asset_codes;
+    for (const auto &asset : asset_queue_for_analysis) {
+      all_asset_codes.push_back(asset.asset_code);
+    }
+
+    GlobalFeatureStore feature_store(all_asset_codes.size());
+
+    std::cout << "Feature Store: " << num_workers << " cores, "
+              << all_asset_codes.size() << " assets\n\n";
 
     auto analysis_progress = std::make_shared<misc::ParallelProgress>(num_workers);
     std::vector<std::future<void>> analysis_tasks;
 
-    for (const auto &asset : asset_queue_for_analysis) {
+    for (size_t asset_idx = 0; asset_idx < asset_queue_for_analysis.size(); ++asset_idx) {
+      const auto &asset = asset_queue_for_analysis[asset_idx];
+
       // Wait for available slot
       while (analysis_tasks.size() >= num_workers) {
         analysis_tasks.erase(
@@ -564,7 +593,14 @@ int main() {
         }
       }
 
-      analysis_tasks.push_back(std::async(std::launch::async, process_analysis_for_asset, asset.asset_code, asset.dates, temp_dir, analysis_progress->acquire_slot(asset.asset_code + " (" + asset.asset_name + ")")));
+      analysis_tasks.push_back(std::async(std::launch::async,
+                                          process_analysis_for_asset,
+                                          asset.asset_code,
+                                          asset.dates,
+                                          temp_dir,
+                                          analysis_progress->acquire_slot(asset.asset_code + " (" + asset.asset_name + ")"),
+                                          &feature_store,
+                                          asset_idx)); // asset_id
     }
 
     for (auto &task : analysis_tasks) {
@@ -572,6 +608,11 @@ int main() {
     }
     analysis_progress->stop();
 
+    // Print feature storage summary
+    std::cout << "\n";
+    std::cout << "Feature Storage Summary:\n";
+    std::cout << "  Total assets: " << feature_store.get_num_assets() << "\n";
+    std::cout << "  Total dates: " << feature_store.get_num_dates() << "\n";
     std::cout << "\n";
 
     Logger::close();

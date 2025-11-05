@@ -8,10 +8,10 @@
 #include <vector>
 
 #include "codec/L2_DataType.hpp"
-#include "define/CBuffer.hpp"
 #include "define/FastBitmap.hpp"
 #include "define/MemPool.hpp"
 #include "features/FeaturesTick.hpp"
+#include "features/backend/FeatureStore.hpp"
 #include "lob/LimitOrderBookDefine.hpp"
 #include "math/sample/ResampleRunBar.hpp"
 
@@ -35,13 +35,19 @@ public:
   // CONSTRUCTOR & CONFIGURATION
   //======================================================================================
 
-  explicit LimitOrderBook(size_t ORDER_SIZE = L2::DEFAULT_ENCODER_ORDER_SIZE, ExchangeType exchange_type = ExchangeType::SSE)
-      : price_levels_(10),
+  explicit LimitOrderBook(size_t ORDER_SIZE = L2::DEFAULT_ENCODER_ORDER_SIZE,
+                          ExchangeType exchange_type = ExchangeType::SSE,
+                          GlobalFeatureStore *feature_store = nullptr,
+                          size_t asset_id = 0)
+      : price_levels_(1024),
         order_lookup_(ORDER_SIZE),      // BumpDict with pre-allocated capacity
         order_memory_pool_(ORDER_SIZE), // BumpPool for Order objects
         exchange_type_(exchange_type),
-        features_tick_(&LOB_feature_) { // Pass pointer to LOB_Feature
-    // Depth is updated in time-driven manner
+        features_tick_(&LOB_feature_) {
+    // Set feature store context if provided
+    if (feature_store) {
+      features_tick_.set_store_context(feature_store, asset_id);
+    }
   }
 
   //======================================================================================
@@ -101,9 +107,9 @@ public:
 #if DEBUG_BOOK_PRINT
       print_book();
 #endif
-    }
 
-    features_tick_.update();
+      features_tick_.compute_and_store();
+    }
 
     // ========================= lob update ==============================
     bool result = update_lob(order);

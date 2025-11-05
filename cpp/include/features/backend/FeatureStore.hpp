@@ -1,488 +1,453 @@
 #pragma once
 
-#include <array>
-#include <cmath>
+#include "FeatureStoreConfig.hpp"
+#include <algorithm>
+#include <cassert>
+#include <cstdlib>
 #include <cstring>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
-#include <type_traits> // Required for std::is_same_v in macro expansion
+#include <utility>
 #include <vector>
 
-#include "./FeatureStoreConfig.hpp"
+// ============================================================================
+// FEATURE STORE IMPLEMENTATION - HIGH-PERFORMANCE TIME-SERIES STORAGE
+// ============================================================================
+// Design principles:
+// - Time-major layout: [time × asset × feature] for sequential access
+// - Pre-allocated arrays: zero dynamic allocation in hot path
+// - Aligned memory: 64-byte alignment for SIMD/cache optimization
+// - Parent linking: hierarchical pointer chain for multi-level aggregation
+// - Macro-generated: fully automatic code generation for all levels
+//
+// Memory efficiency:
+// - Uniform float storage: 4 bytes per feature
+// - Contiguous layout: cache-friendly sequential writes
+// - Pre-allocated capacity: eliminates reallocation overhead
+// ============================================================================
 
-/*
-事件驱动特征存储架构
-========================================
+// ============================================================================
+// LEVEL STORAGE - SINGLE-LEVEL MULTI-ASSET BUFFER
+// ============================================================================
+// Memory layout: [time₀...timeₜ] × [asset₀...assetₙ] × [feature₀...featureₖ]
+// Parent indices: [time₀...timeₜ] × [asset₀...assetₙ] → parent_time_idx
 
-核心设计：
-- 事件驱动处理，带嵌套触发器级联机制
-- 列式存储，配合父指针关联机制
-- 零拷贝张量导出，对接ML流水线
-- 完全基于宏的代码生成
+class LevelStorage {
+private:
+  // Core storage
+  float *data_ = nullptr;            // Feature data: time × asset × feature
+  size_t *parent_indices_ = nullptr; // Parent time indices: time × asset
 
-扩展性：
---------------
-添加 L4/L5/L6/L7 层级时，用户只需：
-1. 在 FeatureStoreConfig.hpp 中定义 LEVEL_4_FIELDS(X), LEVEL_5_FIELDS(X) 等
-2. 在 ALL_LEVELS(X) 宏中添加对应条目
-3. 在 Features.hpp 中添加对应的触发器和更新器函数
-
-以下代码全部由宏自动生成：
-- init_L*_columns 初始化函数
-- push_L*_fields 字段推送函数
-- switch 语句处理不同层级
-- 模板特化代码
-- 张量导出逻辑
-- 字段计数和大小计算
-
-设计权衡：
-------------------
-性能 vs 灵活性：使用函数指针（快速）而非 std::function
-内存 vs 访问：使用父指针（紧凑）而非数据复制
-编译期 vs 运行期：完全宏生成，实现零运行时开销
-类型安全 vs 性能：类型擦除以支持异构存储
-
-可扩展性：
-------------
-- 行插入：O(1) 摊销复杂度
-- 层级级联：O(LEVEL_COUNT)
-- 内存增长：O(total_rows * fields_per_level)
-- 导出：完全扩展 O(total_features * max_rows)
-- 支持：1000+ 特征，单层 100M+ 行
-*/
-
-// =================================================================
-// IMPLEMENTATION MACROS - AUTO-GENERATED, USER NEVER TOUCHES
-// =================================================================
-
-class ColumnStore;
-class EventDrivenFeatureStore;
-
-// Basic building block macros for implementation
-#define ADD_COLUMN(name, type, comment) store.add_column<type>();
-#define PUSH_FIELD(name, type, comment) store.push_field(col++, data.name);
-
-// Auto-initialization call generation
-#define GENERATE_INIT_CALL(level_name, level_num, fields, struct_name) \
-  init_##level_name##_columns(stores_[level_num]);
-
-#define GENERATE_ALL_INIT_CALLS() \
-  ALL_LEVELS(GENERATE_INIT_CALL)
-
-// Template specialization for push_row
-#define GENERATE_PUSH_SPECIALIZATION(level_name, level_num, fields, struct_name) \
-  if constexpr (std::is_same_v<LevelStruct, struct_name>) {                      \
-    push_##level_name##_fields(stores_[level], row_data);                        \
-  } else
-
-#define GENERATE_ALL_PUSH_SPECIALIZATIONS() \
-  ALL_LEVELS(GENERATE_PUSH_SPECIALIZATION) { /* empty else clause */ }
-
-// Field counting for tensor export
-#define COUNT_FIELDS(name, type, comment) +1
-#define GET_FIELD_COUNT(level_name, level_num, fields, struct_name) \
-  constexpr size_t level_name##_FIELD_COUNT = 0 fields(COUNT_FIELDS);
-ALL_LEVELS(GET_FIELD_COUNT)
-
-#define ADD_FIELD_COUNT(level_name, level_num, fields, struct_name) +level_name##_FIELD_COUNT
-#define TOTAL_FIELD_COUNT (0 ALL_LEVELS(ADD_FIELD_COUNT))
-
-// Tensor export field copying
-#define COPY_FIELD_TO_EXPANDED_TENSOR(name, type, comment)                          \
-  {                                                                                 \
-    const auto &src_col = source_store.column(src_col_idx++);                       \
-    void *expanded_col = std::aligned_alloc(64, tensor.max_rows * sizeof(type));    \
-    expand_column_via_parents(level, 0, src_col, expanded_col, tensor.max_rows);    \
-    tensor.column_ptrs[tensor_col_idx] = expanded_col;                              \
-    tensor.element_sizes[tensor_col_idx] = sizeof(type);                            \
-    tensor.feature_names[tensor_col_idx] = "L" + std::to_string(level) + "_" #name; \
-    tensor_col_idx++;                                                               \
-  }
-
-#define GENERATE_TENSOR_EXPORT_CASE(level_name, level_num, fields, struct_name) \
-  case level_name##_INDEX: {                                                    \
-    size_t src_col_idx = 0;                                                     \
-    fields(COPY_FIELD_TO_EXPANDED_TENSOR) break;                                \
-  }
-
-#define GENERATE_ALL_TENSOR_EXPORT_CASES()  \
-  switch (level) {                          \
-    ALL_LEVELS(GENERATE_TENSOR_EXPORT_CASE) \
-  default:                                  \
-    break;                                  \
-  }
-
-// Level 0 direct copy (no parent expansion)
-#define COPY_L0_FIELD_DIRECT(name, type, comment)                                \
-  {                                                                              \
-    const auto &src_col = stores_[L0_INDEX].column(l0_col_idx++);                \
-    void *expanded_col = std::aligned_alloc(64, tensor.max_rows * sizeof(type)); \
-    std::memcpy(expanded_col, src_col.data(), src_col.size() * sizeof(type));    \
-    tensor.column_ptrs[tensor_col_idx] = expanded_col;                           \
-    tensor.element_sizes[tensor_col_idx] = sizeof(type);                         \
-    tensor.feature_names[tensor_col_idx] = "L0_" #name;                          \
-    tensor_col_idx++;                                                            \
-  }
-
-// Forward declarations for auto-generated functions
-#define DECLARE_LEVEL_FUNCTIONS(level_name, level_num, fields, struct_name) \
-  inline void init_##level_name##_columns(ColumnStore &store);              \
-  inline void push_##level_name##_fields(ColumnStore &store, const struct_name &data);
-ALL_LEVELS(DECLARE_LEVEL_FUNCTIONS)
-
-// Type-erased column storage for heterogeneous data types
-class TypeErasedColumn {
-  void *data_ = nullptr;
-  size_t size_ = 0;
-  size_t capacity_ = 0;
-  size_t element_size_ = 0;
-
-  void (*destroy_func_)(void *) = nullptr;
-  void (*resize_func_)(void *&, size_t &, size_t, size_t) = nullptr;
+  // Dimension metadata
+  size_t num_features_;       // Number of features per row
+  size_t num_assets_;         // Number of assets
+  size_t capacity_per_asset_; // Pre-allocated time steps per asset
+  
+  // Per-asset time tracking (each asset independently increments)
+  std::vector<size_t> per_asset_time_idx_;
+  
+  // Dynamic expansion configuration
+  static constexpr size_t EXPANSION_CHUNK = 100'000; // Expand by 100K rows each time
 
 public:
-  TypeErasedColumn() = default;
+  // ============================================================================
+  // LIFECYCLE MANAGEMENT
+  // ============================================================================
 
-  template <typename T>
-  static std::unique_ptr<TypeErasedColumn> create(size_t initial_capacity = 1024) {
-    auto col = std::make_unique<TypeErasedColumn>();
-    col->initialize_for_type<T>(initial_capacity);
-    return col;
+  LevelStorage() = default;
+
+  ~LevelStorage() {
+    if (data_)
+      std::free(data_);
+    if (parent_indices_)
+      std::free(parent_indices_);
   }
 
-  ~TypeErasedColumn() {
-    if (destroy_func_)
-      destroy_func_(data_);
-  }
+  LevelStorage(const LevelStorage &) = delete;
+  LevelStorage &operator=(const LevelStorage &) = delete;
 
-  TypeErasedColumn(const TypeErasedColumn &) = delete;
-  TypeErasedColumn &operator=(const TypeErasedColumn &) = delete;
-  TypeErasedColumn(TypeErasedColumn &&) = default;
-  TypeErasedColumn &operator=(TypeErasedColumn &&) = default;
-
-  inline void push_back(const void *element) {
-    if (size_ >= capacity_) [[unlikely]] {
-      reserve(capacity_ == 0 ? 1024 : capacity_ * 2);
+  // Initialize with pre-allocation (called once per date-level pair)
+  void initialize(size_t num_features, size_t num_assets, size_t capacity_per_asset) {
+    // Prevent double initialization
+    if (data_) {
+      std::free(data_);
+      data_ = nullptr;
     }
-    std::memcpy(static_cast<char *>(data_) + size_ * element_size_, element, element_size_);
-    ++size_;
-  }
-
-  template <typename T>
-  inline void push_back(const T &value) {
-    push_back(static_cast<const void *>(&value));
-  }
-
-  void reserve(size_t new_capacity) {
-    if (new_capacity > capacity_) {
-      resize_func_(data_, capacity_, new_capacity, element_size_);
+    if (parent_indices_) {
+      std::free(parent_indices_);
+      parent_indices_ = nullptr;
     }
+    
+    num_features_ = num_features;
+    num_assets_ = num_assets;
+    capacity_per_asset_ = capacity_per_asset;
+    
+    // Initialize per-asset time indices
+    per_asset_time_idx_.assign(num_assets, 0);
+
+    // Allocate feature data: time × asset × feature
+    const size_t total_floats = capacity_per_asset * num_assets * num_features;
+    data_ = static_cast<float *>(std::aligned_alloc(64, total_floats * sizeof(float)));
+    assert(data_ && "aligned_alloc failed for data_");
+    std::memset(data_, 0, total_floats * sizeof(float));
+
+    // Allocate parent linkage: time × asset
+    const size_t total_parent_slots = capacity_per_asset * num_assets;
+    parent_indices_ = static_cast<size_t *>(std::aligned_alloc(64, total_parent_slots * sizeof(size_t)));
+    assert(parent_indices_ && "aligned_alloc failed for parent_indices_");
+    std::memset(parent_indices_, 0, total_parent_slots * sizeof(size_t));
+  }
+  
+  // ============================================================================
+  // CAPACITY MANAGEMENT
+  // ============================================================================
+  
+  // Check if specific asset needs expansion
+  bool needs_expansion(size_t asset_id) const {
+    return per_asset_time_idx_[asset_id] >= capacity_per_asset_;
+  }
+  
+  // Expand capacity by EXPANSION_CHUNK rows
+  void expand_capacity() {
+    const size_t old_capacity = capacity_per_asset_;
+    const size_t new_capacity = old_capacity + EXPANSION_CHUNK;
+    
+    // Reallocate data array
+    const size_t old_total_floats = old_capacity * num_assets_ * num_features_;
+    const size_t new_total_floats = new_capacity * num_assets_ * num_features_;
+    
+    float *new_data = static_cast<float *>(std::aligned_alloc(64, new_total_floats * sizeof(float)));
+    assert(new_data && "aligned_alloc failed during expansion");
+    
+    std::memcpy(new_data, data_, old_total_floats * sizeof(float));
+    std::memset(new_data + old_total_floats, 0, (new_total_floats - old_total_floats) * sizeof(float));
+    std::free(data_);
+    data_ = new_data;
+    
+    // Reallocate parent indices
+    const size_t old_total_slots = old_capacity * num_assets_;
+    const size_t new_total_slots = new_capacity * num_assets_;
+    
+    size_t *new_parent_indices = static_cast<size_t *>(std::aligned_alloc(64, new_total_slots * sizeof(size_t)));
+    assert(new_parent_indices && "aligned_alloc failed during expansion");
+    
+    std::memcpy(new_parent_indices, parent_indices_, old_total_slots * sizeof(size_t));
+    std::memset(new_parent_indices + old_total_slots, 0, (new_total_slots - old_total_slots) * sizeof(size_t));
+    std::free(parent_indices_);
+    parent_indices_ = new_parent_indices;
+    
+    capacity_per_asset_ = new_capacity;
   }
 
-  size_t size() const { return size_; }
-  void *data() { return data_; }
-  const void *data() const { return data_; }
-  size_t element_size() const { return element_size_; }
+  // ============================================================================
+  // WRITE OPERATIONS
+  // ============================================================================
 
-  template <typename T>
-  T *typed_data() { return static_cast<T *>(data_); }
-  template <typename T>
-  const T *typed_data() const { return static_cast<const T *>(data_); }
+  // Push complete row for specific asset (MACRO-GENERATED specializations below)
+  // Auto-increments per-asset time index after write
+  template <typename LevelData>
+  void push_row(size_t asset_id, const LevelData &data, size_t parent_row_idx);
 
-private:
-  template <typename T>
-  void initialize_for_type(size_t initial_capacity) {
-    element_size_ = sizeof(T);
-    destroy_func_ = [](void *ptr) { std::free(ptr); };
-    resize_func_ = [](void *&data, size_t &capacity, size_t new_cap, size_t elem_size) {
-      void *new_data = std::aligned_alloc(alignof(T), new_cap * elem_size);
-      if (data) {
-        std::memcpy(new_data, data, capacity * elem_size);
-        std::free(data);
-      }
-      data = new_data;
-      capacity = new_cap;
-    };
-    reserve(initial_capacity);
+  // ============================================================================
+  // PARENT LINKAGE ACCESS
+  // ============================================================================
+
+  void set_parent_index(size_t asset_id, size_t time_idx, size_t parent_row_idx) {
+    const size_t flat_idx = time_idx * num_assets_ + asset_id;
+    parent_indices_[flat_idx] = parent_row_idx;
+  }
+
+  size_t get_parent_index(size_t asset_id, size_t time_idx) const {
+    const size_t flat_idx = time_idx * num_assets_ + asset_id;
+    return parent_indices_[flat_idx];
+  }
+
+  // ============================================================================
+  // TIME INDEX MANAGEMENT (Per-asset)
+  // ============================================================================
+
+  size_t get_time_idx(size_t asset_id) const { 
+    return per_asset_time_idx_[asset_id]; 
+  }
+  
+  size_t get_max_time_idx() const {
+    return per_asset_time_idx_.empty() ? 0 : 
+           *std::max_element(per_asset_time_idx_.begin(), per_asset_time_idx_.end());
+  }
+
+  // ============================================================================
+  // METADATA ACCESSORS
+  // ============================================================================
+
+  size_t get_num_assets() const { return num_assets_; }
+  size_t get_num_features() const { return num_features_; }
+  size_t get_capacity() const { return capacity_per_asset_; }
+  
+  // ============================================================================
+  // DATA EXPORT
+  // ============================================================================
+  
+  // Get raw pointer for zero-copy export
+  const float* get_data_ptr() const { return data_; }
+  const size_t* get_parent_indices_ptr() const { return parent_indices_; }
+  
+  // Get specific row (asset × time)
+  const float* get_row(size_t asset_id, size_t time_idx) const {
+    const size_t row_offset = (time_idx * num_assets_ + asset_id) * num_features_;
+    return data_ + row_offset;
   }
 };
 
-// Columnar data store - each field is stored as a separate column
-class ColumnStore {
-  std::vector<std::unique_ptr<TypeErasedColumn>> columns_;
-  size_t row_count_ = 0;
+// ============================================================================
+// DAILY FEATURE TENSOR - MULTI-LEVEL STORAGE FOR ONE DATE
+// ============================================================================
+// Contains all levels (L0, L1, L2, ...) for a single trading date
+// Each level stores data for all assets with shared time indices
+
+class DailyFeatureTensor {
+private:
+  LevelStorage levels_[LEVEL_COUNT]; // Storage for each level
+  std::string date_;                 // Trading date identifier
+  size_t num_assets_;                // Number of assets in this tensor
 
 public:
-  ColumnStore() = default;
+  // ============================================================================
+  // INITIALIZATION
+  // ============================================================================
 
-  template <typename T>
-  size_t add_column(size_t initial_capacity = 1024) {
-    columns_.push_back(TypeErasedColumn::create<T>(initial_capacity));
-    return columns_.size() - 1;
-  }
-
-  template <typename T>
-  inline void push_field(size_t column_idx, const T &value) {
-    columns_[column_idx]->push_back(value);
-  }
-
-  inline void finish_row() {
-    ++row_count_;
-  }
-
-  void reserve_all(size_t capacity) {
-    for (auto &col : columns_) {
-      col->reserve(capacity);
+  DailyFeatureTensor(const std::string &date, size_t num_assets)
+      : date_(date), num_assets_(num_assets) {
+    // Initialize all levels with their respective capacities
+    for (size_t level_idx = 0; level_idx < LEVEL_COUNT; ++level_idx) {
+      levels_[level_idx].initialize(
+          FIELDS_PER_LEVEL[level_idx],
+          num_assets,
+          MAX_ROWS_PER_LEVEL[level_idx]);
     }
   }
 
-  size_t size() const { return row_count_; }
-  size_t column_count() const { return columns_.size(); }
+  // ============================================================================
+  // LEVEL ACCESS
+  // ============================================================================
 
-  TypeErasedColumn &column(size_t i) { return *columns_[i]; }
-  const TypeErasedColumn &column(size_t i) const { return *columns_[i]; }
+  LevelStorage &get_level(size_t level_idx) { return levels_[level_idx]; }
+  const LevelStorage &get_level(size_t level_idx) const { return levels_[level_idx]; }
 
-  template <typename T>
-  T *column_data(size_t column_idx) {
-    return columns_[column_idx]->template typed_data<T>();
-  }
+  // ============================================================================
+  // METADATA ACCESS
+  // ============================================================================
 
-  template <typename T>
-  const T *column_data(size_t column_idx) const {
-    return columns_[column_idx]->template typed_data<T>();
-  }
+  const std::string &get_date() const { return date_; }
+  size_t get_num_assets() const { return num_assets_; }
 };
 
-// Event-driven feature store with nested trigger mechanism
-class EventDrivenFeatureStore {
+// ============================================================================
+// GLOBAL FEATURE STORE - DATE-SHARDED MULTI-ASSET MANAGER
+// ============================================================================
+// Top-level container managing all dates and assets
+// Optimized for hot path: cached pointers, minimal lookups
+// Thread-safe: Each asset has independent thread, no cross-asset contention
+
+class GlobalFeatureStore {
 private:
-  // Columnar storage for each level
-  std::array<ColumnStore, LEVEL_COUNT> stores_;
+  // Date-sharded storage (ordered for chronological export)
+  std::map<std::string, std::unique_ptr<DailyFeatureTensor>> daily_tensors_;
+  mutable std::shared_mutex map_mutex_; // Protects map structure only
+  
+  size_t num_assets_;
 
-  // Parent row indices for nested pointer mechanism
-  std::array<std::vector<size_t>, LEVEL_COUNT> parent_indices_;
-
-  // High-performance trigger functions - function pointers for inline optimization
-  bool (*triggers_[LEVEL_COUNT])() = {nullptr};
-  void (*updaters_[LEVEL_COUNT])(EventDrivenFeatureStore &, size_t) = {nullptr};
-
-  // Current latest row index for each level
-  std::array<size_t, LEVEL_COUNT> current_row_indices_;
+  // Per-asset cached pointers (HOT PATH optimization)
+  std::vector<DailyFeatureTensor*> current_tensors_;
+  std::vector<std::string> current_dates_;
 
 public:
-  EventDrivenFeatureStore() {
-    for (size_t i = 0; i < LEVEL_COUNT; ++i) {
-      current_row_indices_[i] = 0;
-    }
-    // AUTO-INITIALIZE all levels at construction
-    initialize_all_levels();
-  }
+  // ============================================================================
+  // INITIALIZATION
+  // ============================================================================
 
-  // Core event processing - nested trigger mechanism with inline optimization
-  inline void on_event() {
-    // Check triggers from highest level down to level 0
-    for (int level = LEVEL_COUNT - 1; level >= 0; --level) {
-      if (triggers_[level] && triggers_[level]()) {
-        cascade_update(level);
-        break;
+  explicit GlobalFeatureStore(size_t num_assets)
+      : num_assets_(num_assets), 
+        current_tensors_(num_assets, nullptr),
+        current_dates_(num_assets) {}
+
+  // ============================================================================
+  // DATE SWITCHING (Called by main.cpp when asset moves to next date)
+  // ============================================================================
+
+  // Switch asset to new date - updates cached pointer
+  void switch_date(size_t asset_id, const std::string &date) {
+    assert(asset_id < num_assets_ && "Invalid asset_id");
+    current_dates_[asset_id] = date;
+    
+    // Double-checked locking for tensor creation
+    DailyFeatureTensor* tensor;
+    {
+      std::shared_lock lock(map_mutex_);
+      auto it = daily_tensors_.find(date);
+      if (it != daily_tensors_.end()) {
+        tensor = it->second.get();
+        current_tensors_[asset_id] = tensor;
+        return;
       }
     }
-  }
-
-  // Set high-performance trigger function (function pointer for inline)
-  void set_trigger(size_t level, bool (*trigger)()) {
-    if (level < LEVEL_COUNT) {
-      triggers_[level] = trigger;
-    }
-  }
-
-  // Set high-performance updater function (function pointer for inline)
-  void set_updater(size_t level, void (*updater)(EventDrivenFeatureStore &, size_t)) {
-    if (level < LEVEL_COUNT) {
-      updaters_[level] = updater;
-    }
-  }
-
-  // AUTO-INITIALIZE all levels - MACRO-GENERATED
-  void initialize_all_levels() {
-    GENERATE_ALL_INIT_CALLS()
-  }
-
-  // Push a complete row to a level - AUTO-GENERATED template specializations
-  template <typename LevelStruct>
-  inline void push_row(size_t level, const LevelStruct &row_data, size_t parent_row_idx = 0) {
-    if (level >= LEVEL_COUNT)
-      return;
-
-    // MACRO-GENERATED: Handles all current and future level types automatically
-    GENERATE_ALL_PUSH_SPECIALIZATIONS()
-
-    parent_indices_[level].push_back(parent_row_idx);
-    stores_[level].finish_row();
-    current_row_indices_[level] = stores_[level].size() - 1;
-  }
-
-  // Access interfaces
-  ColumnStore &get_store(size_t level) { return stores_[level]; }
-  const ColumnStore &get_store(size_t level) const { return stores_[level]; }
-
-  size_t get_row_count(size_t level) const {
-    return level < LEVEL_COUNT ? stores_[level].size() : 0;
-  }
-
-  size_t get_current_row_index(size_t level) const {
-    return level < LEVEL_COUNT ? current_row_indices_[level] : 0;
-  }
-
-  size_t get_parent_row_index(size_t level, size_t row_idx) const {
-    if (level == 0 || level >= LEVEL_COUNT || row_idx >= parent_indices_[level].size()) {
-      return 0;
-    }
-    return parent_indices_[level][row_idx];
-  }
-
-  // Expanded tensor structure for ML training
-  struct ExpandedTensor {
-    // Flattened feature matrix: [total_features x max_rows]
-    std::vector<void *> column_ptrs;        // Pointers to each feature column
-    std::vector<size_t> element_sizes;      // Size of each element type
-    std::vector<std::string> feature_names; // Feature names for debugging
-    size_t total_features = 0;              // Total number of features across all levels
-    size_t max_rows = 0;                    // Maximum rows (level 0 row count)
-
-    template <typename T>
-    T *get_feature_column(size_t feature_idx) {
-      return static_cast<T *>(column_ptrs[feature_idx]);
-    }
-  };
-
-  // Export to expanded tensor - MACRO-GENERATED for all levels
-  ExpandedTensor to_expanded_tensor() const {
-    ExpandedTensor tensor;
-
-    // Get maximum rows (from level 0)
-    tensor.max_rows = stores_[L0_INDEX].size();
-    if (tensor.max_rows == 0)
-      return tensor;
-
-    // MACRO-GENERATED: Calculate total features across all levels
-    tensor.total_features = TOTAL_FIELD_COUNT;
-
-    // Allocate expanded columns
-    tensor.column_ptrs.resize(tensor.total_features);
-    tensor.element_sizes.resize(tensor.total_features);
-    tensor.feature_names.resize(tensor.total_features);
-
-    size_t tensor_col_idx = 0;
-
-    // Level 0: Direct copy (no parent expansion needed)
-    size_t l0_col_idx = 0;
-    LEVEL_0_FIELDS(COPY_L0_FIELD_DIRECT)
-
-    // Higher levels: Expand via parent pointers - MACRO-GENERATED
-    for (size_t level = 1; level < LEVEL_COUNT; ++level) {
-      const auto &source_store = stores_[level];
-      if (source_store.size() == 0)
-        continue;
-
-      // MACRO-GENERATED: Handles all current and future levels automatically
-      GENERATE_ALL_TENSOR_EXPORT_CASES()
-    }
-
-    return tensor;
-  }
-
-  // Cleanup expanded tensor memory
-  static void free_expanded_tensor(ExpandedTensor &tensor) {
-    for (void *ptr : tensor.column_ptrs) {
-      if (ptr)
-        std::free(ptr);
-    }
-    tensor.column_ptrs.clear();
-    tensor.element_sizes.clear();
-    tensor.feature_names.clear();
-  }
-
-private:
-  // Cascade update implementation with inline optimization
-  inline void cascade_update(size_t trigger_level) {
-    for (size_t level = 0; level <= trigger_level; ++level) {
-      if (updaters_[level]) {
-        size_t parent_row_idx = (level == 0) ? 0 : current_row_indices_[level - 1];
-        updaters_[level](*this, parent_row_idx);
-      }
-    }
-  }
-
-  // Expand higher-level column to level 0 size by following parent pointers
-  void expand_column_via_parents(size_t level, size_t,
-                                 const TypeErasedColumn &source_col,
-                                 void *dest_buffer, size_t dest_rows) const {
-    size_t elem_size = source_col.element_size();
-    const uint8_t *source_data = static_cast<const uint8_t *>(source_col.data());
-    uint8_t *dest_data = static_cast<uint8_t *>(dest_buffer);
-
-    // For each level 0 row, find corresponding higher-level value
-    for (size_t l0_row = 0; l0_row < dest_rows; ++l0_row) {
-      size_t higher_level_row = find_corresponding_higher_level_row(level, l0_row);
-
-      if (higher_level_row < source_col.size()) {
-        std::memcpy(dest_data + l0_row * elem_size,
-                    source_data + higher_level_row * elem_size,
-                    elem_size);
+    
+    // Need to create new tensor
+    {
+      std::unique_lock lock(map_mutex_);
+      auto it = daily_tensors_.find(date);
+      if (it == daily_tensors_.end()) {
+        auto new_tensor = std::make_unique<DailyFeatureTensor>(date, num_assets_);
+        tensor = new_tensor.get();
+        daily_tensors_.emplace(date, std::move(new_tensor));
       } else {
-        // Fill with zeros if no corresponding row found
-        std::memset(dest_data + l0_row * elem_size, 0, elem_size);
+        tensor = it->second.get();
       }
     }
+    
+    current_tensors_[asset_id] = tensor;
+  }
+  
+  // Legacy compatibility (redirects to switch_date)
+  void set_current_date(size_t asset_id, const std::string &date,
+                        [[maybe_unused]] const size_t *level_reserve_sizes = nullptr) {
+    switch_date(asset_id, date);
   }
 
-  // Find corresponding higher-level row for a given level 0 row
-  size_t find_corresponding_higher_level_row(size_t target_level, size_t l0_row) const {
-    if (target_level == 0)
-      return l0_row;
+  // ============================================================================
+  // HOT PATH: ULTRA-FAST PUSH (Called billions of times)
+  // ============================================================================
+  
+  // Single-line push with automatic parent linking and time increment
+  // No map lookup, no string comparison - just cached pointer dereference
+  template <typename LevelData>
+  inline void push(size_t level_idx, size_t asset_id, const LevelData* data) {
+    DailyFeatureTensor* tensor = current_tensors_[asset_id];
+    assert(tensor && "Call switch_date before push");
+    
+    LevelStorage& level = tensor->get_level(level_idx);
+    
+    // Auto-determine parent index from parent level
+    size_t parent_idx = 0;
+    if (level_idx > 0) {
+      parent_idx = tensor->get_level(level_idx - 1).get_time_idx(asset_id);
+    }
+    
+    level.push_row(asset_id, *data, parent_idx);
+  }
 
-    // Walk up the parent chain to find the corresponding row at target_level
-    size_t current_row = l0_row;
+  // ============================================================================
+  // TENSOR ACCESS (For advanced use)
+  // ============================================================================
 
-    for (size_t level = 1; level <= target_level; ++level) {
-      // Find the most recent row in 'level' that has parent_row <= current_row
-      size_t best_row = 0;
-      for (size_t row = 0; row < parent_indices_[level].size(); ++row) {
-        if (parent_indices_[level][row] <= current_row) {
-          best_row = row;
-        } else {
-          break;
+  DailyFeatureTensor* get_tensor(const std::string &date) const {
+    std::shared_lock lock(map_mutex_);
+    auto it = daily_tensors_.find(date);
+    return it != daily_tensors_.end() ? it->second.get() : nullptr;
+  }
+  
+  const std::string& get_current_date(size_t asset_id) const {
+    return current_dates_[asset_id];
+  }
+
+  // ============================================================================
+  // EXPORT: HIERARCHICAL TENSOR WITH PARENT LINKING
+  // ============================================================================
+  
+  // Export single date as [time × asset × all_level_features]
+  // Features arranged as: [L0_features | L1_features | L2_features | ...]
+  // Each row follows parent chain to link multi-level features
+  std::vector<float> export_date_tensor(const std::string& date) const {
+    DailyFeatureTensor* tensor = get_tensor(date);
+    if (!tensor) return {};
+    
+    // Calculate dimensions
+    const size_t max_time = tensor->get_level(L0_INDEX).get_max_time_idx();
+    if (max_time == 0) return {};
+    
+    size_t total_features = 0;
+    for (size_t lvl = 0; lvl < LEVEL_COUNT; ++lvl) {
+      total_features += FIELDS_PER_LEVEL[lvl];
+    }
+    
+    // Allocate output: [time × asset × total_features]
+    std::vector<float> output(max_time * num_assets_ * total_features, 0.0f);
+    
+    // Export each asset independently
+    for (size_t asset_id = 0; asset_id < num_assets_; ++asset_id) {
+      const size_t asset_time = tensor->get_level(L0_INDEX).get_time_idx(asset_id);
+      
+      for (size_t t = 0; t < asset_time; ++t) {
+        float* row_out = output.data() + (t * num_assets_ + asset_id) * total_features;
+        size_t feature_offset = 0;
+        
+        // Follow parent chain across levels
+        size_t parent_time_idx = t;
+        for (size_t lvl = 0; lvl < LEVEL_COUNT; ++lvl) {
+          const LevelStorage& level = tensor->get_level(lvl);
+          const float* src = level.get_row(asset_id, parent_time_idx);
+          const size_t num_features = FIELDS_PER_LEVEL[lvl];
+          
+          std::memcpy(row_out + feature_offset, src, num_features * sizeof(float));
+          feature_offset += num_features;
+          
+          // Get parent index for next level
+          if (lvl + 1 < LEVEL_COUNT) {
+            parent_time_idx = level.get_parent_index(asset_id, parent_time_idx);
+          }
         }
       }
-      current_row = best_row;
     }
+    
+    return output;
+  }
 
-    return current_row;
+  // ============================================================================
+  // METADATA ACCESS
+  // ============================================================================
+
+  size_t get_num_assets() const { return num_assets_; }
+  
+  size_t get_num_dates() const { 
+    std::shared_lock lock(map_mutex_);
+    return daily_tensors_.size(); 
   }
 };
 
-// =================================================================
-// AUTO-GENERATED FUNCTIONS - AUTOMATICALLY SCALES TO ALL LEVELS
-// =================================================================
+// ============================================================================
+// AUTO-GENERATED: push_row TEMPLATE SPECIALIZATIONS
+// ============================================================================
+// Fully macro-driven generation - automatically scales to all levels
+// Each specialization performs:
+// 1. Check capacity and auto-expand if needed
+// 2. Get per-asset time index (independent for each asset)
+// 3. Compute flat array offset: (time × num_assets + asset) × num_features
+// 4. Memcpy struct fields to destination
+// 5. Record parent row index for hierarchical linking
+// 6. Auto-increment per-asset time index
 
-// MACRO-GENERATED: Column initialization functions for all levels
-#define DEFINE_INIT_FUNCTION(level_name, level_num, fields, struct_name) \
-  inline void init_##level_name##_columns(ColumnStore &store) {          \
-    fields(ADD_COLUMN)                                                   \
+#define GENERATE_PUSH_ROW_SPECIALIZATION(level_name, level_num, fields)            \
+  template <>                                                                      \
+  inline void LevelStorage::push_row<Level##level_num##Data>(                      \
+      size_t asset_id,                                                             \
+      const Level##level_num##Data &data,                                          \
+      size_t parent_row_idx) {                                                     \
+    /* Auto-expand if this asset needs more capacity */                            \
+    if (needs_expansion(asset_id)) [[unlikely]] {                                  \
+      expand_capacity();                                                           \
+    }                                                                              \
+    /* Use per-asset time index */                                                 \
+    const size_t time_idx = per_asset_time_idx_[asset_id];                         \
+    const size_t row_offset = (time_idx * num_assets_ + asset_id) * num_features_; \
+    float *dest = data_ + row_offset;                                              \
+    const float *src = reinterpret_cast<const float *>(&data);                     \
+    std::memcpy(dest, src, num_features_ * sizeof(float));                         \
+    parent_indices_[time_idx * num_assets_ + asset_id] = parent_row_idx;           \
+    /* Auto-increment this asset's time index */                                   \
+    per_asset_time_idx_[asset_id]++;                                               \
   }
-ALL_LEVELS(DEFINE_INIT_FUNCTION)
 
-// MACRO-GENERATED: Field pushing functions for all levels
-#define DEFINE_PUSH_FUNCTION(level_name, level_num, fields, struct_name)                \
-  inline void push_##level_name##_fields(ColumnStore &store, const struct_name &data) { \
-    size_t col = 0;                                                                     \
-    fields(PUSH_FIELD)                                                                  \
-  }
-ALL_LEVELS(DEFINE_PUSH_FUNCTION)
-
-// Global instance
-inline EventDrivenFeatureStore &get_feature_store() {
-  static EventDrivenFeatureStore instance;
-  return instance;
-}
+// Generate specializations for all levels
+ALL_LEVELS(GENERATE_PUSH_ROW_SPECIALIZATION)
