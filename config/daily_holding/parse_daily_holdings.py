@@ -13,7 +13,7 @@ def parse_daily_holdings():
     df["买入日期"] = pd.to_datetime(df["买入日期"])
     df["卖出日期"] = pd.to_datetime(df["卖出日期"])
 
-    # === 目标1：生成每日持仓列表 ===
+    # === 目标1:生成每日持仓列表 ===
     # 找出最早买入和最晚卖出时间，构造完整日期序列
     all_days = pd.date_range(df["买入日期"].min(), df["卖出日期"].max(), freq='D')
 
@@ -24,7 +24,7 @@ def parse_daily_holdings():
         holding_today = df[(df["买入日期"] <= day) & (df["卖出日期"] > day)]
         daily_holdings[str(day.date())] = list(holding_today["股票代码"])
 
-    # === 目标2：提取股票信息字典 ===
+    # === 目标2:提取股票信息字典 ===
     stock_info = {}
     for _, row in tqdm(df.iterrows()):
         code = row["股票代码"]

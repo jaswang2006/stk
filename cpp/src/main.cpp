@@ -30,18 +30,18 @@
 //
 // 【核心设计】
 //   数据结构: SharedState 统一管理所有共享状态
-//     - assets[]: 所有资产信息（元数据 + 每日统计 + 文件路径 + 状态位图）
-//     - all_dates[]: 全局交易日序列（用于横截面因子同步）
+//     - assets[]: 所有资产信息(元数据 + 每日统计 + 文件路径 + 状态位图)
+//     - all_dates[]: 全局交易日序列(用于横截面因子同步)
 //
 //   Phase 1 (Encoding): Asset并行，Date乱序
 //     - Worker领取asset，shuffle日期顺序以分散RAR访问压力
-//     - RAR锁（阻塞模式）：确保同一压缩包不被并发解压
+//     - RAR锁(阻塞模式):确保同一压缩包不被并发解压
 //     - 记录统计信息到 asset.date_info[]，零额外扫描
 //
 //   Phase 2 (Analysis): Date-first遍历，横截面同步
 //     - 所有worker按 all_dates[] 顺序同步推进
 //     - 每个date处理完成后可插入横截面因子计算
-//     - 无锁读取：所有路径/统计信息已在Phase 1缓存
+//     - 无锁读取:所有路径/统计信息已在Phase 1缓存
 //
 // 【数据流】
 //   RAR → CSV → L2结构 → Zstd压缩 → Binary文件

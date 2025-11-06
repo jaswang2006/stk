@@ -11,7 +11,7 @@
 // 控制选项
 // ═══════════════════════════════════════════════════════════════════════════
 // #define MEMPOOL_WARN_ON_EXPANSION  // 打印扩容日志
-// #define MEMPOOL_ENABLE_STATS       // 启用统计功能（零开销）
+// #define MEMPOOL_ENABLE_STATS       // 启用统计功能(零开销)
 
 #ifdef MEMPOOL_WARN_ON_EXPANSION
 #include "misc/logging.hpp"
@@ -27,22 +27,22 @@
 高性能内存管理系统
 ═══════════════════════════════════════════════════════════════════════════
 
-架构层次（从底层到应用层）：
-  [底层] BumpPool<T>    - 极速分配池（不支持回收）
-  [底层] BitmapPool<T>  - 通用分配池（支持O(1)回收）
-  [应用] HashMap<K,V,P> - 配置化哈希表（Pool可选）
+架构层次(从底层到应用层):
+  [底层] BumpPool<T>    - 极速分配池(不支持回收)
+  [底层] BitmapPool<T>  - 通用分配池(支持O(1)回收)
+  [应用] HashMap<K,V,P> - 配置化哈希表(Pool可选)
   [别名] BumpDict<K,V>   - 基于BumpPool的字典
   [别名] BitmapDict<K,V> - 基于BitmapPool的字典
 
-性能指标：
+性能指标:
   BumpPool:   1-3 cycles 分配
   BitmapPool: 3-7 cycles 分配 + 3-7 cycles 回收
   HashMap:    +3-10 cycles 哈希开销
 
-内存模型：
-  - 分块存储：每块 2^N 个对象（目标 ~1MB）
-  - 自动扩容：指针永久有效
-  - 缓存友好：块内连续，64字节对齐
+内存模型:
+  - 分块存储:每块 2^N 个对象(目标 ~1MB)
+  - 自动扩容:指针永久有效
+  - 缓存友好:块内连续，64字节对齐
 
 ═══════════════════════════════════════════════════════════════════════════
 */
@@ -50,7 +50,7 @@
 namespace MemPool {
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 第一层：配置常量
+// 第一层:配置常量
 // ═══════════════════════════════════════════════════════════════════════════
 
 namespace Config {
@@ -59,7 +59,7 @@ static constexpr size_t DEFAULT_CAPACITY = 10000;  // 默认初始容量
 static constexpr size_t MIN_BUCKET_COUNT = 16;     // HashMap最小桶数
 static constexpr double TARGET_LOAD_FACTOR = 0.50; // HashMap目标负载因子 (降低以减少冲突)
 
-// 自适应块大小：根据对象大小自动选择，目标 ~1MB/块
+// 自适应块大小:根据对象大小自动选择，目标 ~1MB/块
 template <typename T>
 struct ChunkConfig {
   static constexpr size_t SHIFT =
@@ -72,13 +72,13 @@ struct ChunkConfig {
                            : // 128B × 2^13 = 1.0 MB
           12;                // 256B × 2^12 = 1.0 MB
 
-  static constexpr size_t SIZE = size_t{1} << SHIFT; // 块大小（对象数）
-  static constexpr size_t MASK = SIZE - 1;           // 块掩码（快速取模）
+  static constexpr size_t SIZE = size_t{1} << SHIFT; // 块大小(对象数)
+  static constexpr size_t MASK = SIZE - 1;           // 块掩码(快速取模)
 };
 } // namespace Config
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 第二层：辅助函数
+// 第二层:辅助函数
 // ═══════════════════════════════════════════════════════════════════════════
 
 namespace detail {
@@ -96,7 +96,7 @@ template <typename T>
 } // namespace detail
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 第三层：BumpPool（极简分配器，渐进式引入概念）
+// 第三层:BumpPool(极简分配器，渐进式引入概念)
 // ═══════════════════════════════════════════════════════════════════════════
 
 template <typename T>
@@ -137,30 +137,30 @@ public:
   BumpPool &operator=(BumpPool &&) = delete;
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 核心操作（按使用频率排序）
+  // 核心操作(按使用频率排序)
   // ─────────────────────────────────────────────────────────────────────────
 
-  // 1. 分配：返回未初始化的内存
+  // 1. 分配:返回未初始化的内存
   [[nodiscard, gnu::hot, gnu::always_inline]]
   inline T *allocate() {
     size_t slot_idx = num_allocated_++;
 
-    // 快速路径：当前块内有空间
+    // 快速路径:当前块内有空间
     if (slot_idx < cache_limit_) [[likely]] {
       return &cache_chunk_[slot_idx & Chunk::MASK];
     }
 
-    // 慢速路径：切换到新块
+    // 慢速路径:切换到新块
     return allocate_slow_path(slot_idx);
   }
 
-  // 2. 回收：Bump语义不支持
+  // 2. 回收:Bump语义不支持
   [[gnu::always_inline]]
   inline void deallocate(T *) noexcept {
     // Bump Pool不回收单个对象
   }
 
-  // 3. 构造：分配 + 初始化
+  // 3. 构造:分配 + 初始化
   template <typename... Args>
   [[nodiscard, gnu::hot, gnu::always_inline]]
   inline T *construct(Args &&...args) {
@@ -172,7 +172,7 @@ public:
     return ptr;
   }
 
-  // 4. 重置：析构所有对象，重置状态
+  // 4. 重置:析构所有对象，重置状态
   void reset(bool shrink = false) {
     // 析构所有已分配对象
     if constexpr (!std::is_trivially_destructible_v<T>) {
@@ -186,7 +186,7 @@ public:
     // 重置分配计数
     num_allocated_ = 0;
 
-    // 可选：释放多余内存
+    // 可选:释放多余内存
     if (shrink && chunks_.size() > num_initial_chunks_) {
       for (size_t i = num_initial_chunks_; i < chunks_.size(); ++i) {
         operator delete[](chunks_[i], std::align_val_t{Config::CACHE_LINE_SIZE});
@@ -234,15 +234,15 @@ private:
   // ─────────────────────────────────────────────────────────────────────────
 
   std::vector<T *> chunks_;   // 内存块数组
-  size_t num_allocated_;      // 已分配对象数（单调递增）
-  size_t num_initial_chunks_; // 初始块数（用于shrink）
+  size_t num_allocated_;      // 已分配对象数(单调递增)
+  size_t num_initial_chunks_; // 初始块数(用于shrink)
 
-  // 快速路径缓存（避免重复计算）
+  // 快速路径缓存(避免重复计算)
   T *cache_chunk_;     // 当前块指针
-  size_t cache_limit_; // 当前块上限（全局索引）
+  size_t cache_limit_; // 当前块上限(全局索引)
 
 #ifdef MEMPOOL_ENABLE_STATS
-  size_t num_constructed_ = 0; // 统计：构造次数
+  size_t num_constructed_ = 0; // 统计:构造次数
 #endif
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -282,7 +282,7 @@ private:
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 第四层：BitmapPool（引入回收机制）
+// 第四层:BitmapPool(引入回收机制)
 // ═══════════════════════════════════════════════════════════════════════════
 
 template <typename T>
@@ -321,13 +321,13 @@ public:
   BitmapPool &operator=(BitmapPool &&) = delete;
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 核心操作（按使用频率排序）
+  // 核心操作(按使用频率排序)
   // ─────────────────────────────────────────────────────────────────────────
 
-  // 1. 分配：优先复用空闲slot，否则扩展
+  // 1. 分配:优先复用空闲slot，否则扩展
   [[nodiscard, gnu::hot]]
   T *allocate() {
-    // 策略1：从已用区域找空闲slot（热路径，cache友好）
+    // 策略1:从已用区域找空闲slot(热路径，cache友好)
     size_t search_limit = (peak_allocated_ + 63) >> 6; // 转换为word数
     for (size_t word_idx = 0; word_idx < search_limit; ++word_idx) {
       uint64_t free_bits = freelist_[word_idx];
@@ -351,7 +351,7 @@ public:
       }
     }
 
-    // 策略2：扩展到新区域（冷路径）
+    // 策略2:扩展到新区域(冷路径)
     size_t slot_idx = peak_allocated_++;
     size_t chunk_idx = slot_idx >> Chunk::SHIFT;
 
@@ -371,7 +371,7 @@ public:
     return &chunks_[chunk_idx][local_idx];
   }
 
-  // 2. 回收：析构 + 标记空闲
+  // 2. 回收:析构 + 标记空闲
   [[gnu::hot, gnu::always_inline]]
   inline void deallocate(T *ptr) {
     if (!ptr) [[unlikely]]
@@ -386,7 +386,7 @@ public:
       ptr->~T();
     }
 
-    // 二分查找所属chunk（O(log N)）
+    // 二分查找所属chunk(O(log N))
     size_t chunk_idx = find_chunk_index(ptr);
     if (chunk_idx == SIZE_MAX) [[unlikely]] {
       assert(false && "BitmapPool::deallocate: pointer not owned");
@@ -405,7 +405,7 @@ public:
     --num_alive_;
   }
 
-  // 3. 构造：分配 + 初始化
+  // 3. 构造:分配 + 初始化
   template <typename... Args>
   [[nodiscard, gnu::hot]]
   T *construct(Args &&...args) {
@@ -417,7 +417,7 @@ public:
     return ptr;
   }
 
-  // 4. 重置：析构所有对象，重置状态
+  // 4. 重置:析构所有对象，重置状态
   void reset(bool shrink = false) {
 #ifdef MEMPOOL_ENABLE_STATS
     if (num_constructed_ > 0) {
@@ -431,7 +431,7 @@ public:
         size_t word_idx = i >> 6;
         size_t bit_idx = i & 63;
 
-        // 检查是否被占用（bit为0表示占用）
+        // 检查是否被占用(bit为0表示占用)
         if ((freelist_[word_idx] & (1ULL << bit_idx)) == 0) {
           size_t chunk_idx = i >> Chunk::SHIFT;
           size_t local_idx = i & Chunk::MASK;
@@ -440,12 +440,12 @@ public:
       }
     }
 
-    // 重置状态（所有bit设为1表示空闲）
+    // 重置状态(所有bit设为1表示空闲)
     std::fill(freelist_.begin(), freelist_.end(), ~0ULL);
     num_alive_ = 0;
     peak_allocated_ = 0;
 
-    // 可选：释放多余内存
+    // 可选:释放多余内存
     if (shrink && chunks_.size() > num_initial_chunks_) {
       for (size_t i = num_initial_chunks_; i < chunks_.size(); ++i) {
         operator delete[](chunks_[i], std::align_val_t{Config::CACHE_LINE_SIZE});
@@ -522,23 +522,23 @@ private:
   // ─────────────────────────────────────────────────────────────────────────
 
   std::vector<T *> chunks_;                  // 内存块数组
-  std::vector<uint64_t> freelist_;           // 空闲位图（1=空闲，0=占用）
+  std::vector<uint64_t> freelist_;           // 空闲位图(1=空闲，0=占用)
   std::vector<size_t> sorted_chunk_indices_; // 按地址排序的chunk索引
 
   size_t num_alive_;          // 当前存活对象数
-  size_t peak_allocated_;     // 历史峰值（水位线）
-  size_t num_initial_chunks_; // 初始块数（用于shrink）
+  size_t peak_allocated_;     // 历史峰值(水位线)
+  size_t num_initial_chunks_; // 初始块数(用于shrink)
 
 #ifdef MEMPOOL_ENABLE_STATS
-  size_t num_constructed_ = 0; // 统计：构造次数
-  size_t num_deallocated_ = 0; // 统计：析构次数
+  size_t num_constructed_ = 0; // 统计:构造次数
+  size_t num_deallocated_ = 0; // 统计:析构次数
 #endif
 
   // ─────────────────────────────────────────────────────────────────────────
   // 内部辅助
   // ─────────────────────────────────────────────────────────────────────────
 
-  // 二分查找指针所属的chunk（O(log N)）
+  // 二分查找指针所属的chunk(O(log N))
   [[gnu::hot]]
   size_t find_chunk_index(T *ptr) const noexcept {
     size_t left = 0, right = sorted_chunk_indices_.size();
@@ -565,11 +565,11 @@ private:
     void *raw = operator new[](bytes, std::align_val_t{Config::CACHE_LINE_SIZE});
     chunks_.push_back(static_cast<T *>(raw));
 
-    // 扩展freelist（每个chunk需要 SIZE/64 个word）
+    // 扩展freelist(每个chunk需要 SIZE/64 个word)
     size_t bitmap_words = Chunk::SIZE >> 6;
     freelist_.insert(freelist_.end(), bitmap_words, ~0ULL);
 
-    // 维护地址排序索引（用于快速查找）
+    // 维护地址排序索引(用于快速查找)
     size_t new_idx = chunks_.size() - 1;
     T *new_base = chunks_.back();
     auto it = std::lower_bound(
@@ -599,7 +599,7 @@ private:
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 第五层：HashMap（应用层，基于Pool构建）
+// 第五层:HashMap(应用层，基于Pool构建)
 // ═══════════════════════════════════════════════════════════════════════════
 
 template <typename Key, typename Value, template <typename> class Pool = BitmapPool,
@@ -620,10 +620,10 @@ private:
   std::vector<Node *> buckets_; // 哈希桶数组
   Hash hasher_;                 // 哈希函数
   size_t num_entries_;          // 当前条目数
-  size_t bucket_mask_;          // 桶掩码（count-1，用于快速取模）
+  size_t bucket_mask_;          // 桶掩码(count-1，用于快速取模)
 
 #ifdef MEMPOOL_ENABLE_STATS
-  size_t num_erased_ = 0; // 统计：删除次数
+  size_t num_erased_ = 0; // 统计:删除次数
 #endif
 
 public:
@@ -633,7 +633,7 @@ public:
 
   explicit HashMap(size_t expected_size = Config::DEFAULT_CAPACITY)
       : node_pool_(expected_size), num_entries_(0) {
-    // 计算桶数：目标负载因子 ~0.67，向上对齐到2的幂
+    // 计算桶数:目标负载因子 ~0.67，向上对齐到2的幂
     size_t target = std::max(Config::MIN_BUCKET_COUNT,
                              static_cast<size_t>(expected_size / Config::TARGET_LOAD_FACTOR));
     size_t bucket_count = detail::round_up_pow2(target);
@@ -651,10 +651,10 @@ public:
   HashMap &operator=(HashMap &&) = delete;
 
   // ─────────────────────────────────────────────────────────────────────────
-  // 核心操作（按使用频率排序）
+  // 核心操作(按使用频率排序)
   // ─────────────────────────────────────────────────────────────────────────
 
-  // 1. 查找：返回值指针（nullptr表示不存在）
+  // 1. 查找:返回值指针(nullptr表示不存在)
   [[nodiscard, gnu::hot, gnu::always_inline]]
   inline Value *find(const Key &key) {
     size_t bucket_idx = hasher_(key) & bucket_mask_;
@@ -680,7 +680,7 @@ public:
     return const_cast<HashMap *>(this)->find(key);
   }
 
-  // 2. 插入/更新：存在则更新，不存在则插入
+  // 2. 插入/更新:存在则更新，不存在则插入
   [[gnu::hot]]
   bool insert(const Key &key, const Value &value) {
     size_t bucket_idx = hasher_(key) & bucket_mask_;
@@ -695,7 +695,7 @@ public:
       node = node->next;
     }
 
-    // 插入新节点（头插法）
+    // 插入新节点(头插法)
     Node *new_node = node_pool_.construct(key, value);
     new_node->next = buckets_[bucket_idx];
     buckets_[bucket_idx] = new_node;
@@ -703,7 +703,7 @@ public:
     return true;
   }
 
-  // 3. 尝试插入：存在则返回现有值，不存在则插入
+  // 3. 尝试插入:存在则返回现有值，不存在则插入
   [[gnu::hot, gnu::always_inline]]
   inline std::pair<Value *, bool> try_emplace(const Key &key, const Value &value) {
     size_t bucket_idx = hasher_(key) & bucket_mask_;
@@ -717,7 +717,7 @@ public:
       return {&node->value, false}; // 已存在
     }
 
-    // 查找是否已存在（继续遍历链表）
+    // 查找是否已存在(继续遍历链表)
     node = node->next;
     while (node) {
       if (node->key == key) {
@@ -727,7 +727,7 @@ public:
     }
 
   insert_new:
-    // 插入新节点（头插法）
+    // 插入新节点(头插法)
     Node *new_node = node_pool_.construct(key, value);
     new_node->next = buckets_[bucket_idx];
     buckets_[bucket_idx] = new_node;
@@ -735,7 +735,7 @@ public:
     return {&new_node->value, true}; // 新插入
   }
 
-  // 4. 删除：返回是否成功
+  // 4. 删除:返回是否成功
   [[gnu::hot]]
   bool erase(const Key &key) {
     size_t bucket_idx = hasher_(key) & bucket_mask_;
@@ -758,7 +758,7 @@ public:
     return false;
   }
 
-  // 5. 清空：删除所有条目
+  // 5. 清空:删除所有条目
   void clear() {
 #ifdef MEMPOOL_ENABLE_STATS
     if (num_entries_ > 0) {
@@ -816,7 +816,7 @@ public:
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 第六层：类型别名（便利层）
+// 第六层:类型别名(便利层)
 // ═══════════════════════════════════════════════════════════════════════════
 
 template <typename Key, typename Value, typename Hash = std::hash<Key>>

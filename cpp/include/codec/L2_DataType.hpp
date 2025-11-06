@@ -12,8 +12,8 @@
 // https://zhuanlan.zhihu.com/p/665919675 实时重建沪市level2数据
 // https://zhuanlan.zhihu.com/p/708215930 订单簿成像股价走势预测
 // https://zhuanlan.zhihu.com/p/640661128 Weighted Mid Price定价模型的改进
-// https://zhuanlan.zhihu.com/p/660995304 浅谈深层订单簿建模问题之复杂性（上）
-// https://zhuanlan.zhihu.com/p/672245189 浅谈深层订单簿建模之复杂性（下）
+// https://zhuanlan.zhihu.com/p/660995304 浅谈深层订单簿建模问题之复杂性(上)
+// https://zhuanlan.zhihu.com/p/672245189 浅谈深层订单簿建模之复杂性(下)
 // https://zhuanlan.zhihu.com/p/678879213 订单簿的一些性质
 // https://zhuanlan.zhihu.com/p/680914693 低价股的订单簿单队列建模
 // https://zhuanlan.zhihu.com/p/518906022 Santa Fe Model and Hawkes Process

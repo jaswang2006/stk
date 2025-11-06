@@ -102,13 +102,13 @@ namespace L2_sz {
 
 //上海L2低延时行情发布系统 (LDDS: Low latency Data Distribution System)
 namespace L2_sh {
-    // 08:30-16:00：静态数据准备完毕，VSS 可以发起 Rebuild 请求
-    // 08:45-16:00：竞价行情数据、指数行情数据、市场总览数据、竞价逐笔通道序号数据
-    // 09:15-15:35：竞价逐笔合并数据
-    // 09:25-16:00：逐笔合并数据重建
-    // 15:00-16:00：盘后固定价格交易行情数据
-    // 15:05-15:35：盘后固定价格交易逐笔成交消息
-    // 15:05-16:00：盘后固定交易价格逐笔成交数据重建
+    // 08:30-16:00:静态数据准备完毕，VSS 可以发起 Rebuild 请求
+    // 08:45-16:00:竞价行情数据、指数行情数据、市场总览数据、竞价逐笔通道序号数据
+    // 09:15-15:35:竞价逐笔合并数据
+    // 09:25-16:00:逐笔合并数据重建
+    // 15:00-16:00:盘后固定价格交易行情数据
+    // 15:05-15:35:盘后固定价格交易逐笔成交消息
+    // 15:05-16:00:盘后固定交易价格逐笔成交数据重建
 
     // 集中竞价交易行情快照消息(UA3202)
     struct sh_stk_snapshot {
@@ -121,7 +121,7 @@ namespace L2_sh {
         // FAST Message Content
         int32_t TemplateID;                   // 模板标示号 = 3202
         char MessageType[8];                  // UA3202
-        int32_t DataTimeStamp;                // 最新订单时间（秒）143025 表示 14:30:25
+        int32_t DataTimeStamp;                // 最新订单时间(秒)143025 表示 14:30:25
         int32_t DataStatus;                   // 1=重复数据 2=未获授权
         char SecurityID[8];                   // 证券代码
         int32_t ImageStatus;                  // 快照类型 1=全量
@@ -161,7 +161,7 @@ namespace L2_sh {
         int32_t AltWeightedAvgOfferPx;        // 债券加权平均委卖价格
         
         // ETF Information
-        int32_t IOPV;                         // ETF净值估值（IOPV低精度值）
+        int32_t IOPV;                         // ETF净值估值(IOPV低精度值)
         int32_t ETFBuyNumber;                 // ETF申购笔数
         int64_t ETFBuyAmount;                 // ETF申购数量
         int64_t ETFBuyMoney;                  // ETF申购金额
@@ -249,13 +249,13 @@ namespace L2_sh {
         int32_t TradeIndex;                   // 成交序号，从1开始，按Channel连续
         int32_t TradeChannel;                 // 通道
         char SecurityID[8];                   // 证券代码
-        int32_t TradeTime;                    // 成交时间（百分之一秒）15102506表示15:10:25.06
-        int32_t TradePrice;                   // 成交价格（元）
-        int64_t TradeQty;                     // 成交数量（股票：股）
-        int64_t TradeMoney;                   // 成交金额（元）
+        int32_t TradeTime;                    // 成交时间(百分之一秒)15102506表示15:10:25.06
+        int32_t TradePrice;                   // 成交价格(元)
+        int64_t TradeQty;                     // 成交数量(股票:股)
+        int64_t TradeMoney;                   // 成交金额(元)
         int64_t TradeBuyNo;                   // 买方订单号
         int64_t TradeSellNo;                  // 卖方订单号
-        char TradeBSFlag[2];                  // 内外盘标志：B=外盘(主动买) S=内盘(主动卖) N=未知
+        char TradeBSFlag[2];                  // 内外盘标志:B=外盘(主动买) S=内盘(主动卖) N=未知
     };
 
     // 集中竞价交易逐笔委托消息(UA5803)
@@ -272,19 +272,19 @@ namespace L2_sh {
         int64_t BizIndex;                     // 逐笔序号，从1开始，按Channel连续
         int32_t Channel;                      // 通道
         char SecurityID[8];                   // 证券代码
-        int32_t TickTime;                     // 订单或成交时间（百分之一秒）14302506表示14:30:25.06
-        char Type[2];                         // 类型：A=新增委托订单 D=删除委托订单 S=产品状态订单 T=成交
-        int64_t BuyOrderNO;                   // 买方订单（若为产品状态订单或卖方订单无意义）
-        int64_t SellOrderNO;                  // 卖方订单（若为产品状态订单或买方订单无意义）
-        int32_t Price;                        // 价格（元）（若为产品状态订单、删除订单无意义）
-        int64_t Qty;                          // 数量（若为产品状态订单无意义）
-        int64_t TradeMoney;                   // 对于新增委托：已成交的委托数量（精度为三位）
-                                              // 对于成交：成交金额（单位为元，精度为五位）
+        int32_t TickTime;                     // 订单或成交时间(百分之一秒)14302506表示14:30:25.06
+        char Type[2];                         // 类型:A=新增委托订单 D=删除委托订单 S=产品状态订单 T=成交
+        int64_t BuyOrderNO;                   // 买方订单(若为产品状态订单或卖方订单无意义)
+        int64_t SellOrderNO;                  // 卖方订单(若为产品状态订单或买方订单无意义)
+        int32_t Price;                        // 价格(元)(若为产品状态订单、删除订单无意义)
+        int64_t Qty;                          // 数量(若为产品状态订单无意义)
+        int64_t TradeMoney;                   // 对于新增委托:已成交的委托数量(精度为三位)
+                                              // 对于成交:成交金额(单位为元，精度为五位)
                                               // 其他无意义
-        char TickBSFlag[8];                   // 若为新增或删除委托订单：B=买单 S=卖单
-                                              // 若为产品状态订单：START=启动 OCALL=开市集合竞价 TRADE=连续自动撮合
+        char TickBSFlag[8];                   // 若为新增或删除委托订单:B=买单 S=卖单
+                                              // 若为产品状态订单:START=启动 OCALL=开市集合竞价 TRADE=连续自动撮合
                                               //                 SUSP=停牌 CCALL=收盘集合竞价 CLOSE=闭市 ENDTR=交易结束
-                                              // 若为成交：B=外盘(主动买) S=内盘(主动卖) N=未知
+                                              // 若为成交:B=外盘(主动买) S=内盘(主动卖) N=未知
     };
 
 } // namespace L2_sh

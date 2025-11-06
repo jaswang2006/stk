@@ -106,7 +106,7 @@ public:
       }
     }
 
-    // 计算特征（depth 更新后）
+    // 计算特征(depth 更新后)
     if (LOB_feature_.depth_updated) {
 #if DEBUG_BOOK_PRINT
       print_book();

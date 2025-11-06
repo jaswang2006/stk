@@ -352,62 +352,62 @@ bool validate_and_convert_archives(const std::string &archive_base_dir) {
     const unsigned int disk_limit = static_cast<unsigned int>(available_disk / disk_per_task);
     const unsigned int cpu_limit = std::max(2u, cpu_cores / 2);
 
-    std::cout << "System resources:\n";
-    std::cout << "  Available RAM: " << available_ram << " GB (supports " << ram_limit << " workers)\n";
-    std::cout << "  Available Disk: " << available_disk << " GB (supports " << disk_limit << " workers)\n";
-    std::cout << "  CPU cores: " << cpu_cores << " (I/O-heavy: use " << cpu_limit << " workers)\n";
-    std::cout << "  --> Concurrent workers: " << num_workers << " (limited by ";
+    std::cout << "系统资源:\n";
+    std::cout << "  可用内存: " << available_ram << " GB(支持 " << ram_limit << " 个工作进程)\n";
+    std::cout << "  可用磁盘: " << available_disk << " GB(支持 " << disk_limit << " 个工作进程)\n";
+    std::cout << "  CPU 核心: " << cpu_cores << "(I/O密集型:使用 " << cpu_limit << " 个工作进程)\n";
+    std::cout << "  --> 并发工作进程: " << num_workers << "(受限因素: ";
 
     if (num_workers == ram_limit) {
-      std::cout << "RAM";
+      std::cout << "内存";
     } else if (num_workers == disk_limit) {
-      std::cout << "Disk";
+      std::cout << "磁盘";
     } else if (num_workers == cpu_limit) {
       std::cout << "CPU";
     } else {
-      std::cout << "unknown";
+      std::cout << "未知";
     }
     std::cout << ")\n";
 
-    std::cout << "  Estimated time: " << (disguised_7z_files.size() / num_workers * 10) << "-"
-              << (disguised_7z_files.size() / num_workers * 15) << " minutes\n";
+    std::cout << "  预计时间: " << (disguised_7z_files.size() / num_workers * 40) << "-"
+              << (disguised_7z_files.size() / num_workers * 60) << " 分钟\n";
     std::cout << "\n";
 
-    std::cout << "Conversion process:\n";
-    std::cout << "  1. Extract 7z archive to temp directory\n";
-    std::cout << "  2. Create non-solid RAR archive (supports partial extraction)\n";
-    std::cout << "  3. Atomically replace original file\n";
-    std::cout << "  4. Move original to backup directory: " << archive_base_dir << "/backup_7z_files/\n";
+    std::cout << "转换过程:\n";
+    std::cout << "  1. 将7z压缩包解压到临时目录\n";
+    std::cout << "  2. 创建非固实RAR压缩包(支持部分提取)\n";
+    std::cout << "  3. 原子性地替换原文件\n";
+    std::cout << "  4. 将原文件移动到备份目录: " << archive_base_dir << "/backup_7z_files/\n";
     std::cout << "\n";
-    std::cout << "IMPORTANT:\n";
-    std::cout << "  - This process will take a long time for large archives\n";
-    std::cout << "  - Please do NOT interrupt the conversion process\n";
-    std::cout << "  - Original files will be backed up (can be deleted later to save space)\n";
+    std::cout << "重要提醒:\n";
+    std::cout << "  - 大型压缩包的处理需要很长时间\n";
+    std::cout << "  - 请勿中断转换过程\n";
+    std::cout << "  - 原文件将被备份(稍后可删除以节省空间)\n";
     std::cout << "\n";
-    std::cout << "Type 'yes' to start conversion: ";
+    std::cout << "输入 'yes' 开始转换: ";
     std::cout.flush();
 
     std::string user_input;
     std::getline(std::cin, user_input);
 
     if (user_input != "yes") {
-      std::cout << "Aborted by user.\n";
+      std::cout << "用户取消操作。\n";
       return false;
     }
 
     std::cout << "\n";
-    std::cout << "Starting conversion...\n";
+    std::cout << "开始转换...\n";
     std::cout << "\n";
 
     // Perform conversion with progress tracking
     if (!convert_all_disguised_7z(disguised_7z_files, archive_base_dir, num_workers)) {
-      std::cerr << "Some conversions failed. Please check errors above.\n";
+      std::cerr << "部分转换失败。请检查上面的错误信息。\n";
       return false;
     }
 
-    std::cout << "All files converted successfully!\n";
+    std::cout << "所有文件转换成功！\n";
   } else {
-    std::cout << "All .rar files have correct format.\n";
+    std::cout << "所有.rar文件格式正确。\n";
   }
   std::cout << "\n";
 
