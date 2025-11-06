@@ -64,8 +64,8 @@ public:
     const float bid_volume = static_cast<float>(std::abs(best_bid_level->net_quantity));
     const float ask_volume = static_cast<float>(std::abs(best_ask_level->net_quantity));
     
-    const size_t curr_time_idx = time_to_L2_index(lob_feature_->hour, lob_feature_->minute,
-                                                   lob_feature_->second, lob_feature_->millisecond);
+    const size_t curr_time_idx = time_to_index(L2_INDEX, lob_feature_->hour, lob_feature_->minute,
+                                               lob_feature_->second, lob_feature_->millisecond);
     
     // Time index changed - push accumulated data and reset
     if (curr_time_idx != last_time_idx_) {

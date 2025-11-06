@@ -63,22 +63,40 @@
 // ============================================================================
 // TIME GRANULARITY CONFIGURATION
 // ============================================================================
-// Each level's time interval in milliseconds and daily capacity
 
 constexpr size_t TRADE_HOURS_PER_DAY = 4;
-constexpr size_t MS_PRE_DAY = TRADE_HOURS_PER_DAY * 3600000;
+constexpr size_t TRADE_SECONDS_PER_DAY = TRADE_HOURS_PER_DAY * 3600;  // 14400 seconds
 
-// Level 0: Tick-level (100ms per time index)
-constexpr size_t L0_TIME_INTERVAL_MS = 1000;
-constexpr size_t L0_MAX_TIME_INDEX_PER_DAY = MS_PRE_DAY / L0_TIME_INTERVAL_MS + 1;
+// Time unit types
+enum class TimeUnit : uint8_t {
+  MILLISECOND = 0,
+  SECOND = 1,
+  MINUTE = 2,
+  HOUR = 3
+};
 
-// Level 1: Minute-level (1min per time index)
-constexpr size_t L1_TIME_INTERVAL_MS = 60'000;
-constexpr size_t L1_MAX_TIME_INDEX_PER_DAY = MS_PRE_DAY / L1_TIME_INTERVAL_MS + 1;
+// Level time configuration
+struct LevelTimeConfig {
+  TimeUnit unit;
+  size_t interval;  // Number of units per time index
+  
+  constexpr size_t max_capacity() const {
+    switch (unit) {
+      case TimeUnit::MILLISECOND: return (TRADE_SECONDS_PER_DAY * 1000) / interval + 1;
+      case TimeUnit::SECOND: return TRADE_SECONDS_PER_DAY / interval + 1;
+      case TimeUnit::MINUTE: return (TRADE_SECONDS_PER_DAY / 60) / interval + 1;
+      case TimeUnit::HOUR: return (TRADE_SECONDS_PER_DAY / 3600) / interval + 1;
+    }
+    return TRADE_SECONDS_PER_DAY + 1;
+  }
+};
 
-// Level 2: Hour-level (1hour per time index)
-constexpr size_t L2_TIME_INTERVAL_MS = 3'600'000;
-constexpr size_t L2_MAX_TIME_INDEX_PER_DAY = MS_PRE_DAY / L2_TIME_INTERVAL_MS + 1;
+// Predefined level configurations
+constexpr LevelTimeConfig LEVEL_CONFIGS[3] = {
+  {TimeUnit::SECOND, 1},   // L0: 1s
+  {TimeUnit::MINUTE, 1},   // L1: 1min
+  {TimeUnit::HOUR, 1}      // L2: 1hour
+};
 
 // ============================================================================
 // TRADING SESSION MAPPING - High Performance Non-linear Time Conversion
@@ -139,29 +157,18 @@ constexpr auto generate_trading_offset_table() {
 static constexpr auto TRADING_OFFSET_LUT = generate_trading_offset_table();
 
 // ============================================================================
-// TIME INDEX CONVERSION - O(1) Branchless Lookup
+// TIME CONVERSION - O(1) Branchless Lookup
 // ============================================================================
 
-// Convert time components to trading seconds (0-14400)
+// Convert time to trading seconds (0-14400)
 inline constexpr size_t time_to_trading_seconds(uint8_t hour, uint8_t minute, uint8_t second) {
   const size_t hm_idx = hour * 60 + minute;
   const int16_t base = TRADING_OFFSET_LUT[hm_idx];
-  // Branchless clamp: pre-market maps to 0, post-market maps to 14400
   const size_t trading_seconds = (base < 0 ? 0 : static_cast<size_t>(base)) + second;
   return trading_seconds;
 }
 
-// Convert time components to Level 0 time index (1s granularity)
-inline constexpr size_t time_to_L0_index(uint8_t hour, uint8_t minute, uint8_t second, [[maybe_unused]] uint8_t millisecond) {
-  return time_to_trading_seconds(hour, minute, second);
-}
-
-// Convert time components to Level 1 time index (1min granularity)
-inline constexpr size_t time_to_L1_index(uint8_t hour, uint8_t minute, uint8_t second, [[maybe_unused]] uint8_t millisecond) {
-  return time_to_trading_seconds(hour, minute, second) / 60;
-}
-
-// Convert time components to Level 2 time index (1hour granularity)
-inline constexpr size_t time_to_L2_index(uint8_t hour, uint8_t minute, uint8_t second, [[maybe_unused]] uint8_t millisecond) {
-  return time_to_trading_seconds(hour, minute, second) / 3600;
+// Convert time to trading milliseconds (0-14400000)
+inline constexpr size_t time_to_trading_milliseconds(uint8_t hour, uint8_t minute, uint8_t second, uint8_t millisecond) {
+  return time_to_trading_seconds(hour, minute, second) * 1000 + millisecond;
 }

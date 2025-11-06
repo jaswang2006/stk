@@ -226,7 +226,7 @@ private:
   std::vector<std::unique_ptr<DailyFeatureTensor>> tensor_pool_;
   std::atomic<size_t> next_tensor_idx_{0};
   
-  // Date to tensor mapping (for fast lookup)
+  // Date to tensor mapping
   std::map<std::string, DailyFeatureTensor*> date_to_tensor_;
   mutable std::shared_mutex map_mutex_;
   
@@ -269,7 +269,7 @@ public:
               << (bytes_per_day * preallocated_blocks / (1024.0 * 1024.0 * 1024.0)) << " GB\n";
     std::cout << "  Features: " << total_features << "\n\n";
     
-    // Preallocate tensor blocks (no date assigned yet)
+    // Preallocate tensor blocks
     tensor_pool_.reserve(preallocated_blocks);
     for (size_t i = 0; i < preallocated_blocks; ++i) {
       tensor_pool_.emplace_back(std::make_unique<DailyFeatureTensor>("", num_assets));

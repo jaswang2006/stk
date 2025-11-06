@@ -59,8 +59,8 @@ public:
     const float mid_price = (best_bid_price + best_ask_price) * 0.5f;
     const float volume = 1.0f;
     
-    const size_t curr_time_idx = time_to_L1_index(lob_feature_->hour, lob_feature_->minute,
-                                                   lob_feature_->second, lob_feature_->millisecond);
+    const size_t curr_time_idx = time_to_index(L1_INDEX, lob_feature_->hour, lob_feature_->minute,
+                                               lob_feature_->second, lob_feature_->millisecond);
     
     // Time index changed - push accumulated data and reset
     if (curr_time_idx != last_time_idx_) {

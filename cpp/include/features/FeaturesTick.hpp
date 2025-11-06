@@ -45,8 +45,8 @@ public:
       return;
     }
 
-    const size_t curr_time_idx = time_to_L0_index(lob_feature_->hour, lob_feature_->minute,
-                                                  lob_feature_->second, lob_feature_->millisecond);
+    const size_t curr_time_idx = time_to_index(L0_INDEX, lob_feature_->hour, lob_feature_->minute,
+                                               lob_feature_->second, lob_feature_->millisecond);
 
     // Only compute on time index change
     if (curr_time_idx == last_time_idx_) {
