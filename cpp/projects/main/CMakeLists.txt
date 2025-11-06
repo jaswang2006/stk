@@ -39,7 +39,7 @@ else()
     message(STATUS "Production build: Optimized for performance")
     
     # Base optimization flags
-    set(CMAKE_CXX_FLAGS "-O3 -DNDEBUG -Wall -Wextra")
+    set(CMAKE_CXX_FLAGS "-O3 -Wall -Wextra") # -DNDEBUG 决定是否实现断言(assert)
     # CPU-specific optimizations
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native")
     # LTO for cross-module optimizations

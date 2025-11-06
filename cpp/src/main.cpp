@@ -17,98 +17,56 @@
 #include <future>
 #include <iostream>
 #include <mutex>
+#include <numeric>
 #include <random>
 #include <regex>
 #include <set>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 // ============================================================================
 // L2数据处理架构 - 两阶段并行处理
 // ============================================================================
 //
-// 【架构概述】
-//   Phase 1: Encoding（编码阶段）
-//     - 多线程并行处理，每个线程负责一个完整的asset
-//     - 单个asset内的日期乱序处理，通过RAR锁协调
-//     - RAR锁采用阻塞模式：撞锁时等待，而非跳过
-//     - 完成一个asset后再领取下一个
+// 【核心设计】
+//   数据结构: SharedState 统一管理所有共享状态
+//     - assets[]: 所有资产信息（元数据 + 每日统计 + 文件路径 + 状态位图）
+//     - all_dates[]: 全局交易日序列（用于横截面因子同步）
 //
-//   Phase 2: Analysis（分析阶段）
-//     - 等待所有encoding完成后启动
-//     - 多asset并行，每个asset内严格按日期顺序处理
-//     - 无需锁机制，纯顺序读取binary文件
+//   Phase 1 (Encoding): Asset并行，Date乱序
+//     - Worker领取asset，shuffle日期顺序以分散RAR访问压力
+//     - RAR锁（阻塞模式）：确保同一压缩包不被并发解压
+//     - 记录统计信息到 asset.date_info[]，零额外扫描
 //
-// 【数据流程】
+//   Phase 2 (Analysis): Date-first遍历，横截面同步
+//     - 所有worker按 all_dates[] 顺序同步推进
+//     - 每个date处理完成后可插入横截面因子计算
+//     - 无锁读取：所有路径/统计信息已在Phase 1缓存
 //
-//   RAR压缩包 → CSV文件（GBK编码）→ CSV结构体
-//       ↓
-//   L2标准结构 → 编码+压缩 → Binary文件
-//       ↓
-//   解压+解码 → L2结构体 → 高频分析 → 结果输出
+// 【数据流】
+//   RAR → CSV → L2结构 → Zstd压缩 → Binary文件
+//                ↓ (统计信息记录到 date_info)
+//   Binary文件 → 解压解码 → Order Book → 特征提取 → FeatureStore
 //
-// 【Phase 1: Encoding详细流程】
-//
-//   1. 配置加载
-//      - config.json: 回测时间区间
-//      - stock_info.json: 资产列表及上市/退市日期
-//
-//   2. 任务分配
-//      - 按asset分配任务，每个任务包含该asset的所有交易日
-//      - Worker从队列领取asset，处理完再领取下一个
-//      - 同一时刻，一个Worker只处理一个asset
-//
-//   3. 单Asset处理（日期乱序）
-//      - Shuffle日期列表，分散RAR访问压力
-//      - 对每个日期：
-//        a) 获取RAR锁（阻塞等待，确保同一RAR不被并发解压）
-//        b) 解压: /path/YYYYMMDD.rar → YYYYMMDD/ASSET_CODE/*.csv
-//        c) 解析CSV: 行情.csv + 逐笔委托.csv + 逐笔成交.csv
-//        d) 编码: CSV → L2结构 → Zstd压缩 → .bin文件
-//        e) 释放RAR锁
-//
-//   4. 数据格式处理
-//      - SZSE代码: 2025+年用"1"，早期用"000001"
-//      - 订单类型: SZSE用0/1/U，SSE用A/D
-//      - 价格单位: 0.01元（CSV为0.0001元，除以100）
-//      - 数量单位: 100股（CSV为股数，除以100）
-//
-//   5. 进度显示
-//      - 每个Worker固定一行显示
-//      - 显示: [进度条] 百分比 (当前日期/总日期) Asset代码 - 日期
-//      - Asset代码固定不变，日期随处理进度更新
-//
-// 【Phase 2: Analysis详细流程】
-//
-//   1. 等待Encoding完成
-//      - 确保所有binary文件已生成
-//
-//   2. 并行分析
-//      - 每个Worker领取一个asset
-//      - 严格按日期顺序读取binary文件
-//      - 重建order book，生成分析信号
-//
-//   3. 订单簿重建
-//      - 处理maker/taker/cancel订单
-//      - 维护10档买卖队列
-//      - 生成策略信号
+// 【Key Insights】
+//   1. 零重复扫描: Encoding时记录order_count/文件路径，Analysis直接读取
+//   2. 路径缓存: 所有路径初始化时生成一次，存储在 date_info.temp_dir
+//   3. 类型缓存: exchange_type 构造时推导一次，避免字符串解析
+//   4. 状态位图: date_info.encoded/analyzed 支持断点续传和精确追踪
+//   5. 负载均衡: 使用encoding时累积的order_count，无需预扫描
+//   6. 横截面准备: all_dates[] 全局同步，预留 cross_sectional_cache
 //
 // 【线程安全】
-//   - Encoding阶段：
-//     * 每个Worker独立处理一个asset，无状态共享
-//     * RAR锁确保同一压缩包不被并发解压
-//     * CPU亲和性绑定避免线程迁移
-//
-//   - Analysis阶段：
-//     * 只读binary文件，无并发写入
-//     * 无需锁机制
+//   - Encoding: 每个worker只写自己的asset，relaxed无锁
+//   - Analysis: 只读共享状态，零锁开销
+//   - RAR解压: 按archive_path加锁，细粒度并发
 //
 // 【性能优化】
-//   - Binary缓存: 跳过已存在的binary文件
-//   - 日期乱序: 分散RAR访问，提高并发度
-//   - CPU亲和性: 减少cache miss
-//   - Zstd压缩: 解压速度1300+ MB/s
-//   - 内存预分配: 基于历史数据量
+//   - 跳过已编码文件 + 断点续传支持
+//   - 日期shuffle分散RAR访问热点
+//   - CPU亲和性减少cache miss
+//   - Zstd解压速度 1300+ MB/s
 //
 // ============================================================================
 // CONFIGURATION SECTION
@@ -232,20 +190,149 @@ public:
 };
 
 // ============================================================================
-// TASK AND DATA STRUCTURES
+// SHARED STATE - All assets and global synchronization
 // ============================================================================
 
-struct AssetTask {
+struct AssetInfo {
+  // ===== Per-date information =====
+  struct DateInfo {
+    size_t order_count{0};      // Order count (written during encoding)
+    uint8_t encoded{0};         // 0=not encoded, 1=encoded
+    uint8_t analyzed{0};        // 0=not analyzed, 1=analyzed
+    std::string temp_dir;       // Cached temp directory path
+    std::string snapshots_file; // Full path to snapshots binary file
+    std::string orders_file;    // Full path to orders binary file
+
+    bool has_binaries() const {
+      return !snapshots_file.empty() || !orders_file.empty();
+    }
+  };
+
+  // ===== Immutable metadata =====
   size_t asset_id;
   std::string asset_code;
   std::string asset_name;
   std::vector<std::string> dates;
+  L2::ExchangeType exchange_type; // Cached exchange type
+
+  // ===== Per-date data =====
+  std::vector<DateInfo> date_info;
+
+  // ===== Analysis assignment =====
+  int assigned_worker_id{-1};
+
+  // Constructor
+  AssetInfo(size_t id, std::string code, std::string name, std::vector<std::string> ds)
+      : asset_id(id),
+        asset_code(std::move(code)),
+        asset_name(std::move(name)),
+        dates(std::move(ds)),
+        exchange_type(L2::infer_exchange_type(asset_code)),
+        date_info(dates.size()) {}
+
+  // Initialize paths (called once after construction)
+  void init_paths(const std::string &temp_dir_base) {
+    for (size_t i = 0; i < dates.size(); ++i) {
+      date_info[i].temp_dir = Utils::generate_temp_asset_dir(temp_dir_base, dates[i], asset_code);
+    }
+  }
+
+  // Scan existing binary files (for resume support)
+  void scan_existing_binaries() {
+    for (size_t i = 0; i < dates.size(); ++i) {
+      auto &di = date_info[i];
+      if (!std::filesystem::exists(di.temp_dir))
+        continue;
+
+      for (const auto &entry : std::filesystem::directory_iterator(di.temp_dir)) {
+        const std::string filename = entry.path().filename().string();
+        if (filename.starts_with(asset_code + "_snapshots_") && filename.ends_with(Config::BIN_EXTENSION)) {
+          di.snapshots_file = entry.path().string();
+        } else if (filename.starts_with(asset_code + "_orders_") && filename.ends_with(Config::BIN_EXTENSION)) {
+          di.orders_file = entry.path().string();
+        }
+      }
+
+      if (di.has_binaries()) {
+        di.encoded = 1;
+      }
+    }
+  }
+
+  // Statistics
+  size_t get_total_order_count() const {
+    size_t total = 0;
+    for (const auto &di : date_info)
+      total += di.order_count;
+    return total;
+  }
+
+  size_t get_encoded_count() const {
+    size_t count = 0;
+    for (const auto &di : date_info)
+      count += di.encoded;
+    return count;
+  }
+
+  size_t get_analyzed_count() const {
+    size_t count = 0;
+    for (const auto &di : date_info)
+      count += di.analyzed;
+    return count;
+  }
 };
 
-struct BinaryFiles {
-  std::string snapshots_file;
-  std::string orders_file;
-  bool exists() const { return !snapshots_file.empty() || !orders_file.empty(); }
+struct SharedState {
+  // ===== Asset-level information =====
+  std::vector<AssetInfo> assets;
+
+  // ===== Global date sequence =====
+  std::vector<std::string> all_dates; // Sorted unique trading dates
+
+  // ===== Future: Cross-sectional synchronization =====
+  // std::vector<std::barrier<>> date_barriers;
+  // std::vector<std::mutex> date_locks;
+  // std::unordered_map<std::string, CrossSectionalData> cross_sectional_cache;
+
+  SharedState() = default;
+
+  // Initialize all_dates from assets
+  void finalize_dates() {
+    std::set<std::string> unique_dates_set;
+    for (const auto &asset : assets) {
+      unique_dates_set.insert(asset.dates.begin(), asset.dates.end());
+    }
+    all_dates.assign(unique_dates_set.begin(), unique_dates_set.end());
+  }
+
+  // Initialize all asset paths
+  void init_paths(const std::string &temp_dir_base) {
+    for (auto &asset : assets) {
+      asset.init_paths(temp_dir_base);
+    }
+  }
+
+  // Scan all existing binaries (for resume)
+  void scan_all_existing_binaries() {
+    for (auto &asset : assets) {
+      asset.scan_existing_binaries();
+    }
+  }
+
+  // Statistics
+  size_t total_encoded_dates() const {
+    size_t total = 0;
+    for (const auto &asset : assets)
+      total += asset.get_encoded_count();
+    return total;
+  }
+
+  size_t total_orders() const {
+    size_t total = 0;
+    for (const auto &asset : assets)
+      total += asset.get_total_order_count();
+    return total;
+  }
 };
 
 // ============================================================================
@@ -253,24 +340,14 @@ struct BinaryFiles {
 // ============================================================================
 
 namespace Encoding {
-inline BinaryFiles check_existing_binaries(const std::string &temp_asset_dir, const std::string &asset_code) {
-  if (!std::filesystem::exists(temp_asset_dir)) {
-    return {"", ""};
-  }
-
-  BinaryFiles result;
-  for (const auto &entry : std::filesystem::directory_iterator(temp_asset_dir)) {
-    const std::string filename = entry.path().filename().string();
-    if (filename.starts_with(asset_code + "_snapshots_") && filename.ends_with(Config::BIN_EXTENSION)) {
-      result.snapshots_file = entry.path().string();
-    } else if (filename.starts_with(asset_code + "_orders_") && filename.ends_with(Config::BIN_EXTENSION)) {
-      result.orders_file = entry.path().string();
-    }
-  }
-  return result;
-}
-
-inline bool extract_and_encode(const std::string &archive_path, const std::string &asset_code, const std::string &date_str, const std::string &temp_dir, L2::BinaryEncoder_L2 &encoder) {
+// Extract, parse CSV, and encode to binary files
+// Returns true on success and populates date_info with file paths
+inline bool extract_and_encode(const std::string &archive_path,
+                               const std::string &asset_code,
+                               const std::string &date_str,
+                               const std::string &temp_dir,
+                               L2::BinaryEncoder_L2 &encoder,
+                               AssetInfo::DateInfo &date_info) {
   // Acquire lock (blocking)
   std::mutex *archive_lock = RarLockManager::get_or_create_lock(archive_path);
   std::lock_guard<std::mutex> lock(*archive_lock);
@@ -298,28 +375,38 @@ inline bool extract_and_encode(const std::string &archive_path, const std::strin
   }
 
   // Move to final location
-  const std::string temp_asset_dir = Utils::generate_temp_asset_dir(temp_dir, date_str, asset_code);
-  std::filesystem::create_directories(std::filesystem::path(temp_asset_dir).parent_path());
+  std::filesystem::create_directories(std::filesystem::path(date_info.temp_dir).parent_path());
 
   // Remove target if exists to avoid rename failure
-  if (std::filesystem::exists(temp_asset_dir)) {
-    std::filesystem::remove_all(temp_asset_dir);
+  if (std::filesystem::exists(date_info.temp_dir)) {
+    std::filesystem::remove_all(date_info.temp_dir);
   }
 
-  std::filesystem::rename(extracted_dir, temp_asset_dir);
+  std::filesystem::rename(extracted_dir, date_info.temp_dir);
   std::filesystem::remove_all(temp_extract_dir);
 
   // Parse and encode
   std::vector<L2::Snapshot> snapshots;
   std::vector<L2::Order> orders;
-  if (!encoder.process_stock_data(temp_asset_dir, temp_asset_dir, asset_code, &snapshots, &orders)) {
+  if (!encoder.process_stock_data(date_info.temp_dir, date_info.temp_dir, asset_code, &snapshots, &orders)) {
     return false;
   }
 
-  // Clean up CSV files
-  for (const auto &entry : std::filesystem::directory_iterator(temp_asset_dir)) {
-    if (entry.path().string().ends_with(".csv")) {
-      std::filesystem::remove(entry.path());
+  // Record order count
+  date_info.order_count = orders.size();
+
+  // Scan for generated binary files
+  for (const auto &entry : std::filesystem::directory_iterator(date_info.temp_dir)) {
+    const std::string path = entry.path().string();
+    if (path.ends_with(".csv")) {
+      std::filesystem::remove(entry.path()); // Clean up CSV
+    } else if (path.ends_with(Config::BIN_EXTENSION)) {
+      const std::string filename = entry.path().filename().string();
+      if (filename.starts_with(asset_code + "_snapshots_")) {
+        date_info.snapshots_file = path;
+      } else if (filename.starts_with(asset_code + "_orders_")) {
+        date_info.orders_file = path;
+      }
     }
   }
 
@@ -332,13 +419,13 @@ inline bool extract_and_encode(const std::string &archive_path, const std::strin
 // ============================================================================
 
 namespace Analysis {
-inline size_t process_binary_files(const BinaryFiles &files,
+inline size_t process_binary_files(const AssetInfo::DateInfo &date_info,
                                    L2::BinaryDecoder_L2 &decoder,
                                    LimitOrderBook &lob) {
   size_t order_count = 0;
-  if (!files.orders_file.empty()) {
+  if (!date_info.orders_file.empty()) {
     std::vector<L2::Order> decoded_orders;
-    if (!decoder.decode_orders(files.orders_file, decoded_orders)) {
+    if (!decoder.decode_orders(date_info.orders_file, decoded_orders)) {
       return 0;
     }
 
@@ -356,68 +443,77 @@ inline size_t process_binary_files(const BinaryFiles &files,
 // PHASE 1: ENCODING WORKER
 // ============================================================================
 
-void encoding_worker(std::vector<AssetTask> &asset_queue, std::mutex &queue_mutex, std::atomic<size_t> &completed_assets, const std::string &l2_archive_base, const std::string &temp_dir, unsigned int core_id, misc::ProgressHandle progress_handle) {
+void encoding_worker(SharedState &state, std::vector<size_t> &asset_id_queue, std::mutex &queue_mutex, const std::string &l2_archive_base, const std::string &temp_dir, unsigned int core_id, misc::ProgressHandle progress_handle) {
   static thread_local bool affinity_set = false;
   if (!affinity_set && misc::Affinity::supported()) {
     affinity_set = misc::Affinity::pin_to_core(core_id);
   }
 
   L2::BinaryEncoder_L2 encoder(L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE);
+  L2::BinaryDecoder_L2 decoder(L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE);
 
   while (true) {
-    AssetTask asset_task;
+    size_t asset_id;
 
     // Get an asset
     {
       std::lock_guard<std::mutex> lock(queue_mutex);
-      if (asset_queue.empty()) {
-        break; // No more assets
+      if (asset_id_queue.empty()) {
+        break;
       }
-      asset_task = asset_queue.back();
-      asset_queue.pop_back();
+      asset_id = asset_id_queue.back();
+      asset_id_queue.pop_back();
     }
 
-    // Set label to this asset (fixed for this asset's lifetime)
-    progress_handle.set_label(asset_task.asset_code + " (" + asset_task.asset_name + ")");
+    AssetInfo &asset = state.assets[asset_id];
+    progress_handle.set_label(asset.asset_code + " (" + asset.asset_name + ")");
 
-    // Shuffle dates for this asset to spread RAR access
-    std::vector<std::string> dates = asset_task.dates;
+    // Shuffle date indices to spread RAR access
+    std::vector<size_t> date_indices(asset.dates.size());
+    std::iota(date_indices.begin(), date_indices.end(), 0);
     std::random_device rd;
     std::mt19937 g(rd());
-    std::shuffle(dates.begin(), dates.end(), g);
+    std::shuffle(date_indices.begin(), date_indices.end(), g);
 
     // Process all dates for this asset
-    for (size_t i = 0; i < dates.size(); ++i) {
-      const std::string &date_str = dates[i];
-      const std::string temp_asset_dir = Utils::generate_temp_asset_dir(temp_dir, date_str, asset_task.asset_code);
-      const BinaryFiles existing = Encoding::check_existing_binaries(temp_asset_dir, asset_task.asset_code);
+    for (size_t i = 0; i < date_indices.size(); ++i) {
+      const size_t date_idx = date_indices[i];
+      const std::string &date_str = asset.dates[date_idx];
+      auto &date_info = asset.date_info[date_idx];
 
       // Skip if binary already exists
-      if (existing.exists() && Config::SKIP_EXISTING_BINARIES) {
-        progress_handle.update(i + 1, dates.size(), date_str);
+      if (date_info.encoded && Config::SKIP_EXISTING_BINARIES) {
+        // Still need to read order count if not set (for load balancing)
+        if (!date_info.orders_file.empty() && date_info.order_count == 0) {
+          std::vector<L2::Order> orders;
+          if (decoder.decode_orders(date_info.orders_file, orders)) {
+            date_info.order_count = orders.size();
+          }
+        }
+        progress_handle.update(i + 1, asset.dates.size(), date_str);
         continue;
       }
 
       // Check archive exists before attempting extraction
       const std::string archive_path = Utils::generate_archive_path(l2_archive_base, date_str);
       if (!std::filesystem::exists(archive_path)) {
-        progress_handle.update(i + 1, dates.size(), date_str);
+        progress_handle.update(i + 1, asset.dates.size(), date_str);
         continue;
       }
 
       // Encode (blocking on RAR lock if needed)
-      bool success = Encoding::extract_and_encode(archive_path, asset_task.asset_code, date_str, temp_dir, encoder);
+      bool success = Encoding::extract_and_encode(archive_path, asset.asset_code, date_str, temp_dir, encoder, date_info);
 
-      // Always update progress regardless of success/failure
-      progress_handle.update(i + 1, dates.size(), date_str);
+      if (success) {
+        date_info.encoded = 1;
 
-      if (success && Config::CLEANUP_AFTER_PROCESSING) {
-        std::filesystem::remove_all(temp_asset_dir);
+        if (Config::CLEANUP_AFTER_PROCESSING) {
+          std::filesystem::remove_all(date_info.temp_dir);
+        }
       }
-    }
 
-    // Increment completed assets counter after finishing all dates for this asset
-    ++completed_assets;
+      progress_handle.update(i + 1, asset.dates.size(), date_str);
+    }
   }
 }
 
@@ -425,109 +521,87 @@ void encoding_worker(std::vector<AssetTask> &asset_queue, std::mutex &queue_mute
 // PHASE 2: ANALYSIS PROCESSOR (DATE-FIRST TRAVERSAL)
 // ============================================================================
 
-// Worker context: manages multiple assets with date-first processing
-struct AnalysisWorkerContext {
-  std::vector<size_t> asset_ids;
-  std::vector<std::string> asset_codes;
-  std::vector<std::string> asset_names;
+// Worker function: date-first processing for assigned assets
+void analysis_worker(const SharedState &state,
+                     int worker_id,
+                     GlobalFeatureStore *feature_store,
+                     misc::ProgressHandle progress_handle) {
+
+  // Find assets assigned to this worker
+  std::vector<size_t> my_asset_ids;
+  size_t total_orders = 0;
+  for (size_t i = 0; i < state.assets.size(); ++i) {
+    if (state.assets[i].assigned_worker_id == worker_id) {
+      my_asset_ids.push_back(i);
+      total_orders += state.assets[i].get_total_order_count();
+    }
+  }
+
+  // Initialize LOBs and decoders for each asset
   std::vector<std::unique_ptr<LimitOrderBook>> lobs;
   std::vector<std::unique_ptr<L2::BinaryDecoder_L2>> decoders;
-  
-  AnalysisWorkerContext(const std::vector<AssetTask> &assigned_assets, GlobalFeatureStore *feature_store) {
-    for (const auto &asset : assigned_assets) {
-      asset_ids.push_back(asset.asset_id);
-      asset_codes.push_back(asset.asset_code);
-      asset_names.push_back(asset.asset_name);
-      
-      L2::ExchangeType exchange_type = L2::infer_exchange_type(asset.asset_code);
-      lobs.push_back(std::make_unique<LimitOrderBook>(
-          L2::DEFAULT_ENCODER_ORDER_SIZE, exchange_type, feature_store, asset.asset_id));
-      decoders.push_back(std::make_unique<L2::BinaryDecoder_L2>(
-          L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE));
-    }
-  }
-};
+  std::vector<std::unordered_set<std::string>> date_sets;
 
-// Process one date for all assets in this worker's batch
-size_t process_date_for_asset_batch(AnalysisWorkerContext &ctx,
-                                     const std::string &date_str,
-                                     const std::string &temp_dir,
-                                     GlobalFeatureStore *feature_store,
-                                     const std::vector<std::set<std::string>> &asset_date_sets) {
-  
-  size_t total_orders = 0;
-  
-  for (size_t i = 0; i < ctx.asset_ids.size(); ++i) {
-    // Skip if this asset doesn't have data for this date
-    if (asset_date_sets[i].find(date_str) == asset_date_sets[i].end()) {
-      continue;
-    }
-    
-    const size_t asset_id = ctx.asset_ids[i];
-    const std::string &asset_code = ctx.asset_codes[i];
-    
-    // Set current date for this asset
-    feature_store->set_current_date(asset_id, date_str);
-    
-    // Load and process binary files
-    const std::string temp_asset_dir = Utils::generate_temp_asset_dir(temp_dir, date_str, asset_code);
-    const BinaryFiles files = Encoding::check_existing_binaries(temp_asset_dir, asset_code);
-    
-    if (files.exists()) {
-      total_orders += Analysis::process_binary_files(files, *ctx.decoders[i], *ctx.lobs[i]);
-    }
+  for (size_t asset_id : my_asset_ids) {
+    const auto &asset = state.assets[asset_id];
+    lobs.push_back(std::make_unique<LimitOrderBook>(
+        L2::DEFAULT_ENCODER_ORDER_SIZE, asset.exchange_type, feature_store, asset.asset_id));
+    decoders.push_back(std::make_unique<L2::BinaryDecoder_L2>(
+        L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE));
+    date_sets.emplace_back(asset.dates.begin(), asset.dates.end());
   }
-  
-  // Cross-sectional feature computation point (all assets at same date)
-  // TODO: Insert cross-sectional factor calculation here
-  
-  return total_orders;
-}
 
-// Worker function: processes assigned assets with date-first order
-void analysis_worker_date_first(const std::vector<AssetTask> &assigned_assets,
-                                 const std::vector<std::string> &all_dates,
-                                 const std::string &temp_dir,
-                                 GlobalFeatureStore *feature_store,
-                                 misc::ProgressHandle progress_handle) {
-  
-  // Initialize worker context
-  AnalysisWorkerContext ctx(assigned_assets, feature_store);
-  
-  // Precompute date sets for each asset (for fast lookup)
-  std::vector<std::set<std::string>> asset_date_sets;
-  for (const auto &asset : assigned_assets) {
-    asset_date_sets.emplace_back(asset.dates.begin(), asset.dates.end());
-  }
-  
-  // Build progress label: "  N Assets: CODE1(NAME1)"
+  // Progress label
   char label_buf[128];
-  snprintf(label_buf, sizeof(label_buf), "%3zu Assets: %s(%s)", 
-           assigned_assets.size(),
-           assigned_assets[0].asset_code.c_str(),
-           assigned_assets[0].asset_name.c_str());
+  if (!my_asset_ids.empty()) {
+    snprintf(label_buf, sizeof(label_buf), "%3zu Assets: %s(%s)",
+             my_asset_ids.size(),
+             state.assets[my_asset_ids[0]].asset_code.c_str(),
+             state.assets[my_asset_ids[0]].asset_name.c_str());
+  } else {
+    snprintf(label_buf, sizeof(label_buf), "0 Assets");
+  }
   progress_handle.set_label(label_buf);
-  
+
   size_t cumulative_orders = 0;
   auto start_time = std::chrono::steady_clock::now();
-  
+
   // Date-first traversal
-  for (size_t date_idx = 0; date_idx < all_dates.size(); ++date_idx) {
-    const std::string &date_str = all_dates[date_idx];
-    
-    // Process this date for all assigned assets
-    size_t date_orders = process_date_for_asset_batch(ctx, date_str, temp_dir, feature_store, asset_date_sets);
-    cumulative_orders += date_orders;
-    
+  for (size_t date_idx = 0; date_idx < state.all_dates.size(); ++date_idx) {
+    const std::string &date_str = state.all_dates[date_idx];
+
+    // Process each asset at this date
+    for (size_t i = 0; i < my_asset_ids.size(); ++i) {
+      const size_t asset_id = my_asset_ids[i];
+      const auto &asset = state.assets[asset_id];
+
+      if (date_sets[i].find(date_str) == date_sets[i].end()) {
+        continue;
+      }
+
+      // Find date index in asset's dates
+      auto it = std::find(asset.dates.begin(), asset.dates.end(), date_str);
+      size_t asset_date_idx = it - asset.dates.begin();
+      const auto &date_info = asset.date_info[asset_date_idx];
+
+      feature_store->set_current_date(asset.asset_id, date_str);
+
+      if (date_info.has_binaries()) {
+        cumulative_orders += Analysis::process_binary_files(date_info, *decoders[i], *lobs[i]);
+      }
+    }
+
+    // Cross-sectional feature computation point
+    // TODO: Insert cross-sectional factor calculation here
+
     // Update progress
     auto current_time = std::chrono::steady_clock::now();
     double elapsed_seconds = std::chrono::duration<double>(current_time - start_time).count();
     double speed_M_per_sec = (elapsed_seconds > 0) ? (cumulative_orders / 1e6) / elapsed_seconds : 0.0;
-    double avg_orders_per_asset_M = assigned_assets.size() > 0 ? (static_cast<double>(cumulative_orders) / assigned_assets.size()) / 1e6 : 0.0;
-    
+
     char msg_buf[128];
-    snprintf(msg_buf, sizeof(msg_buf), "%s [%.1fM/s (%.1fM)]", date_str.c_str(), speed_M_per_sec, avg_orders_per_asset_M);
-    progress_handle.update(date_idx + 1, all_dates.size(), msg_buf);
+    snprintf(msg_buf, sizeof(msg_buf), "%s [%.1fM/s (%.1fM)]", date_str.c_str(), speed_M_per_sec, total_orders / 1e6);
+    progress_handle.update(date_idx + 1, state.all_dates.size(), msg_buf);
   }
 }
 
@@ -589,10 +663,8 @@ int main() {
     // ========================================================================
     std::cout << "=== Phase 1: Encoding ===" << "\n";
 
-    // Build asset queue and count total tasks
-    std::vector<AssetTask> asset_queue;
-
-    size_t asset_id = 0;
+    // Build shared state
+    SharedState state;
     for (const auto &[asset_code, stock_info] : stock_info_map) {
       const auto effective_start = std::max(std::chrono::year_month_day{stock_info.start_date / std::chrono::day{1}}, app_config.start_date);
       const auto effective_end = std::min(std::chrono::year_month_day{stock_info.end_date / std::chrono::last}, app_config.end_date);
@@ -600,22 +672,31 @@ int main() {
       const auto dates = Utils::generate_date_range(JsonConfig::FormatYearMonthDay(effective_start), JsonConfig::FormatYearMonthDay(effective_end), l2_archive_base);
 
       if (!dates.empty()) {
-        asset_queue.push_back({asset_id++, asset_code, stock_info.name, dates});
+        state.assets.emplace_back(state.assets.size(), asset_code, stock_info.name, dates);
       }
     }
 
-    // Save a copy for Phase 2 to reuse
-    std::vector<AssetTask> asset_queue_for_analysis = asset_queue;
+    // Initialize paths and dates
+    state.init_paths(temp_dir);
+    state.finalize_dates();
+    state.scan_all_existing_binaries(); // For resume support
+
+    std::cout << "Date range: " << state.all_dates.front() << " → " << state.all_dates.back()
+              << " (" << state.all_dates.size() << " trading days)\n";
+
+    // Build asset ID queue for work distribution
+    std::vector<size_t> asset_id_queue;
+    for (size_t i = 0; i < state.assets.size(); ++i) {
+      asset_id_queue.push_back(i);
+    }
 
     std::mutex queue_mutex;
-    std::atomic<size_t> encoding_completed_assets{0};
-
     auto encoding_progress = std::make_shared<misc::ParallelProgress>(num_workers);
     std::vector<std::future<void>> encoding_workers;
 
     for (unsigned int i = 0; i < num_workers; ++i) {
       encoding_workers.push_back(
-          std::async(std::launch::async, encoding_worker, std::ref(asset_queue), std::ref(queue_mutex), std::ref(encoding_completed_assets), std::cref(l2_archive_base), std::cref(temp_dir), i, encoding_progress->acquire_slot("")));
+          std::async(std::launch::async, encoding_worker, std::ref(state), std::ref(asset_id_queue), std::ref(queue_mutex), std::cref(l2_archive_base), std::cref(temp_dir), i, encoding_progress->acquire_slot("")));
     }
 
     for (auto &worker : encoding_workers) {
@@ -623,30 +704,35 @@ int main() {
     }
     encoding_progress->stop();
 
-    std::cout << "Encoding complete: " << encoding_completed_assets << " / " << asset_queue_for_analysis.size() << " assets\n\n";
+    std::cout << "Encoding complete: " << state.assets.size() << " assets ("
+              << state.total_encoded_dates() << " date-asset pairs)\n\n";
 
     // ========================================================================
     // PHASE 2: ANALYSIS
     // ========================================================================
     std::cout << "=== Phase 2: Analysis ===" << "\n";
 
-    // Calculate sorted unique dates
-    std::set<std::string> unique_dates_set;
-    for (const auto &asset : asset_queue_for_analysis) {
-      unique_dates_set.insert(asset.dates.begin(), asset.dates.end());
+    // Initialize global feature store
+    GlobalFeatureStore feature_store(state.assets.size(), state.all_dates.size());
+
+    // Load balancing: sort assets by order count (already collected during encoding!)
+    std::vector<std::pair<size_t, size_t>> asset_workloads; // (asset_id, order_count)
+    asset_workloads.reserve(state.assets.size());
+
+    for (size_t i = 0; i < state.assets.size(); ++i) {
+      asset_workloads.push_back({i, state.assets[i].get_total_order_count()});
     }
-    std::vector<std::string> all_dates(unique_dates_set.begin(), unique_dates_set.end());
-    
-    std::cout << "Date range: " << all_dates.front() << " → " << all_dates.back() 
-              << " (" << all_dates.size() << " trading days)\n";
 
-    // Initialize global feature store with preallocated blocks
-    GlobalFeatureStore feature_store(asset_queue_for_analysis.size(), all_dates.size());
+    std::sort(asset_workloads.begin(), asset_workloads.end(),
+              [](const auto &a, const auto &b) { return a.second > b.second; });
 
-    // Distribute assets evenly across workers
-    std::vector<std::vector<AssetTask>> worker_asset_batches(num_workers);
-    for (size_t i = 0; i < asset_queue_for_analysis.size(); ++i) {
-      worker_asset_batches[i % num_workers].push_back(asset_queue_for_analysis[i]);
+    // Greedy assignment: each asset goes to worker with minimum current load
+    std::vector<size_t> worker_loads(num_workers, 0);
+
+    for (const auto &[asset_id, order_count] : asset_workloads) {
+      size_t min_worker = std::min_element(worker_loads.begin(), worker_loads.end()) - worker_loads.begin();
+      state.assets[asset_id].assigned_worker_id = min_worker;
+      worker_loads[min_worker] += order_count;
     }
 
     // Launch workers with date-first processing
@@ -655,10 +741,9 @@ int main() {
 
     for (unsigned int i = 0; i < num_workers; ++i) {
       analysis_workers.push_back(std::async(std::launch::async,
-                                            analysis_worker_date_first,
-                                            std::cref(worker_asset_batches[i]),
-                                            std::cref(all_dates),
-                                            std::cref(temp_dir),
+                                            analysis_worker,
+                                            std::cref(state),
+                                            static_cast<int>(i),
                                             &feature_store,
                                             analysis_progress->acquire_slot("")));
     }
