@@ -4,44 +4,151 @@
 #include <cstddef>
 #include <cstdint>
 
-// ============================================================================
-// LEVEL 0: Tick-level Features
-// ============================================================================
-#define LEVEL_0_FIELDS(X)                        \
-  X(timestamp, "Event timestamp in nanoseconds") \
-  X(mid_price, "Mid price (bid+ask)/2")          \
-  X(spread, "Bid-ask spread")                    \
-  X(spread_z, "Spread z-score")                  \
-  X(tobi, "Top-of-book imbalance")               \
-  X(tobi_z, "Top-of-book imbalance z-score")     \
-  X(micro_price, "Volume-weighted micro price")  \
-  X(mpg, "Micro-price gap (micro - mid)")        \
-  X(mpg_z, "Micro-price gap z-score")
+// 无锁式共享内存Tensor 和 存储架构设计:
+//
+// 按照日期, 切分Tensor: {[T, F, A]_level0(tick), [T, F, A]_level1(minute), [T, F, A]_level2(hour)}_dayN
+//
+// T (Time):    max = 100,000  (100K time indices per day)
+// A (Asset):   max = 1,000    (1K assets in universe)
+// F (Feature): max = 1,000    (all feature types combined)
+//
+// Sub-features:
+// - F_TS:  ~60-70%  (e.g., 600 TS features)
+// - F_CS:  ~20-30%  (e.g., 250 CS features)
+// - F_LB:  ~5-10%   (e.g., 50 Label features)
+// - F_OT:  ~5-10%   (e.g., 100 Other features(shared intermediate values))
+//
+// 访问模式分析 (优化目标: 最小化总内存访问时间)
+//
+// 操作           循环结构                       单次vector访问   总内存访问量                权重    并行度
+// TS_write_TS    for a: for t: write[F_TS]     连续写600个      T×A×F_TS        = 240GB     39%   10 cores
+// CS_read_TS     for t: for f: read[A]         连续读1000个     T×(F_TS+F_OT)×A = 280GB     45%   1 core
+// CS_write_CS    for t: for f: write[A]        连续写1000个     T×F_CS×A        = 100GB     16%   1 core
+//
+// 详细说明:
+// - TS_write: 每个core处理~100个assets, 对每个asset遍历时间, 在(a,t)处连续写F_TS个features
+// - CS_read:  在每个时刻t, 对每个feature f, 连续读取所有A个assets的值(截面计算)
+// - CS_write: 在每个时刻t, 对每个feature f, 连续写入所有A个assets的值(截面结果)
+//
+// 布局          地址公式               TS_write(39%)      CS_read(45%)      CS_write(16%)     加权总分  推荐度
+// [T][A][F]    (t*A+a)*F+f            连续/100分         跳4KB/60分        跳4KB/60分        75.6      良好
+// [T][F][A]    (t*F+f)*A+a            跳4KB/60分         连续/100分        连续/100分        84.4      最优 √√√
+// [A][T][F]    (a*T+t)*F+f            连续/100分         跳400MB/5分       跳400MB/5分       42.0      较差
+// [A][F][T]    (a*F+f)*T+t            跳400KB/20分       跳400MB/5分       跳400MB/5分       10.9      极差
+// [F][T][A]    (f*T+t)*A+a            跳400MB/5分        连续/100分        连续/100分        63.0      不推荐
+// [F][A][T]    (f*A+a)*T+t            跳400MB/5分        跳400KB/20分      跳400KB/20分      14.2      极差
+//
+// stride=4B:连续访问(SIMD/prefetch)优化; 
+// stride=64B: cache line访问优化; 
+// stride<32KB: L1访问优化; 
+// stride<1MB: L2访问优化; 
+// stride<2MB: TLB/Page优化; 
 
 // ============================================================================
-// LEVEL 1: Minute-level Features
+// FEATURE METADATA ENCODING SYSTEM
 // ============================================================================
 
-#define LEVEL_1_FIELDS(X)                  \
-  X(timestamp, "Minute start timestamp")   \
-  X(open, "Open price (first mid price)")  \
-  X(high, "High price (max mid price)")    \
-  X(low, "Low price (min mid price)")      \
-  X(close, "Close price (last mid price)") \
-  X(vwap, "Volume-weighted average price") \
-  X(volume, "Total volume (tick count proxy)")
+// Data type classification
+enum class FeatureDataType : uint8_t {
+  TS = 0,  // Time-series (时序)
+  CS = 1,  // Cross-sectional (截面)
+  LB = 2,  // Label (标签)
+  OT = 3   // Other (其他)
+};
+
+// Primary category
+enum class FeatureCategoryL1 : uint8_t {
+  PRICE         = 0,  // 价格
+  VOLUME        = 1,  // 量能
+  VOLATILITY    = 2,  // 波动率
+  MOMENTUM      = 3,  // 动量
+  LIQUIDITY     = 4,  // 流动性
+  IMBALANCE     = 5,  // 失衡
+  MICROSTRUCTURE = 6, // 微结构
+  LABEL         = 7,  // 标签/目标
+  META          = 8   // 元数据/共享变量
+};
+
+// Secondary category
+enum class FeatureCategoryL2 : uint8_t {
+  RAW        = 0,  // 原始
+  NORMALIZED = 1,  // 标准化
+  OSCILLATOR = 2,  // 震荡器
+  DEVIATION  = 3,  // 偏离
+  RATIO      = 4,  // 比率
+  RANK       = 5,  // 排名
+  FUTURE_RET = 6,  // 未来收益
+  SCORE      = 7,  // 评分
+  UNIVERSE   = 8,  // 全域统计
+  BENCHMARK  = 9   // 基准/市场
+};
+
+// Normalization method
+enum class NormMethod : uint8_t {
+  NONE      = 0,  // 无
+  ZSCORE    = 1,  // z-score标准化
+  RANK_NORM = 2,  // rank + inverse normal
+  CLIP      = 3,  // clip到[-3,3]
+  TANH      = 4,  // tanh激活
+  WINSOR    = 5,  // winsorize
+  LOG_NORM  = 6,  // log后标准化
+  PCT_RANK  = 7   // percentile rank
+};
 
 // ============================================================================
-// LEVEL 2: Hour-level Features
+// LEVEL 0: Tick-level Features (瞬时微结构信号, 短窗口: 5-200 ticks)
+// ============================================================================
+// Format: X(code, name_cn, name_en, data_type, cat_l1, cat_l2, norm_method, formula, description)
+
+#define LEVEL_0_FIELDS(X) \
+  X(tick_ret_z,           "微小对数收益",       "Tick Return Z-score",        TS, MOMENTUM,       NORMALIZED, ZSCORE,    "(r-μ_W)/σ_W, r=log(mid_t/mid_{t-1}), W=50",                 "滚动窗口标准化的tick级对数收益，中性动量/瞬时冲击") \
+  X(tobi_osc,             "订单失衡震荡",       "TOBI Oscillator",            TS, IMBALANCE,      OSCILLATOR, CLIP,      "clip((tobi-mean_W)/MAD_W, -3, 3), W=50",                    "top-of-book买卖压力震荡器，对称性好") \
+  X(micro_gap_norm,       "微观价差标准化",     "Micro Gap Normalized",       TS, MICROSTRUCTURE, NORMALIZED, TANH,      "tanh((micro_price-mid)/σ_W), W=50",                         "micro_price与mid_price的标准化偏离，有界对称") \
+  X(spread_momentum,      "价差动量",           "Spread Momentum",            TS, LIQUIDITY,      DEVIATION,  ZSCORE,    "Δs = s - EMA_α(s), α~20ticks",                              "spread的短期变动，表示流动性瞬变") \
+  X(signed_volume_imb,    "签名成交量失衡",     "Signed Volume Imbalance",    TS, VOLUME,         OSCILLATOR, NONE,      "Σ(sign_i×size_i)/Σ|size_i|, N ticks",                      "近N ticks签名成交量不对称，直接为[-1,1]") \
+  X(cs_spread_rank,       "价差截面排名",       "CS Spread Rank",             CS, LIQUIDITY,      RANK,       RANK_NORM, "Φ^{-1}(percentile(spread))",                                "spread在universe中的截面rank→inverse normal") \
+  X(cs_tobi_rank,         "失衡截面排名",       "CS TOBI Rank",               CS, IMBALANCE,      RANK,       RANK_NORM, "Φ^{-1}(percentile(tobi))",                                  "tobi在universe中的截面rank→inverse normal") \
+  X(cs_liquidity_ratio,   "流动性比率截面",     "CS Liquidity Ratio",         CS, LIQUIDITY,      RATIO,      ZSCORE,    "(top_size/median_H)/z-score",                               "当前top-of-book size相对历史中位数的截面z-score") \
+  X(next_tick_ret,        "下tick收益",         "Next Tick Return",           LB, LABEL,          FUTURE_RET, NONE,      "log(mid_{t+1}/mid_t)",                                      "下一个tick的对数收益，作为预测目标") \
+  X(next_5tick_ret,       "未来5tick收益",      "Next 5-Tick Return",         LB, LABEL,          FUTURE_RET, NONE,      "log(mid_{t+5}/mid_t)",                                      "未来5个tick的累计对数收益，中期预测目标") \
+  X(universe_size,        "全域规模",           "Universe Size",              OT, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "当前时刻universe中有效合约数量，用于截面计算") \
+  X(market_mid_price,     "市场基准价格",       "Market Mid Price",           OT, META,           BENCHMARK,  NONE,      "benchmark_instrument_mid_price",                            "市场基准合约的mid价格，用于计算beta和相对表现")
+
+// ============================================================================
+// LEVEL 1: Minute-level Features (聚合分钟条, 窗口: 5/15/60 minutes)
 // ============================================================================
 
-#define LEVEL_2_FIELDS(X)                                        \
-  X(timestamp, "Hour start timestamp")                           \
-  X(support_level, "Support level (weighted low prices)")        \
-  X(resistance_level, "Resistance level (weighted high prices)") \
-  X(pivot_point, "Pivot point ((high + low + close) / 3)")       \
-  X(price_range, "Price range (high - low)")                     \
-  X(dominant_side, "Dominant side (1=buy, -1=sell, 0=neutral)")
+#define LEVEL_1_FIELDS(X) \
+  X(min_ret_z,            "分钟收益",           "Minute Return Z-score",      TS, MOMENTUM,       NORMALIZED, WINSOR,    "(r-μ_60m)/σ_60m, r=log(close_t/close_{t-1})",               "一分钟对数收益标准化，rolling 60m") \
+  X(rv_5m_norm,           "5分钟波动率",        "Realized Vol 5m Normalized", TS, VOLATILITY,     NORMALIZED, LOG_NORM,  "log(σ_5m) rank-normalize",                                  "5分钟实际波动率标准化，减小偏斜") \
+  X(vwap_gap_pct,         "VWAP偏离",           "VWAP Gap Percent",           TS, PRICE,          DEVIATION,  ZSCORE,    "(close-vwap)/vwap rolling z-score",                         "close与vwap相对偏离，表示价格是否偏离当期交易价") \
+  X(momentum_15m,         "15分钟动量",         "Momentum 15m",               TS, MOMENTUM,       OSCILLATOR, ZSCORE,    "Σr_{1m}/σ_rolling, 15m累计",                                "15分钟累计动量标准化") \
+  X(range_squeeze,        "Range收窄",          "Range Squeeze",              TS, VOLATILITY,     RATIO,      CLIP,      "(high-low)/(σ_30m+ε), clip[-3,3]",                          "range/vol，衡量盘面窄幅，收窄为正") \
+  X(cs_min_return_rank,   "分钟收益截面",       "CS Minute Return Rank",      CS, MOMENTUM,       RANK,       RANK_NORM, "Φ^{-1}(percentile(minute_return))",                         "分钟收益在universe中的截面rank→inverse normal") \
+  X(cs_min_volume_pct,    "分钟量能百分位",     "CS Minute Volume Percentile",CS, VOLUME,         RANK,       RANK_NORM, "percentile(log(volume)) rank-normalize",                    "分钟volume在universe中的截面百分位排名") \
+  X(cs_min_spread_z,      "分钟价差截面",       "CS Minute Spread Z-score",   CS, LIQUIDITY,      NORMALIZED, ZSCORE,    "z-score(spread) cross-sectional",                           "分钟spread的截面z-score，反映相对交易成本") \
+  X(next_1m_ret,          "下1分钟收益",        "Next 1-Minute Return",       LB, LABEL,          FUTURE_RET, NONE,      "log(close_{t+1}/close_t)",                                  "下一分钟的对数收益，作为预测目标") \
+  X(calmar_score,         "Calmar评分",         "Calmar Score",               LB, LABEL,          SCORE,      NONE,      "annual_return/max_drawdown",                                "Calmar比率，年化收益与最大回撤之比，风险调整收益指标") \
+  X(universe_size,        "全域规模",           "Universe Size",              OT, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "当前时刻universe中有效合约数量，用于截面计算") \
+  X(market_return,        "市场收益",           "Market Return",              OT, META,           BENCHMARK,  NONE,      "log(market_close_t/market_close_{t-1})",                    "市场基准收益率，用于计算beta和相对表现")
+
+// ============================================================================
+// LEVEL 2: Hour-level Features (小时级, 窗口: 3h/6h/24h)
+// ============================================================================
+
+#define LEVEL_2_FIELDS(X) \
+  X(hour_ret_12h_mom,     "12小时动量",         "Hour Return 12h Momentum",   TS, MOMENTUM,       NORMALIZED, ZSCORE,    "Σr_{1h}^{12}/z-score_{48h}",                                "12小时动量标准化，捕捉中期趋势") \
+  X(hour_volatility,      "24小时波动率",       "Hour Volatility 24h",        TS, VOLATILITY,     NORMALIZED, LOG_NORM,  "log(σ_24h) rank-normalize",                                 "24小时realized vol，log后rank标准化减小偏斜") \
+  X(pivot_dev,            "Pivot偏差",          "Pivot Deviation",            TS, PRICE,          DEVIATION,  CLIP,      "(close-pivot)/price_range, clip",                           "收盘相对pivot point的偏差，标准化") \
+  X(dominant_persist,     "主导持续性",         "Dominant Persistence",       TS, IMBALANCE,      OSCILLATOR, ZSCORE,    "EMA(dominant_side, α) normalized",                          "dominant_side的EMA标准化，表示买卖主导延续性") \
+  X(hour_overnight_gap,   "隔夜跳空",           "Hour Overnight Gap",         TS, PRICE,          DEVIATION,  WINSOR,    "(open-prev_close)/σ_intraday, winsorize",                   "当小时起点与前一日收盘gap，捕捉消息型跳空") \
+  X(cs_hour_return_beta,  "小时收益残差",       "CS Hour Return Beta",        CS, MOMENTUM,       RANK,       RANK_NORM, "residual(r_t ~ r_market) rank-normalize",                   "小时回报相对市场的回归残差，截面排名") \
+  X(cs_hour_liq_adj_ret,  "流动性调整收益",     "CS Hour Liquidity Adj Return",CS, MOMENTUM,      RANK,       RANK_NORM, "hour_ret/sqrt(volume) rank",                                "小时收益按流动性调整后的截面排名") \
+  X(cs_hour_range_rank,   "小时Range排名",      "CS Hour Range Rank",         CS, VOLATILITY,     RANK,       RANK_NORM, "Φ^{-1}(percentile(price_range))",                           "price_range在universe中的截面百分位排名") \
+  X(next_1h_ret,          "下1小时收益",        "Next 1-Hour Return",         LB, LABEL,          FUTURE_RET, NONE,      "log(close_{t+1h}/close_t)",                                 "下一小时的对数收益，作为预测目标") \
+  X(sharpe_score,         "Sharpe评分",         "Sharpe Score",               LB, LABEL,          SCORE,      NONE,      "(mean_return-rf)/std_return",                               "Sharpe比率，超额收益与波动率之比，风险调整收益指标") \
+  X(universe_size,        "全域规模",           "Universe Size",              OT, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "当前时刻universe中有效合约数量，用于截面计算") \
+  X(market_volatility,    "市场波动率",         "Market Volatility",          OT, META,           BENCHMARK,  NONE,      "std(market_returns_24h)",                                   "市场24小时波动率，用于计算风险调整指标和相对波动")
 
 // ============================================================================
 // ALL LEVELS REGISTRY
@@ -168,4 +275,63 @@ inline constexpr size_t time_to_trading_seconds(uint8_t hour, uint8_t minute, ui
 // Convert time to trading milliseconds (0-14400000)
 inline constexpr size_t time_to_trading_milliseconds(uint8_t hour, uint8_t minute, uint8_t second, uint8_t millisecond) {
   return time_to_trading_seconds(hour, minute, second) * 1000 + millisecond;
+}
+
+// ============================================================================
+// ENUM TO STRING MAPPINGS - For metadata query and serialization
+// ============================================================================
+
+inline constexpr const char* to_string(FeatureDataType type) {
+  switch (type) {
+    case FeatureDataType::TS: return "TS";
+    case FeatureDataType::CS: return "CS";
+    case FeatureDataType::LB: return "LB";
+    case FeatureDataType::OT: return "OT";
+  }
+  return "UNKNOWN";
+}
+
+inline constexpr const char* to_string(FeatureCategoryL1 cat) {
+  switch (cat) {
+    case FeatureCategoryL1::PRICE:          return "PRICE";
+    case FeatureCategoryL1::VOLUME:         return "VOLUME";
+    case FeatureCategoryL1::VOLATILITY:     return "VOLATILITY";
+    case FeatureCategoryL1::MOMENTUM:       return "MOMENTUM";
+    case FeatureCategoryL1::LIQUIDITY:      return "LIQUIDITY";
+    case FeatureCategoryL1::IMBALANCE:      return "IMBALANCE";
+    case FeatureCategoryL1::MICROSTRUCTURE: return "MICROSTRUCTURE";
+    case FeatureCategoryL1::LABEL:          return "LABEL";
+    case FeatureCategoryL1::META:           return "META";
+  }
+  return "UNKNOWN";
+}
+
+inline constexpr const char* to_string(FeatureCategoryL2 cat) {
+  switch (cat) {
+    case FeatureCategoryL2::RAW:        return "RAW";
+    case FeatureCategoryL2::NORMALIZED: return "NORMALIZED";
+    case FeatureCategoryL2::OSCILLATOR: return "OSCILLATOR";
+    case FeatureCategoryL2::DEVIATION:  return "DEVIATION";
+    case FeatureCategoryL2::RATIO:      return "RATIO";
+    case FeatureCategoryL2::RANK:       return "RANK";
+    case FeatureCategoryL2::FUTURE_RET: return "FUTURE_RET";
+    case FeatureCategoryL2::SCORE:      return "SCORE";
+    case FeatureCategoryL2::UNIVERSE:   return "UNIVERSE";
+    case FeatureCategoryL2::BENCHMARK:  return "BENCHMARK";
+  }
+  return "UNKNOWN";
+}
+
+inline constexpr const char* to_string(NormMethod method) {
+  switch (method) {
+    case NormMethod::NONE:      return "NONE";
+    case NormMethod::ZSCORE:    return "ZSCORE";
+    case NormMethod::RANK_NORM: return "RANK_NORM";
+    case NormMethod::CLIP:      return "CLIP";
+    case NormMethod::TANH:      return "TANH";
+    case NormMethod::WINSOR:    return "WINSOR";
+    case NormMethod::LOG_NORM:  return "LOG_NORM";
+    case NormMethod::PCT_RANK:  return "PCT_RANK";
+  }
+  return "UNKNOWN";
 }

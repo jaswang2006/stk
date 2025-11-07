@@ -33,7 +33,7 @@ ALL_LEVELS(GENERATE_LEVEL_INDEX)
 // ============================================================================
 
 // Count fields in each level
-#define COUNT_FIELD(name, comment) +1
+#define COUNT_FIELD(code, cn, en, dtype, c1, c2, norm, formula, desc) +1
 
 #define GENERATE_FIELD_COUNT_FOR_LEVEL(level_name, level_num, fields) \
   constexpr size_t level_name##_FIELD_COUNT = 0 fields(COUNT_FIELD);
@@ -47,9 +47,9 @@ ALL_LEVELS(GENERATE_FIELD_COUNT_FOR_LEVEL)
     };                                                                \
   }
 
-#define GENERATE_FIELD_OFFSET_L0(name, comment) name,
-#define GENERATE_FIELD_OFFSET_L1(name, comment) name,
-#define GENERATE_FIELD_OFFSET_L2(name, comment) name,
+#define GENERATE_FIELD_OFFSET_L0(code, cn, en, dtype, c1, c2, norm, formula, desc) code,
+#define GENERATE_FIELD_OFFSET_L1(code, cn, en, dtype, c1, c2, norm, formula, desc) code,
+#define GENERATE_FIELD_OFFSET_L2(code, cn, en, dtype, c1, c2, norm, formula, desc) code,
 
 ALL_LEVELS(GENERATE_OFFSET_ENUM_FOR_LEVEL)
 
@@ -58,13 +58,46 @@ ALL_LEVELS(GENERATE_OFFSET_ENUM_FOR_LEVEL)
 // ============================================================================
 
 // Generate LevelNData structs with all fields as float
-#define GENERATE_STRUCT_FIELD(name, comment) float name;
+#define GENERATE_STRUCT_FIELD(code, cn, en, dtype, c1, c2, norm, formula, desc) float code;
 
 #define GENERATE_LEVEL_DATA_STRUCT(level_name, level_num, fields) \
   struct Level##level_num##Data {                                 \
     fields(GENERATE_STRUCT_FIELD)                                 \
   };
 ALL_LEVELS(GENERATE_LEVEL_DATA_STRUCT)
+
+// ============================================================================
+// FEATURE TYPE METADATA - AUTO-GENERATED
+// ============================================================================
+
+struct FieldTypeMeta {
+  size_t offset;
+  FeatureDataType type;
+};
+
+// Generate FieldTypeMeta entry from field definition
+// Format: X(code, name_cn, name_en, data_type, cat_l1, cat_l2, norm, formula, desc)
+#define GENERATE_FIELD_TYPE_META_L0(code, cn, en, dtype, c1, c2, norm, formula, desc) \
+  {L0_FieldOffset::code, FeatureDataType::dtype},
+
+#define GENERATE_FIELD_TYPE_META_L1(code, cn, en, dtype, c1, c2, norm, formula, desc) \
+  {L1_FieldOffset::code, FeatureDataType::dtype},
+
+#define GENERATE_FIELD_TYPE_META_L2(code, cn, en, dtype, c1, c2, norm, formula, desc) \
+  {L2_FieldOffset::code, FeatureDataType::dtype},
+
+// Generate FieldTypeMeta arrays for each level
+inline constexpr FieldTypeMeta L0_FIELD_TYPES[] = {
+  LEVEL_0_FIELDS(GENERATE_FIELD_TYPE_META_L0)
+};
+
+inline constexpr FieldTypeMeta L1_FIELD_TYPES[] = {
+  LEVEL_1_FIELDS(GENERATE_FIELD_TYPE_META_L1)
+};
+
+inline constexpr FieldTypeMeta L2_FIELD_TYPES[] = {
+  LEVEL_2_FIELDS(GENERATE_FIELD_TYPE_META_L2)
+};
 
 // ============================================================================
 // CAPACITY AND FIELD CONFIGURATION
@@ -84,10 +117,55 @@ constexpr size_t MAX_ROWS_PER_LEVEL[LEVEL_COUNT] = {
 };
 
 // ============================================================================
+// FEATURE TYPE RANGES - For optimized TS/CS/LB/OT access
+// ============================================================================
+// Helper to get feature index ranges by type
+// Usage: GET_FEATURE_RANGE(L0, TS) returns {start_idx, end_idx}
+
+struct FeatureRange {
+  size_t start;
+  size_t end;
+  size_t count() const { return end - start; }
+};
+
+// Compile-time computation of feature ranges per level
+template<size_t Level>
+constexpr FeatureRange get_feature_range(FeatureDataType type) {
+  const FieldTypeMeta* types = nullptr;
+  size_t count = 0;
+  
+  if constexpr (Level == 0) {
+    types = L0_FIELD_TYPES;
+    count = sizeof(L0_FIELD_TYPES) / sizeof(FieldTypeMeta);
+  } else if constexpr (Level == 1) {
+    types = L1_FIELD_TYPES;
+    count = sizeof(L1_FIELD_TYPES) / sizeof(FieldTypeMeta);
+  } else if constexpr (Level == 2) {
+    types = L2_FIELD_TYPES;
+    count = sizeof(L2_FIELD_TYPES) / sizeof(FieldTypeMeta);
+  }
+  
+  size_t start = count;
+  size_t end = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (types[i].type == type) {
+      if (types[i].offset < start) start = types[i].offset;
+      if (types[i].offset >= end) end = types[i].offset + 1;
+    }
+  }
+  return {start, end};
+}
+
+// Macros for convenient access
+#define GET_TS_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::TS)
+#define GET_CS_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::CS)
+#define GET_LB_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::LB)
+#define GET_OT_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::OT)
+
+// ============================================================================
 // TIME INDEX CONVERSION
 // ============================================================================
 
-// Convert time to index for specific level
 inline size_t time_to_index(size_t level_idx, uint8_t hour, uint8_t minute, uint8_t second, uint8_t millisecond) {
   const LevelTimeConfig &cfg = LEVEL_CONFIGS[level_idx];
 
