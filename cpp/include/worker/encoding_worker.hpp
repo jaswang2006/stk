@@ -17,7 +17,7 @@ void encoding_worker(SharedState &state,
                     std::vector<size_t> &asset_id_queue, 
                     std::mutex &queue_mutex, 
                     const std::string &l2_archive_base, 
-                    const std::string &temp_dir, 
+                    const std::string &database_dir, 
                     unsigned int core_id, 
                     misc::ProgressHandle progress_handle);
 

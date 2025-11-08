@@ -46,7 +46,7 @@
 //
 // 【Key Insights】
 //   1. 零重复扫描: Encoding时记录order_count/文件路径，Analysis直接读取
-//   2. 路径缓存: 所有路径初始化时生成一次，存储在 date_info.temp_dir
+//   2. 路径缓存: 所有路径初始化时生成一次，存储在 date_info.database_dir
 //   3. 类型缓存: exchange_type 构造时推导一次，避免字符串解析
 //   4. 状态位图: date_info.encoded/analyzed 支持断点续传和精确追踪
 //   5. 负载均衡: 使用encoding时累积的order_count，无需预扫描
@@ -89,7 +89,8 @@ constexpr const char *DEFAULT_L2_ARCHIVE_BASE = "/I/AM/A/FAKE/PATH/TO/SKIP/ARCHI
 // constexpr const char *DEFAULT_L2_ARCHIVE_BASE = "/mnt/dev/sde/A_stock/L2";
 // constexpr const char *DEFAULT_L2_ARCHIVE_BASE = "/media/chuyin/48ac8067-d3b7-4332-b652-45e367a1ebcc/A_stock/L2";
 
-constexpr const char *DEFAULT_TEMP_DIR = "../../../../output/database";
+constexpr const char *DEFAULT_DATABASE_DIR = "../../../../output/database";
+constexpr const char *DEFAULT_FEATURE_DIR = "../../../../output/features";
 
 // Processing settings - modify for different behaviors
 const bool CLEANUP_AFTER_PROCESSING = false; // Clean up temp files after processing (saves disk space)
@@ -109,7 +110,8 @@ int main() {
     const std::string config_file = Config::DEFAULT_CONFIG_FILE;
     const std::string stock_info_file = Config::DEFAULT_STOCK_INFO_FILE;
     const std::string l2_archive_base = Config::DEFAULT_L2_ARCHIVE_BASE;
-    const std::string temp_dir = Config::DEFAULT_TEMP_DIR;
+    const std::string database_dir = Config::DEFAULT_DATABASE_DIR;
+    const std::string feature_dir = Config::DEFAULT_FEATURE_DIR;
 
     const JsonConfig::AppConfig app_config = JsonConfig::ParseAppConfig(config_file);
     auto stock_info_map = JsonConfig::ParseStockInfo(stock_info_file);
@@ -130,15 +132,15 @@ int main() {
     std::cout << "Configuration:" << "\n";
     std::cout << "  Archive: " << Config::ARCHIVE_TOOL << " (" << Config::ARCHIVE_EXTENSION << ")\n";
     std::cout << "  L2 base: " << l2_archive_base << "\n";
-    std::cout << "  Temp dir: " << temp_dir << "\n";
+    std::cout << "  Temp dir: " << database_dir << "\n";
     std::cout << "  Period: " << JsonConfig::FormatYearMonthDay(app_config.start_date)
               << " → " << JsonConfig::FormatYearMonthDay(app_config.end_date) << "\n";
     std::cout << "  Assets: " << stock_info_map.size() << "\n";
     std::cout << "  Skip existing: " << (Config::SKIP_EXISTING_BINARIES ? "Yes" : "No") << "\n";
     std::cout << "  Auto cleanup: " << (Config::CLEANUP_AFTER_PROCESSING ? "Yes" : "No") << "\n\n";
 
-    std::filesystem::create_directories(temp_dir);
-    Logger::init(temp_dir);
+    std::filesystem::create_directories(database_dir);
+    Logger::init(database_dir);
 
     const unsigned int num_threads = misc::Affinity::core_count();
     const unsigned int num_workers = std::min(num_threads, static_cast<unsigned int>(stock_info_map.size()));
@@ -168,7 +170,7 @@ int main() {
     // Step 1: Initialize global trading dates (filtered by config date range)
     const std::string config_start_str = JsonConfig::FormatYearMonthDay(app_config.start_date);
     const std::string config_end_str = JsonConfig::FormatYearMonthDay(app_config.end_date);
-    state.init_dates(l2_archive_base, temp_dir, config_start_str, config_end_str);
+    state.init_dates(l2_archive_base, database_dir, config_start_str, config_end_str);
 
     // Step 2: Build assets with their date ranges
     for (const auto &[asset_code, stock_info] : stock_info_map) {
@@ -182,7 +184,7 @@ int main() {
     }
 
     // Step 3: Initialize paths and scan existing binaries
-    state.init_paths(temp_dir);
+    state.init_paths(database_dir);
     state.scan_all_existing_binaries();
 
     std::cout << "Global date range: " << state.all_dates.front() << " → " << state.all_dates.back()
@@ -227,7 +229,7 @@ int main() {
 
     for (unsigned int i = 0; i < num_workers; ++i) {
       encoding_workers.push_back(
-          std::async(std::launch::async, encoding_worker, std::ref(state), std::ref(asset_id_queue), std::ref(queue_mutex), std::cref(l2_archive_base), std::cref(temp_dir), i, encoding_progress->acquire_slot("")));
+          std::async(std::launch::async, encoding_worker, std::ref(state), std::ref(asset_id_queue), std::ref(queue_mutex), std::cref(l2_archive_base), std::cref(database_dir), i, encoding_progress->acquire_slot("")));
     }
 
     for (auto &worker : encoding_workers) {
@@ -252,7 +254,7 @@ int main() {
     const unsigned int num_ts_workers = num_workers - 1;
     const size_t num_assets = state.assets.size();
     const size_t tensor_pool_size = state.all_dates.size(); // Match total dates
-    GlobalFeatureStore feature_store(num_assets, num_ts_workers, tensor_pool_size);
+    GlobalFeatureStore feature_store(num_assets, num_ts_workers, tensor_pool_size, feature_dir);
 
     // Load balancing: sort assets by order count (already collected during encoding!)
     std::vector<std::pair<size_t, size_t>> asset_workloads; // (asset_id, order_count)
@@ -312,14 +314,13 @@ int main() {
     // Flush all remaining tensors to disk
     std::cout << "=== Flushing Features to Disk ===" << "\n";
     feature_store.flush_all();
-    std::cout << "Export complete: ./output/features/YYYY/MM/DD/features.bin" << "\n";
     std::cout << "\n";
 
     Logger::close();
 
     if (Config::CLEANUP_AFTER_PROCESSING) {
-      if (std::filesystem::exists(temp_dir)) {
-        std::filesystem::remove_all(temp_dir);
+      if (std::filesystem::exists(database_dir)) {
+        std::filesystem::remove_all(database_dir);
       }
     }
 

@@ -30,8 +30,8 @@ inline std::string generate_archive_path(const std::string &base_dir, const std:
   return base_dir + "/" + date_str.substr(0, 4) + "/" + date_str.substr(0, 6) + "/" + date_str + Config::ARCHIVE_EXTENSION;
 }
 
-inline std::string generate_temp_asset_dir(const std::string &temp_dir, const std::string &date_str, const std::string &asset_code) {
-  return temp_dir + "/" + date_str.substr(0, 4) + "/" + date_str.substr(4, 2) + "/" + date_str.substr(6, 2) + "/" + asset_code;
+inline std::string generate_temp_asset_dir(const std::string &database_dir, const std::string &date_str, const std::string &asset_code) {
+  return database_dir + "/" + date_str.substr(0, 4) + "/" + date_str.substr(4, 2) + "/" + date_str.substr(6, 2) + "/" + asset_code;
 }
 
 inline std::set<std::string> collect_dates_from_archives(const std::string &l2_archive_base) {
@@ -64,7 +64,7 @@ inline std::set<std::string> collect_dates_from_binaries(const std::string &temp
   if (!std::filesystem::exists(temp_dir_base))
     return dates;
 
-  // Binary structure: temp_dir/YYYY/MM/DD/asset_code/
+  // Binary structure: database_dir/YYYY/MM/DD/asset_code/
   for (const auto &year_entry : std::filesystem::directory_iterator(temp_dir_base)) {
     if (!year_entry.is_directory())
       continue;
@@ -99,7 +99,7 @@ struct AssetInfo {
     size_t order_count{0};      // Order count (written during encoding)
     uint8_t encoded{0};         // 0=not encoded, 1=encoded (has binary or csv)
     uint8_t analyzed{0};        // 0=not analyzed, 1=analyzed
-    std::string temp_dir;       // Cached temp directory path
+    std::string database_dir;       // Cached temp directory path
     std::string snapshots_file; // Full path to snapshots binary file
     std::string orders_file;    // Full path to orders binary file
 
@@ -135,7 +135,7 @@ struct AssetInfo {
   inline void init_paths(const std::string &temp_dir_base, const std::vector<std::string> &all_dates) {
     for (const auto &date_str : all_dates) {
       if (date_str >= start_date && date_str <= end_date) {
-        date_info[date_str].temp_dir = Utils::generate_temp_asset_dir(temp_dir_base, date_str, asset_code);
+        date_info[date_str].database_dir = Utils::generate_temp_asset_dir(temp_dir_base, date_str, asset_code);
       }
     }
   }
@@ -143,10 +143,10 @@ struct AssetInfo {
   // Scan existing binary files (for resume support)
   inline void scan_existing_binaries() {
     for (auto &[date_str, di] : date_info) {
-      if (!std::filesystem::exists(di.temp_dir))
+      if (!std::filesystem::exists(di.database_dir))
         continue;
 
-      for (const auto &entry : std::filesystem::directory_iterator(di.temp_dir)) {
+      for (const auto &entry : std::filesystem::directory_iterator(di.database_dir)) {
         const std::string filename = entry.path().filename().string();
         if (filename.starts_with(asset_code + "_snapshots_") && filename.ends_with(Config::BIN_EXTENSION)) {
           di.snapshots_file = entry.path().string();
@@ -220,13 +220,13 @@ struct SharedState {
 
   // Populate all_dates from filesystem and filter by date range
   inline void init_dates(const std::string &l2_archive_base,
-                         const std::string &temp_dir,
+                         const std::string &database_dir,
                          const std::string &start_date_str,
                          const std::string &end_date_str) {
     // Collect all dates from archives or binaries
     std::set<std::string> global_dates = Utils::collect_dates_from_archives(l2_archive_base);
     if (global_dates.empty()) {
-      global_dates = Utils::collect_dates_from_binaries(temp_dir);
+      global_dates = Utils::collect_dates_from_binaries(database_dir);
     }
 
     // Filter dates to match config date range

@@ -143,7 +143,8 @@ enum class FeatureDataType : uint8_t {
   TS = 0,  // Time-series (时序)
   CS = 1,  // Cross-sectional (截面)
   LB = 2,  // Label (标签)
-  OT = 3   // Other (其他)
+  SH = 3,  // Shared (TS/CS共享中间值)
+  META = 4 // Metadata (backend系统元数据)
 };
 
 // Primary category
@@ -191,21 +192,23 @@ enum class NormMethod : uint8_t {
 // Format: X(code, name_cn, name_en, data_type, cat_l1, cat_l2, norm_method, formula, description)
 
 #define LEVEL_0_FIELDS(X) \
-  X(tick_ret_z,           "微小对数收益",       "Tick Return Z-score",        TS, MOMENTUM,       NORMALIZED, ZSCORE,    "(r-μ_W)/σ_W, r=log(mid_t/mid_{t-1}), W=50",                 "滚动窗口标准化的tick级对数收益，中性动量/瞬时冲击") \
-  X(tobi_osc,             "订单失衡震荡",       "TOBI Oscillator",            TS, IMBALANCE,      OSCILLATOR, CLIP,      "clip((tobi-mean_W)/MAD_W, -3, 3), W=50",                    "top-of-book买卖压力震荡器，对称性好") \
-  X(micro_gap_norm,       "微观价差标准化",     "Micro Gap Normalized",       TS, MICROSTRUCTURE, NORMALIZED, TANH,      "tanh((micro_price-mid)/σ_W), W=50",                         "micro_price与mid_price的标准化偏离，有界对称") \
-  X(spread_momentum,      "价差动量",           "Spread Momentum",            TS, LIQUIDITY,      DEVIATION,  ZSCORE,    "Δs = s - EMA_α(s), α~20ticks",                              "spread的短期变动，表示流动性瞬变") \
-  X(signed_volume_imb,    "签名成交量失衡",     "Signed Volume Imbalance",    TS, VOLUME,         OSCILLATOR, NONE,      "Σ(sign_i×size_i)/Σ|size_i|, N ticks",                      "近N ticks签名成交量不对称，直接为[-1,1]") \
-  X(cs_spread_rank,       "价差截面排名",       "CS Spread Rank",             CS, LIQUIDITY,      RANK,       RANK_NORM, "Φ^{-1}(percentile(spread))",                                "spread在universe中的截面rank→inverse normal") \
-  X(cs_tobi_rank,         "失衡截面排名",       "CS TOBI Rank",               CS, IMBALANCE,      RANK,       RANK_NORM, "Φ^{-1}(percentile(tobi))",                                  "tobi在universe中的截面rank→inverse normal") \
-  X(cs_liquidity_ratio,   "流动性比率截面",     "CS Liquidity Ratio",         CS, LIQUIDITY,      RATIO,      ZSCORE,    "(top_size/median_H)/z-score",                               "当前top-of-book size相对历史中位数的截面z-score") \
-  X(next_tick_ret,        "下tick收益",         "Next Tick Return",           LB, LABEL,          FUTURE_RET, NONE,      "log(mid_{t+1}/mid_t)",                                      "下一个tick的对数收益，作为预测目标") \
-  X(next_5tick_ret,       "未来5tick收益",      "Next 5-Tick Return",         LB, LABEL,          FUTURE_RET, NONE,      "log(mid_{t+5}/mid_t)",                                      "未来5个tick的累计对数收益，中期预测目标") \
-  X(_sys_done,            "计算完成标志",       "Computation Done Flag",      OT, META,           RAW,        NONE,      "1.0=done, 0.0=not done",                                    "系统特征：标记该asset在该时刻的TS计算是否完成") \
-  X(_sys_valid,           "数据有效标志",       "Data Valid Flag",            OT, META,           RAW,        NONE,      "1.0=valid, 0.0=invalid(inactive/suspended)",                "系统特征：标记该asset数据是否有效(停牌/无数据则为0)") \
-  X(_sys_timestamp,       "计算时间戳",         "Computation Timestamp",      OT, META,           RAW,        NONE,      "unix_timestamp_ms",                                         "系统特征：记录该asset完成计算的时间戳(用于调试/验证)") \
-  X(universe_size,        "全域规模",           "Universe Size",              OT, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "当前时刻universe中有效合约数量，用于截面计算") \
-  X(market_mid_price,     "市场基准价格",       "Market Mid Price",           OT, META,           BENCHMARK,  NONE,      "benchmark_instrument_mid_price",                            "市场基准合约的mid价格，用于计算beta和相对表现")
+  X(tick_ret_z,           "微小对数收益",       "Tick Return Z-score",        TS,   MOMENTUM,       NORMALIZED, ZSCORE,    "(r-μ_W)/σ_W, r=log(mid_t/mid_{t-1}), W=50",                 "滚动窗口标准化的tick级对数收益，中性动量/瞬时冲击") \
+  X(tobi_osc,             "订单失衡震荡",       "TOBI Oscillator",            TS,   IMBALANCE,      OSCILLATOR, CLIP,      "clip((tobi-mean_W)/MAD_W, -3, 3), W=50",                    "top-of-book买卖压力震荡器，对称性好") \
+  X(micro_gap_norm,       "微观价差标准化",     "Micro Gap Normalized",       TS,   MICROSTRUCTURE, NORMALIZED, TANH,      "tanh((micro_price-mid)/σ_W), W=50",                         "micro_price与mid_price的标准化偏离，有界对称") \
+  X(spread_momentum,      "价差动量",           "Spread Momentum",            TS,   LIQUIDITY,      DEVIATION,  ZSCORE,    "Δs = s - EMA_α(s), α~20ticks",                              "spread的短期变动，表示流动性瞬变") \
+  X(signed_volume_imb,    "签名成交量失衡",     "Signed Volume Imbalance",    TS,   VOLUME,         OSCILLATOR, NONE,      "Σ(sign_i×size_i)/Σ|size_i|, N ticks",                      "近N ticks签名成交量不对称，直接为[-1,1]") \
+  X(cs_spread_rank,       "价差截面排名",       "CS Spread Rank",             CS,   LIQUIDITY,      RANK,       RANK_NORM, "Φ^{-1}(percentile(spread))",                                "spread在universe中的截面rank→inverse normal") \
+  X(cs_tobi_rank,         "失衡截面排名",       "CS TOBI Rank",               CS,   IMBALANCE,      RANK,       RANK_NORM, "Φ^{-1}(percentile(tobi))",                                  "tobi在universe中的截面rank→inverse normal") \
+  X(cs_liquidity_ratio,   "流动性比率截面",     "CS Liquidity Ratio",         CS,   LIQUIDITY,      RATIO,      ZSCORE,    "(top_size/median_H)/z-score",                               "当前top-of-book size相对历史中位数的截面z-score") \
+  X(next_tick_ret,        "下tick收益",         "Next Tick Return",           LB,   LABEL,          FUTURE_RET, NONE,      "log(mid_{t+1}/mid_t)",                                      "下一个tick的对数收益，作为预测目标") \
+  X(next_5tick_ret,       "未来5tick收益",      "Next 5-Tick Return",         LB,   LABEL,          FUTURE_RET, NONE,      "log(mid_{t+5}/mid_t)",                                      "未来5个tick的累计对数收益，中期预测目标") \
+  X(universe_size,        "全域规模",           "Universe Size",              SH,   META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "TS/CS共享：当前时刻universe中有效合约数量") \
+  X(market_mid_price,     "市场基准价格",       "Market Mid Price",           SH,   META,           BENCHMARK,  NONE,      "benchmark_instrument_mid_price",                            "TS/CS共享：市场基准合约的mid价格") \
+  X(_sys_done,            "计算完成标志",       "Computation Done Flag",      SH,   META,           RAW,        NONE,      "1.0=done, 0.0=not done",                                    "TS/CS共享：标记该asset在该时刻的TS计算是否完成") \
+  X(_sys_valid,           "数据有效标志",       "Data Valid Flag",            SH,   META,           RAW,        NONE,      "1.0=valid, 0.0=invalid(inactive/suspended)",                "TS/CS共享：标记该asset数据是否有效(停牌/无数据则为0)") \
+  X(_sys_timestamp,       "计算时间戳",         "Computation Timestamp",      SH,   META,           RAW,        NONE,      "unix_timestamp_ms",                                         "TS/CS共享：记录该asset完成计算的时间戳(用于调试/验证)") \
+  X(_link_to_L1,          "L1时间索引",         "Link to L1 Time Index",      META, META,           RAW,        NONE,      "reinterpret_cast<float>(uint32_t_L1_index)",                "Backend元数据：L0时刻对应的L1时间索引，存储为float16但解释为uint16") \
+  X(_link_to_L2,          "L2时间索引",         "Link to L2 Time Index",      META, META,           RAW,        NONE,      "reinterpret_cast<float>(uint32_t_L2_index)",                "Backend元数据：L0时刻对应的L2时间索引，存储为float16但解释为uint16")
 
 // ============================================================================
 // LEVEL 1: Minute-level Features (聚合分钟条, 窗口: 1/5/15/60 minutes)
@@ -222,8 +225,8 @@ enum class NormMethod : uint8_t {
   X(cs_min_spread_z,      "分钟价差截面",       "CS Minute Spread Z-score",   CS, LIQUIDITY,      NORMALIZED, ZSCORE,    "z-score(spread) cross-sectional",                           "分钟spread的截面z-score，反映相对交易成本") \
   X(next_1m_ret,          "下1分钟收益",        "Next 1-Minute Return",       LB, LABEL,          FUTURE_RET, NONE,      "log(close_{t+1}/close_t)",                                  "下一分钟的对数收益，作为预测目标") \
   X(calmar_score,         "Calmar评分",         "Calmar Score",               LB, LABEL,          SCORE,      NONE,      "annual_return/max_drawdown",                                "Calmar比率，年化收益与最大回撤之比，风险调整收益指标") \
-  X(universe_size,        "全域规模",           "Universe Size",              OT, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "当前时刻universe中有效合约数量，用于截面计算") \
-  X(market_return,        "市场收益",           "Market Return",              OT, META,           BENCHMARK,  NONE,      "log(market_close_t/market_close_{t-1})",                    "市场基准收益率，用于计算beta和相对表现")
+  X(universe_size,        "全域规模",           "Universe Size",              SH, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "TS/CS共享：当前时刻universe中有效合约数量") \
+  X(market_return,        "市场收益",           "Market Return",              SH, META,           BENCHMARK,  NONE,      "log(market_close_t/market_close_{t-1})",                    "TS/CS共享：市场基准收益率")
 
 // ============================================================================
 // LEVEL 2: Hour-level Features (小时级, 窗口: 1h/3h/6h/24h)
@@ -240,8 +243,8 @@ enum class NormMethod : uint8_t {
   X(cs_hour_range_rank,   "小时Range排名",      "CS Hour Range Rank",         CS, VOLATILITY,     RANK,       RANK_NORM, "Φ^{-1}(percentile(price_range))",                           "price_range在universe中的截面百分位排名") \
   X(next_1h_ret,          "下1小时收益",        "Next 1-Hour Return",         LB, LABEL,          FUTURE_RET, NONE,      "log(close_{t+1h}/close_t)",                                 "下一小时的对数收益，作为预测目标") \
   X(sharpe_score,         "Sharpe评分",         "Sharpe Score",               LB, LABEL,          SCORE,      NONE,      "(mean_return-rf)/std_return",                               "Sharpe比率，超额收益与波动率之比，风险调整收益指标") \
-  X(universe_size,        "全域规模",           "Universe Size",              OT, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "当前时刻universe中有效合约数量，用于截面计算") \
-  X(market_volatility,    "市场波动率",         "Market Volatility",          OT, META,           BENCHMARK,  NONE,      "std(market_returns_24h)",                                   "市场24小时波动率，用于计算风险调整指标和相对波动")
+  X(universe_size,        "全域规模",           "Universe Size",              SH, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "TS/CS共享：当前时刻universe中有效合约数量") \
+  X(market_volatility,    "市场波动率",         "Market Volatility",          SH, META,           BENCHMARK,  NONE,      "std(market_returns_24h)",                                   "TS/CS共享：市场24小时波动率")
 
 // ============================================================================
 // ALL LEVELS REGISTRY
@@ -379,7 +382,8 @@ inline constexpr const char* to_string(FeatureDataType type) {
     case FeatureDataType::TS: return "TS";
     case FeatureDataType::CS: return "CS";
     case FeatureDataType::LB: return "LB";
-    case FeatureDataType::OT: return "OT";
+    case FeatureDataType::SH: return "SH";
+    case FeatureDataType::META: return "META";
   }
   return "UNKNOWN";
 }

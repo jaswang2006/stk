@@ -12,8 +12,19 @@
 // - Data structures (LevelNData structs)
 // - Capacity configuration
 //
-// All features stored as float (normalized distribution assumption)
+// Storage format: float16 (IEEE 754 binary16, uint16_t representation)
+// - Reduces memory/disk usage by 50% vs float32
+// - Sufficient precision for normalized features (±65504, ~3 decimal digits)
+// - CPU: convert via software (uint16_t <-> float32)
+// - GPU: native fp16 support on modern hardware
 // ============================================================================
+
+// Storage and computation type: _Float16 (native compiler support)
+// - Clang/GCC native type with automatic float <-> _Float16 conversion
+// - Hardware accelerated on modern CPUs (F16C, AVX-512 FP16, ARM NEON)
+// - Reduces memory/disk by 50% vs float32
+// - Sufficient precision for normalized features (±65504, ~3.3 decimal digits)
+using feature_storage_t = _Float16;
 
 // ============================================================================
 // LEVEL METADATA - AUTO-GENERATED
@@ -57,8 +68,8 @@ ALL_LEVELS(GENERATE_OFFSET_ENUM_FOR_LEVEL)
 // DATA STRUCTURES - AUTO-GENERATED
 // ============================================================================
 
-// Generate LevelNData structs with all fields as float
-#define GENERATE_STRUCT_FIELD(code, cn, en, dtype, c1, c2, norm, formula, desc) float code;
+// Generate LevelNData structs with all fields as feature_storage_t (_Float16)
+#define GENERATE_STRUCT_FIELD(code, cn, en, dtype, c1, c2, norm, formula, desc) feature_storage_t code;
 
 #define GENERATE_LEVEL_DATA_STRUCT(level_name, level_num, fields) \
   struct Level##level_num##Data {                                 \

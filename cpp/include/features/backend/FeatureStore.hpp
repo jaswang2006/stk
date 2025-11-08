@@ -14,6 +14,14 @@
 #include <string>
 
 // ============================================================================
+// FEATURE STORE CONFIGURATION
+// ============================================================================
+// Control tensor flush strategy:
+// - true:  Flush unified daily tensor [T_L0, F_total, A] (GPU-friendly, single file)
+// - false: Flush separate level tensors [T_L0, F0, A], [T_L1, F1, A], [T_L2, F2, A] + parent_link metadata
+#define STORE_UNIFIED_DAILY_TENSOR true
+
+// ============================================================================
 // FEATURE STORE - Single class interface
 // ============================================================================
 // Design: [T][F][A] layout for optimal CS operations
@@ -28,9 +36,8 @@ private:
     bool in_use = false;                                        // Is this slot in use
     std::atomic<bool> cs_done{false};                          // CS processing complete
     
-    float* data[LEVEL_COUNT] = {nullptr};                      // [level][T][F][A]
+    feature_storage_t* data[LEVEL_COUNT] = {nullptr};          // [level][T][F][A] stored as _Float16
     std::atomic<size_t>* ts_progress[LEVEL_COUNT] = {nullptr}; // [level][core]
-    size_t* parent_link[LEVEL_COUNT - 1] = {nullptr};          // L0->L1, L1->L2
     
     // Disable copy (atomic cannot be copied)
     DayData() = default;
@@ -46,20 +53,12 @@ private:
         const size_t A = num_assets;
         
         if (!data[lvl]) {
-          const size_t total_floats = T * F * A;
-          data[lvl] = static_cast<float*>(std::aligned_alloc(64, total_floats * sizeof(float)));
+          const size_t total_elements = T * F * A;
+          data[lvl] = static_cast<feature_storage_t*>(std::aligned_alloc(64, total_elements * sizeof(feature_storage_t)));
           assert(data[lvl] && "aligned_alloc failed");
         }
         if (!ts_progress[lvl]) {
           ts_progress[lvl] = new std::atomic<size_t>[num_cores]();
-        }
-      }
-      
-      for (size_t i = 0; i < LEVEL_COUNT - 1; ++i) {
-        if (!parent_link[i]) {
-          const size_t child_T = MAX_ROWS_PER_LEVEL[i];
-          parent_link[i] = static_cast<size_t*>(std::aligned_alloc(64, child_T * sizeof(size_t)));
-          assert(parent_link[i] && "aligned_alloc failed for parent_link");
         }
       }
     }
@@ -74,20 +73,13 @@ private:
         if (data[lvl]) {
           const size_t T = MAX_ROWS_PER_LEVEL[lvl];
           const size_t F = FIELDS_PER_LEVEL[lvl];
-          const size_t A = num_assets_;  // Needs to be accessible
-          std::memset(data[lvl], 0, T * F * A * sizeof(float));
+          const size_t A = num_assets_;
+          std::memset(data[lvl], 0, T * F * A * sizeof(feature_storage_t));
         }
         if (ts_progress[lvl]) {
           for (size_t c = 0; c < num_cores_; ++c) {
             ts_progress[lvl][c].store(0);
           }
-        }
-      }
-      
-      for (size_t i = 0; i < LEVEL_COUNT - 1; ++i) {
-        if (parent_link[i]) {
-          const size_t child_T = MAX_ROWS_PER_LEVEL[i];
-          std::memset(parent_link[i], 0, child_T * sizeof(size_t));
         }
       }
     }
@@ -96,9 +88,6 @@ private:
       for (size_t lvl = 0; lvl < LEVEL_COUNT; ++lvl) {
         if (data[lvl]) std::free(data[lvl]);
         if (ts_progress[lvl]) delete[] ts_progress[lvl];
-      }
-      for (size_t i = 0; i < LEVEL_COUNT - 1; ++i) {
-        if (parent_link[i]) std::free(parent_link[i]);
       }
     }
     
@@ -117,7 +106,7 @@ private:
   const size_t pool_size_;
   std::string output_dir_ = "./output/features";
   
-  // Export upsampled tensor to file
+  // Export tensor to file (unified or separate based on STORE_UNIFIED_DAILY_TENSOR)
   void flush_tensor(DayData* day) {
     if (!day || !day->in_use) return;
     
@@ -131,42 +120,122 @@ private:
     std::string out_dir = output_dir_ + "/" + year + "/" + month + "/" + day_str;
     std::filesystem::create_directories(out_dir);
     
-    // Export upsampled L0 tensor: [T_L0, F_all, A]
     const size_t T0 = MAX_ROWS_PER_LEVEL[0];
+    const size_t T1 = MAX_ROWS_PER_LEVEL[1];
+    const size_t T2 = MAX_ROWS_PER_LEVEL[2];
     const size_t F0 = FIELDS_PER_LEVEL[0];
     const size_t F1 = FIELDS_PER_LEVEL[1];
     const size_t F2 = FIELDS_PER_LEVEL[2];
     const size_t A = num_assets_;
-    const size_t F_total = F0 + F1 + F2;
     
+#if STORE_UNIFIED_DAILY_TENSOR
+    // Unified mode: [T_L0, F_total, A] single file
+    const size_t F_total = F0 + F1 + F2;
     std::string tensor_file = out_dir + "/features.bin";
     std::ofstream ofs(tensor_file, std::ios::binary);
-    if (!ofs) return;
+    if (!ofs) {
+      std::cerr << "Failed to open unified tensor file: " << tensor_file << std::endl;
+      return;
+    }
     
     // Write header: [T, F, A]
     ofs.write(reinterpret_cast<const char*>(&T0), sizeof(size_t));
     ofs.write(reinterpret_cast<const char*>(&F_total), sizeof(size_t));
     ofs.write(reinterpret_cast<const char*>(&A), sizeof(size_t));
     
+    // Get link feature offsets from L0
+    const size_t link_to_L1_offset = L0_FieldOffset::_link_to_L1;
+    const size_t link_to_L2_offset = L0_FieldOffset::_link_to_L2;
+    
     // Write data: for each L0 time t0
     for (size_t t0 = 0; t0 < T0; ++t0) {
+      // Read L1/L2 indices from L0 link features (stored as uint16_t, reinterpret as index)
+      // Use first asset's link (all assets share same time mapping)
+      const size_t t1 = static_cast<size_t>(day->data[0][t0 * F0 * A + link_to_L1_offset * A]);
+      const size_t t2 = static_cast<size_t>(day->data[0][t0 * F0 * A + link_to_L2_offset * A]);
+      
       // L0 features
       for (size_t f = 0; f < F0; ++f) {
-        ofs.write(reinterpret_cast<const char*>(day->data[0] + t0 * F0 * A + f * A), A * sizeof(float));
+        ofs.write(reinterpret_cast<const char*>(day->data[0] + t0 * F0 * A + f * A), A * sizeof(feature_storage_t));
       }
       
-      // L1 features (upsampled)
-      size_t t1 = day->parent_link[0][t0];
+      // L1 features (upsampled via link)
       for (size_t f = 0; f < F1; ++f) {
-        ofs.write(reinterpret_cast<const char*>(day->data[1] + t1 * F1 * A + f * A), A * sizeof(float));
+        ofs.write(reinterpret_cast<const char*>(day->data[1] + t1 * F1 * A + f * A), A * sizeof(feature_storage_t));
       }
       
-      // L2 features (upsampled)
-      size_t t2 = t1 < MAX_ROWS_PER_LEVEL[1] ? day->parent_link[1][t1] : 0;
+      // L2 features (upsampled via link)
       for (size_t f = 0; f < F2; ++f) {
-        ofs.write(reinterpret_cast<const char*>(day->data[2] + t2 * F2 * A + f * A), A * sizeof(float));
+        ofs.write(reinterpret_cast<const char*>(day->data[2] + t2 * F2 * A + f * A), A * sizeof(feature_storage_t));
       }
     }
+    
+    if (ofs) {
+      std::cout << "Flushed unified tensor: " << date_str << " [" << T0 << "×" << F_total << "×" << A << "] (float16)" << std::endl;
+    } else {
+      std::cerr << "Error writing unified tensor for date " << date_str << std::endl;
+    }
+#else
+    // Separate mode: 3 level files (link already in L0 features, no separate metadata file needed)
+    // L0 tensor: [T0, F0, A] (includes _link_to_L1 and _link_to_L2 features)
+    {
+      std::string l0_file = out_dir + "/features_L0.bin";
+      std::ofstream ofs(l0_file, std::ios::binary);
+      if (!ofs) {
+        std::cerr << "Failed to open L0 file: " << l0_file << std::endl;
+        return;
+      }
+      ofs.write(reinterpret_cast<const char*>(&T0), sizeof(size_t));
+      ofs.write(reinterpret_cast<const char*>(&F0), sizeof(size_t));
+      ofs.write(reinterpret_cast<const char*>(&A), sizeof(size_t));
+      for (size_t t = 0; t < T0; ++t) {
+        for (size_t f = 0; f < F0; ++f) {
+          ofs.write(reinterpret_cast<const char*>(day->data[0] + t * F0 * A + f * A), A * sizeof(feature_storage_t));
+        }
+      }
+    }
+    
+    // L1 tensor: [T1, F1, A]
+    {
+      std::string l1_file = out_dir + "/features_L1.bin";
+      std::ofstream ofs(l1_file, std::ios::binary);
+      if (!ofs) {
+        std::cerr << "Failed to open L1 file: " << l1_file << std::endl;
+        return;
+      }
+      ofs.write(reinterpret_cast<const char*>(&T1), sizeof(size_t));
+      ofs.write(reinterpret_cast<const char*>(&F1), sizeof(size_t));
+      ofs.write(reinterpret_cast<const char*>(&A), sizeof(size_t));
+      for (size_t t = 0; t < T1; ++t) {
+        for (size_t f = 0; f < F1; ++f) {
+          ofs.write(reinterpret_cast<const char*>(day->data[1] + t * F1 * A + f * A), A * sizeof(feature_storage_t));
+        }
+      }
+    }
+    
+    // L2 tensor: [T2, F2, A]
+    {
+      std::string l2_file = out_dir + "/features_L2.bin";
+      std::ofstream ofs(l2_file, std::ios::binary);
+      if (!ofs) {
+        std::cerr << "Failed to open L2 file: " << l2_file << std::endl;
+        return;
+      }
+      ofs.write(reinterpret_cast<const char*>(&T2), sizeof(size_t));
+      ofs.write(reinterpret_cast<const char*>(&F2), sizeof(size_t));
+      ofs.write(reinterpret_cast<const char*>(&A), sizeof(size_t));
+      for (size_t t = 0; t < T2; ++t) {
+        for (size_t f = 0; f < F2; ++f) {
+          ofs.write(reinterpret_cast<const char*>(day->data[2] + t * F2 * A + f * A), A * sizeof(feature_storage_t));
+        }
+      }
+    }
+    
+    std::cout << "Flushed separate tensors: " << date_str 
+              << " [L0:" << T0 << "×" << F0 << "×" << A 
+              << ", L1:" << T1 << "×" << F1 << "×" << A 
+              << ", L2:" << T2 << "×" << F2 << "×" << A << "] (float16, link in L0)" << std::endl;
+#endif
   }
   
   // Find a finished tensor to recycle
@@ -230,8 +299,18 @@ private:
   }
 
 public:
-  GlobalFeatureStore(size_t num_assets, size_t num_cores, size_t pool_size = 10)
+  GlobalFeatureStore(size_t num_assets, size_t num_cores, size_t pool_size = 10, const std::string& output_dir = "")
       : num_assets_(num_assets), num_cores_(num_cores), pool_size_(pool_size) {
+    
+    if (!output_dir.empty()) {
+        output_dir_ = output_dir;
+        // Auto wipe and create
+        if (std::filesystem::exists(output_dir_)) {
+            std::cout << "Wiping and creating output directory: " << output_dir_ << std::endl;
+            std::filesystem::remove_all(output_dir_);
+        }
+        std::filesystem::create_directories(output_dir_);
+    }
 
     size_t bytes_per_day = 0;
     for (size_t lvl = 0; lvl < LEVEL_COUNT; ++lvl) {
@@ -291,7 +370,7 @@ public:
   }
   
   // ===== Data Access (for macros) =====
-  float* get_data_ptr(const std::string& date, size_t level_idx) {
+  feature_storage_t* get_data_ptr(const std::string& date, size_t level_idx) {
     return get_day_data(date)->data[level_idx];
   }
   
@@ -316,27 +395,19 @@ public:
     return date_map_.size();
   }
   
-  // ===== Parent Linkage (for upsampling L1/L2 -> L0) =====
-  // Update parent link when writing features
-  void update_parent_link(const std::string& date, size_t child_level, 
-                          size_t child_t, size_t parent_t) {
-    if (child_level >= LEVEL_COUNT - 1) return;
+  // ===== Link Management (L0 features store L1/L2 time indices) =====
+  // Write link to L1/L2 for a specific L0 time and asset
+  // link_value: L1 or L2 time index (stored as _Float16)
+  void write_link(const std::string& date, size_t l0_t, size_t asset_idx, 
+                  size_t link_feature_offset, _Float16 link_value) {
     auto* day = get_day_data(date);
     if (!day) {
-      std::cerr << "FATAL: Failed to update parent link for " << date << "\n";
+      std::cerr << "FATAL: Failed to write link for " << date << "\n";
       std::exit(1);
     }
-    day->parent_link[child_level][child_t] = parent_t;
-  }
-  
-  // Get parent time index for upsampling
-  size_t get_parent_link(const std::string& date, size_t child_level, size_t child_t) const {
-    if (child_level >= LEVEL_COUNT - 1) return 0;
-    std::shared_lock lock(map_mutex_);
-    auto it = date_map_.find(date);
-    if (it == date_map_.end()) return 0;
-    auto* day = it->second;
-    return day->parent_link[child_level][child_t];
+    const size_t F0 = FIELDS_PER_LEVEL[0];
+    const size_t A = num_assets_;
+    day->data[0][l0_t * F0 * A + link_feature_offset * A + asset_idx] = link_value;
   }
   
   // ===== CS Worker Interface - Mark date complete =====
@@ -365,18 +436,20 @@ public:
       }
     }
     date_map_.clear();
-    std::cout << "Flushed " << flushed_count << " tensors to disk\n";
+    std::cout << "Flushed total " << flushed_count << " tensors to disk" << std::endl;
   }
 };
 
 // ============================================================================
 // DATA ACCESS MACROS
 // ============================================================================
+// Note: All macros work with feature_storage_t (_Float16)
+// Automatic conversion between float and _Float16 (like float <-> double)
 
-// TS worker: write features for asset a at time t
+// TS worker: write features for asset a at time t (src is feature_storage_t*)
 #define TS_WRITE_FEATURES(store, date, level_idx, t, a, f_start, f_end, src) \
   do { \
-    float* base = (store)->get_data_ptr(date, level_idx); \
+    feature_storage_t* base = (store)->get_data_ptr(date, level_idx); \
     const size_t F = (store)->get_F(level_idx); \
     const size_t A = (store)->get_A(); \
     const size_t base_offset = (t) * F * A + (a); \
@@ -385,25 +458,24 @@ public:
     } \
   } while(0)
 
-// CS worker: read all assets for feature f at time t
+// CS worker: read all assets for feature f at time t (returns feature_storage_t*)
 #define CS_READ_ALL_ASSETS(store, date, level_idx, t, f) \
   ((store)->get_data_ptr(date, level_idx) + (t) * (store)->get_F(level_idx) * (store)->get_A() + (f) * (store)->get_A())
 
-// CS worker: write all assets for feature f at time t
+// CS worker: write all assets for feature f at time t (src is feature_storage_t*)
 #define CS_WRITE_ALL_ASSETS(store, date, level_idx, t, f, src, count) \
   std::memcpy((store)->get_data_ptr(date, level_idx) + (t) * (store)->get_F(level_idx) * (store)->get_A() + (f) * (store)->get_A(), \
-              (src), (count) * sizeof(float))
+              (src), (count) * sizeof(feature_storage_t))
 
-// Read single value
+// Read single value (returns feature_storage_t)
 #define READ_FEATURE(store, date, level_idx, t, f, a) \
   ((store)->get_data_ptr(date, level_idx)[(t) * (store)->get_F(level_idx) * (store)->get_A() + (f) * (store)->get_A() + (a)])
 
-// Write single value
+// Write single value (value is feature_storage_t)
 #define WRITE_FEATURE(store, date, level_idx, t, f, a, value) \
   do { (store)->get_data_ptr(date, level_idx)[(t) * (store)->get_F(level_idx) * (store)->get_A() + (f) * (store)->get_A() + (a)] = (value); } while(0)
 
-// TS worker: write features with sync and auto-update parent linkage
-// Auto-fills parent link: if parent level not updated, inherit from t-1
+// TS worker: write features with sync (no parent linkage, link features managed separately)
 #define TS_WRITE_FEATURES_WITH_SYNC(store, date, level_idx, t, a, f_start, f_end, src, \
                                     sys_done_idx, sys_valid_idx, sys_ts_idx, is_valid) \
   do { \
@@ -412,19 +484,14 @@ public:
     WRITE_FEATURE(store, date, level_idx, t, sys_valid_idx, a, (is_valid) ? 1.0f : 0.0f); \
     WRITE_FEATURE(store, date, level_idx, t, sys_ts_idx, a, \
       static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>( \
-        std::chrono::system_clock::now().time_since_epoch()).count())); \
-    \
-    /* Auto-update parent linkage */ \
-    if ((level_idx) < LEVEL_COUNT - 1 && (a) == 0) { \
-      /* Only first asset updates linkage to avoid race */ \
-      size_t parent_t = (t) > 0 ? (store)->get_parent_link(date, level_idx, (t) - 1) : 0; \
-      (store)->update_parent_link(date, level_idx, t, parent_t); \
-    } \
+        std::chrono::system_clock::now().time_since_epoch()).count() & 0xFFFF)); \
   } while(0)
 
-// Explicitly update parent link when parent level also updates
-// Call this when writing to L1 or L2 (parent level)
-#define UPDATE_PARENT_LINK(store, date, child_level, child_t, parent_t) \
+// Write link feature (L0 only): map L0 time to L1/L2 time
+// link_feature_offset: L0_FieldOffset::_link_to_L1 or _link_to_L2
+// link_value: L1 or L2 time index (stored as _Float16, auto-converted from size_t)
+#define WRITE_LINK_FEATURE(store, date, l0_t, asset_idx, link_feature_offset, link_value) \
   do { \
-    (store)->update_parent_link(date, child_level, child_t, parent_t); \
+    (store)->write_link(date, l0_t, asset_idx, link_feature_offset, static_cast<_Float16>(link_value)); \
   } while(0)
+

@@ -48,7 +48,7 @@ public:
 static bool extract_and_encode(const std::string &archive_path,
                                const std::string &asset_code,
                                const std::string &date_str,
-                               const std::string &temp_dir,
+                               const std::string &database_dir,
                                L2::BinaryEncoder_L2 &encoder,
                                AssetInfo::DateInfo &date_info) {
   // Acquire lock (blocking)
@@ -56,7 +56,7 @@ static bool extract_and_encode(const std::string &archive_path,
   std::lock_guard<std::mutex> lock(*archive_lock);
 
   // Extract from archive
-  const std::string temp_extract_dir = temp_dir + "/tmp_" + asset_code;
+  const std::string temp_extract_dir = database_dir + "/tmp_" + asset_code;
   std::filesystem::create_directories(temp_extract_dir);
 
   const std::string archive_name = std::filesystem::path(archive_path).stem().string();
@@ -80,20 +80,20 @@ static bool extract_and_encode(const std::string &archive_path,
   }
 
   // Move to final location
-  std::filesystem::create_directories(std::filesystem::path(date_info.temp_dir).parent_path());
+  std::filesystem::create_directories(std::filesystem::path(date_info.database_dir).parent_path());
 
   // Remove target if exists to avoid rename failure
-  if (std::filesystem::exists(date_info.temp_dir)) {
-    std::filesystem::remove_all(date_info.temp_dir);
+  if (std::filesystem::exists(date_info.database_dir)) {
+    std::filesystem::remove_all(date_info.database_dir);
   }
 
-  std::filesystem::rename(extracted_dir, date_info.temp_dir);
+  std::filesystem::rename(extracted_dir, date_info.database_dir);
   std::filesystem::remove_all(temp_extract_dir);
 
   // Parse and encode
   std::vector<L2::Snapshot> snapshots;
   std::vector<L2::Order> orders;
-  if (!encoder.process_stock_data(date_info.temp_dir, date_info.temp_dir, asset_code, &snapshots, &orders)) {
+  if (!encoder.process_stock_data(date_info.database_dir, date_info.database_dir, asset_code, &snapshots, &orders)) {
     return false;
   }
 
@@ -101,7 +101,7 @@ static bool extract_and_encode(const std::string &archive_path,
   date_info.order_count = orders.size();
 
   // Scan for generated binary files
-  for (const auto &entry : std::filesystem::directory_iterator(date_info.temp_dir)) {
+  for (const auto &entry : std::filesystem::directory_iterator(date_info.database_dir)) {
     const std::string path = entry.path().string();
     if (path.ends_with(".csv")) {
       std::filesystem::remove(entry.path()); // Clean up CSV
@@ -122,7 +122,7 @@ void encoding_worker(SharedState &state,
                     std::vector<size_t> &asset_id_queue, 
                     std::mutex &queue_mutex, 
                     const std::string &l2_archive_base, 
-                    const std::string &temp_dir, 
+                    const std::string &database_dir, 
                     unsigned int core_id, 
                     misc::ProgressHandle progress_handle) {
   static thread_local bool affinity_set = false;
@@ -181,13 +181,13 @@ void encoding_worker(SharedState &state,
       }
 
       // Encode (blocking on RAR lock if needed)
-      bool success = extract_and_encode(archive_path, asset.asset_code, date_str, temp_dir, encoder, date_info);
+      bool success = extract_and_encode(archive_path, asset.asset_code, date_str, database_dir, encoder, date_info);
 
       if (success) {
         date_info.encoded = 1;
 
         if (Config::CLEANUP_AFTER_PROCESSING) {
-          std::filesystem::remove_all(date_info.temp_dir);
+          std::filesystem::remove_all(date_info.database_dir);
         }
       }
 
