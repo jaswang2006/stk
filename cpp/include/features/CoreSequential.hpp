@@ -1,0 +1,195 @@
+#pragma once
+
+#include "lob/LimitOrderBookDefine.hpp"
+#include "features/FeaturesTick/Tick_Sequential.hpp"
+#include "features/FeaturesMinute/Minute_Sequential.hpp"
+#include "features/FeaturesHour/Hour_Sequential.hpp"
+#include "features/backend/FeatureStore.hpp"
+
+// Resampled minute-level bar data
+struct MinuteBar {
+  uint64_t timestamp_1m;      // minute timestamp
+  uint32_t instrument_id;     // asset identifier
+  double open_1m;             // open price
+  double high_1m;             // high price
+  double low_1m;              // low price
+  double close_1m;            // close price
+  double vwap_1m;             // volume-weighted average price
+  uint64_t volume_1m;         // total volume
+  uint32_t universe_ids_1m;   // universe membership flags
+  bool market_close_1m;       // market close flag
+};
+
+// Resampled hour-level bar data
+struct HourBar {
+  uint64_t timestamp_1h;      // hour timestamp
+  uint32_t instrument_id;     // asset identifier
+  double open_1h;             // open price
+  double high_1h;             // high price
+  double low_1h;              // low price
+  double close_1h;            // close price
+  double vwap_1h;             // volume-weighted average price
+  uint64_t volume_1h;         // total volume
+  uint32_t universe_ids_1h;   // universe membership flags
+  bool market_close_1h;       // market close flag
+  double prev_day_close;      // previous day close
+};
+
+// Sequential Core: Hierarchical 3-level feature computation with resampling
+// Architecture: LOB -> Tick -> (resample) -> Minute -> (resample) -> Hour
+class CoreSequential {
+public:
+  CoreSequential(const LOB_Feature* lob_feature,
+                 GlobalFeatureStore* feature_store = nullptr,
+                 size_t asset_id = 0)
+      : lob_feature_(lob_feature),
+        tick_sequential_(lob_feature),
+        minute_sequential_(&minute_bar_),
+        hour_sequential_(&hour_bar_),
+        feature_store_(feature_store),
+        asset_id_(asset_id) {
+    if (feature_store_) {
+      tick_sequential_.set_store_context(feature_store_, asset_id_);
+      minute_sequential_.set_store_context(feature_store_, asset_id_);
+      hour_sequential_.set_store_context(feature_store_, asset_id_);
+    }
+  }
+
+  // Main entry: compute all 3 levels with cascading resampling
+  void compute_and_store() noexcept {
+    const LOB_Feature& lob = *lob_feature_;
+    const double mid_price = get_mid_price();
+    const uint64_t tick_volume = lob.volume;
+    const uint32_t minute_now = lob.hour * 60u + lob.minute;
+    const uint32_t hour_now = lob.hour;
+    
+    // Update accumulators with current tick data
+    minute_accumulator_.update(mid_price, tick_volume);
+    hour_accumulator_.update(mid_price, tick_volume);
+    
+    // LEVEL 0: Tick-level features (direct from LOB_feature_)
+    tick_sequential_.compute_and_store();
+    
+    // Fast path: same minute → nothing to resample
+    if (minute_now == last_minute_) [[likely]] {
+      return;
+    }
+    
+    // Resample tick → minute
+    const bool is_minute_close = (lob.hour == 11 && lob.minute == 30) ||
+                                 (lob.hour == 15 && lob.minute == 0);
+    resample_tick_to_minute(mid_price, minute_now, is_minute_close);
+    minute_sequential_.compute_and_store();
+    
+    // Resample minute → hour
+    if (hour_now != last_hour_) {
+      resample_minute_to_hour(hour_now);
+      hour_sequential_.compute_and_store();
+    }
+  }
+
+private:
+
+  // Tick → Minute resampling
+  void resample_tick_to_minute(double close_price, uint32_t current_minute, bool is_minute_close) noexcept {
+    last_minute_ = current_minute;
+    
+    // Build minute bar from accumulated tick data
+    minute_bar_ = {
+      .timestamp_1m = current_minute,
+      .instrument_id = static_cast<uint32_t>(asset_id_),
+      .open_1m = minute_accumulator_.open,
+      .high_1m = minute_accumulator_.high,
+      .low_1m = minute_accumulator_.low,
+      .close_1m = close_price,
+      .vwap_1m = minute_accumulator_.get_vwap(),
+      .volume_1m = minute_accumulator_.volume,
+      .universe_ids_1m = 0,
+      .market_close_1m = is_minute_close
+    };
+    
+    minute_accumulator_.reset(close_price);
+  }
+  
+  // Minute → Hour resampling
+  void resample_minute_to_hour(uint32_t current_hour) noexcept {
+    last_hour_ = current_hour;
+    
+    bool is_close = (current_hour == 11 || current_hour == 15);
+    
+    // Build hour bar from accumulated minute data
+    hour_bar_ = {
+      .timestamp_1h = current_hour,
+      .instrument_id = static_cast<uint32_t>(asset_id_),
+      .open_1h = hour_accumulator_.open,
+      .high_1h = hour_accumulator_.high,
+      .low_1h = hour_accumulator_.low,
+      .close_1h = minute_bar_.close_1m,
+      .vwap_1h = hour_accumulator_.get_vwap(),
+      .volume_1h = hour_accumulator_.volume,
+      .universe_ids_1h = 0,
+      .market_close_1h = is_close,
+      .prev_day_close = prev_day_close_
+    };
+    
+    if (is_close) prev_day_close_ = hour_bar_.close_1h;
+    hour_accumulator_.reset(hour_bar_.close_1h);
+  }
+
+  // Get mid price from depth buffer
+  double get_mid_price() const noexcept {
+    if (lob_feature_->depth_buffer.size() < 2 * LOB_FEATURE_DEPTH_LEVELS) {
+      return lob_feature_->price;
+    }
+    Level* best_ask = lob_feature_->depth_buffer[LOB_FEATURE_DEPTH_LEVELS - 1];
+    Level* best_bid = lob_feature_->depth_buffer[LOB_FEATURE_DEPTH_LEVELS];
+    return (best_ask && best_bid) ? (best_bid->price + best_ask->price) * 0.5 : lob_feature_->price;
+  }
+
+  // OHLCV accumulator for resampling
+  struct BarAccumulator {
+    double open = 0;
+    double high = 0;
+    double low = 0;
+    uint64_t volume = 0;
+    double sum_price_volume = 0;
+    
+    void reset(double price) {
+      open = high = low = price;
+      volume = 0;
+      sum_price_volume = 0;
+    }
+    
+    void update(double price, uint64_t vol) {
+      if (volume == 0) open = price;
+      if (price > high) high = price;
+      if (price < low) low = price;
+      sum_price_volume += price * vol;
+      volume += vol;
+    }
+    
+    double get_vwap() const {
+      return volume > 0 ? sum_price_volume / volume : open;
+    }
+  };
+
+  const LOB_Feature* lob_feature_;
+  Tick_Sequential tick_sequential_;
+  Minute_Sequential minute_sequential_;
+  Hour_Sequential hour_sequential_;
+  
+  GlobalFeatureStore* feature_store_;
+  size_t asset_id_;
+  
+  // Resampled data buffers
+  MinuteBar minute_bar_;
+  HourBar hour_bar_;
+  
+  // Resampling state
+  uint32_t last_minute_ = 0;
+  uint32_t last_hour_ = 0;
+  BarAccumulator minute_accumulator_;
+  BarAccumulator hour_accumulator_;
+  double prev_day_close_ = 0;
+};
+
