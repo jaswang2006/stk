@@ -38,12 +38,13 @@ public:
   explicit LimitOrderBook(size_t ORDER_SIZE = L2::DEFAULT_ENCODER_ORDER_SIZE,
                           ExchangeType exchange_type = ExchangeType::SSE,
                           GlobalFeatureStore *feature_store = nullptr,
-                          size_t asset_id = 0)
+                          size_t asset_id = 0,
+                          size_t core_id = 0)
       : price_levels_(1024),
         order_lookup_(ORDER_SIZE),      // BumpDict with pre-allocated capacity
         order_memory_pool_(ORDER_SIZE), // BumpPool for Order objects
         exchange_type_(exchange_type),
-        core_sequential_(&LOB_feature_, feature_store, asset_id) {
+        core_sequential_(&LOB_feature_, feature_store, asset_id, core_id) {
   }
   
   // Set current date for feature computation

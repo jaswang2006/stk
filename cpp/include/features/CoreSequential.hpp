@@ -41,13 +41,15 @@ class CoreSequential {
 public:
   CoreSequential(const LOB_Feature* lob_feature,
                  GlobalFeatureStore* feature_store = nullptr,
-                 size_t asset_id = 0)
+                 size_t asset_id = 0,
+                 size_t core_id = 0)
       : lob_feature_(lob_feature),
-        tick_sequential_(lob_feature),
+        tick_sequential_(lob_feature, feature_store, asset_id, core_id),
         minute_sequential_(&minute_bar_),
         hour_sequential_(&hour_bar_),
         feature_store_(feature_store),
-        asset_id_(asset_id) {
+        asset_id_(asset_id),
+        core_id_(core_id) {
     if (feature_store_) {
       tick_sequential_.set_store_context(feature_store_, asset_id_);
       minute_sequential_.set_store_context(feature_store_, asset_id_);
@@ -198,5 +200,7 @@ private:
   BarAccumulator minute_accumulator_;
   BarAccumulator hour_accumulator_;
   double prev_day_close_ = 0;
+  
+  size_t core_id_ = 0;
 };
 

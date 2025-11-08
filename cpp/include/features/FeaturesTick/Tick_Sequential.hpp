@@ -8,8 +8,14 @@
 // Input: LOB_Feature from LimitOrderBook
 class Tick_Sequential {
 public:
-  explicit Tick_Sequential(const LOB_Feature* lob_feature)
-      : lob_feature_(lob_feature) {}
+  explicit Tick_Sequential(const LOB_Feature* lob_feature,
+                           GlobalFeatureStore* store = nullptr,
+                           size_t asset_id = 0,
+                           size_t core_id = 0)
+      : lob_feature_(lob_feature),
+        feature_store_(store),
+        asset_id_(asset_id),
+        core_id_(core_id) {}
 
   void set_store_context(GlobalFeatureStore* store, size_t asset_id) {
     feature_store_ = store;
@@ -52,6 +58,9 @@ public:
                                 L0_TS_START, L0_TS_END, features,
                                 L0_SYS_DONE_IDX, L0_SYS_VALID_IDX, L0_SYS_TIMESTAMP_IDX,
                                 is_valid);
+    
+    // Mark this TS core done for this timeslot
+    feature_store_->mark_ts_core_done(date_str_, level_idx, core_id_, t);
   }
 
 private:
@@ -70,6 +79,7 @@ private:
   const LOB_Feature* lob_feature_;
   GlobalFeatureStore* feature_store_ = nullptr;
   size_t asset_id_ = 0;
+  size_t core_id_ = 0;
   std::string date_str_;
 };
 

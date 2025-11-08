@@ -60,7 +60,7 @@ void sequential_worker(const SharedState &state,
   for (size_t asset_id : my_asset_ids) {
     const auto &asset = state.assets[asset_id];
     lobs.push_back(std::make_unique<LimitOrderBook>(
-        L2::DEFAULT_ENCODER_ORDER_SIZE, asset.exchange_type, feature_store, asset.asset_id));
+        L2::DEFAULT_ENCODER_ORDER_SIZE, asset.exchange_type, feature_store, asset.asset_id, worker_id));
     decoders.push_back(std::make_unique<L2::BinaryDecoder_L2>(
         L2::DEFAULT_ENCODER_SNAPSHOT_SIZE, L2::DEFAULT_ENCODER_ORDER_SIZE));
   }
@@ -68,12 +68,13 @@ void sequential_worker(const SharedState &state,
   // Progress label
   char label_buf[128];
   if (!my_asset_ids.empty()) {
-    snprintf(label_buf, sizeof(label_buf), "%3zu Assets: %s(%s)",
+    snprintf(label_buf, sizeof(label_buf), "时序核心%2d: %2zu Assets: %s(%s)",
+             worker_id,
              my_asset_ids.size(),
              state.assets[my_asset_ids[0]].asset_code.c_str(),
              state.assets[my_asset_ids[0]].asset_name.c_str());
   } else {
-    snprintf(label_buf, sizeof(label_buf), "0 Assets");
+    snprintf(label_buf, sizeof(label_buf), "时序核心%2d: Idle", worker_id);
   }
   progress_handle.set_label(label_buf);
 
@@ -105,8 +106,12 @@ void sequential_worker(const SharedState &state,
       }
     }
 
-    // Cross-sectional feature computation point
-    // TODO: Insert cross-sectional factor calculation here
+    // Mark this core as done for this date (for CS sync)
+    // Even if this core had no data, CS worker needs to know this core is done
+    // By marking the last timeslot, all previous timeslots are implicitly marked as done
+    constexpr size_t level_idx = 0;
+    const size_t capacity = feature_store->get_T(level_idx);
+    feature_store->mark_ts_core_done(date_str, level_idx, worker_id, capacity - 1);
 
     // Update progress
     auto current_time = std::chrono::steady_clock::now();

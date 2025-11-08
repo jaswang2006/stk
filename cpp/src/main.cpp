@@ -248,10 +248,11 @@ int main() {
     std::cout << "=== Phase 2: Analysis ===" << "\n";
 
     // Initialize global feature store
+    // Analysis phase: (N-1) TS workers + 1 CS worker = N total workers
+    const unsigned int num_ts_workers = num_workers - 1;
     const size_t num_assets = state.assets.size();
-    const size_t num_ts_cores = num_workers; // Match TS worker count
     const size_t tensor_pool_size = state.all_dates.size(); // Match total dates
-    GlobalFeatureStore feature_store(num_assets, num_ts_cores, tensor_pool_size);
+    GlobalFeatureStore feature_store(num_assets, num_ts_workers, tensor_pool_size);
 
     // Load balancing: sort assets by order count (already collected during encoding!)
     std::vector<std::pair<size_t, size_t>> asset_workloads; // (asset_id, order_count)
@@ -264,8 +265,8 @@ int main() {
     std::sort(asset_workloads.begin(), asset_workloads.end(),
               [](const auto &a, const auto &b) { return a.second > b.second; });
 
-    // Greedy assignment: each asset goes to worker with minimum current load
-    std::vector<size_t> worker_loads(num_workers, 0);
+    // Greedy assignment: each asset goes to TS worker with minimum current load
+    std::vector<size_t> worker_loads(num_ts_workers, 0);
 
     for (const auto &[asset_id, order_count] : asset_workloads) {
       size_t min_worker = std::min_element(worker_loads.begin(), worker_loads.end()) - worker_loads.begin();
@@ -273,27 +274,27 @@ int main() {
       worker_loads[min_worker] += order_count;
     }
 
-    // Launch TS workers + 1 CS worker
-    const unsigned int total_workers = num_workers + 1;
-    auto analysis_progress = std::make_shared<misc::ParallelProgress>(total_workers);
+    // Launch (N-1) TS workers + 1 CS worker = N total workers
+    auto analysis_progress = std::make_shared<misc::ParallelProgress>(num_workers);
     std::vector<std::future<void>> workers;
 
-    // TS workers
-    for (unsigned int i = 0; i < num_workers; ++i) {
-      workers.push_back(std::async(std::launch::async,
-                                   sequential_worker,
-                                   std::cref(state),
-                                   static_cast<int>(i),
-                                   &feature_store,
-                                   analysis_progress->acquire_slot("")));
+    // TS workers (cores 0 to N-2)
+    for (unsigned int i = 0; i < num_ts_workers; ++i) {
+      workers.push_back(std::async(std::launch::async, [&state, i, &feature_store, analysis_progress]() {
+        if (misc::Affinity::supported()) {
+          misc::Affinity::pin_to_core(i);
+        }
+        sequential_worker(state, static_cast<int>(i), &feature_store, analysis_progress->acquire_slot(""));
+      }));
     }
 
-    // CS worker (single thread)
-    workers.push_back(std::async(std::launch::async,
-                                 crosssectional_worker,
-                                 std::cref(state),
-                                 &feature_store,
-                                 analysis_progress->acquire_slot("")));
+    // CS worker (core N-1)
+    workers.push_back(std::async(std::launch::async, [&state, &feature_store, analysis_progress, num_ts_workers]() {
+      if (misc::Affinity::supported()) {
+        misc::Affinity::pin_to_core(num_ts_workers);
+      }
+      crosssectional_worker(state, &feature_store, analysis_progress->acquire_slot(""));
+    }));
 
     // Wait for all workers
     for (auto &worker : workers) {
