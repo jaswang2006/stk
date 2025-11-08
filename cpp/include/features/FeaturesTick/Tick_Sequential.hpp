@@ -52,12 +52,14 @@ public:
       features[4] = compute_signed_volume_imb();
     }
     
-    // Write with automatic synchronization
+    // Write TS features
     constexpr size_t level_idx = 0;
-    TS_WRITE_FEATURES_WITH_SYNC(feature_store_, date_str_, level_idx, t, asset_id_,
-                                L0_TS_START, L0_TS_END, features,
-                                L0_SYS_DONE_IDX, L0_SYS_VALID_IDX, L0_SYS_TIMESTAMP_IDX,
-                                is_valid);
+    TS_WRITE_FEATURES(feature_store_, date_str_, level_idx, t, asset_id_,
+                      L0_TS_START, L0_TS_END, features);
+    
+    // Write asset validity flag (business logic, not backend requirement)
+    WRITE_FEATURE(feature_store_, date_str_, level_idx, t, L0_FieldOffset::asset_valid, asset_id_,
+                  is_valid ? 1.0f : 0.0f);
     
     // Mark this TS core done for this timeslot
     feature_store_->mark_ts_core_done(date_str_, level_idx, core_id_, t);

@@ -489,17 +489,6 @@ public:
 #define WRITE_FEATURE(store, date, level_idx, t, f, a, value) \
   do { (store)->get_data_ptr(date, level_idx)[(t) * (store)->get_F(level_idx) * (store)->get_A() + (f) * (store)->get_A() + (a)] = (value); } while(0)
 
-// TS worker: write features with sync (no parent linkage, link features managed separately)
-#define TS_WRITE_FEATURES_WITH_SYNC(store, date, level_idx, t, a, f_start, f_end, src, \
-                                    sys_done_idx, sys_valid_idx, sys_ts_idx, is_valid) \
-  do { \
-    TS_WRITE_FEATURES(store, date, level_idx, t, a, f_start, f_end, src); \
-    WRITE_FEATURE(store, date, level_idx, t, sys_done_idx, a, 1.0f); \
-    WRITE_FEATURE(store, date, level_idx, t, sys_valid_idx, a, (is_valid) ? 1.0f : 0.0f); \
-    WRITE_FEATURE(store, date, level_idx, t, sys_ts_idx, a, \
-      static_cast<float>(std::chrono::duration_cast<std::chrono::milliseconds>( \
-        std::chrono::system_clock::now().time_since_epoch()).count() & 0xFFFF)); \
-  } while(0)
 
 // Write link feature (L0 only): map L0 time to L1/L2 time
 // link_feature_offset: L0_FieldOffset::_link_to_L1 or _link_to_L2

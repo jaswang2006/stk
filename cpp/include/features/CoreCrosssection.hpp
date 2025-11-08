@@ -88,8 +88,8 @@ inline void compute_cs_for_timeslot(GlobalFeatureStore* store, const std::string
   const size_t A = store->get_A();
   constexpr size_t level_idx = 0;
   
-  // Read _sys_valid flags to filter assets (_Float16 auto-converts to float)
-  const _Float16* valid_flags = CS_READ_ALL_ASSETS(store, date, level_idx, t, L0_SYS_VALID_IDX);
+  // Read asset_valid flags to filter assets (_Float16 auto-converts to float)
+  const _Float16* valid_flags = CS_READ_ALL_ASSETS(store, date, level_idx, t, L0_FieldOffset::asset_valid);
   
   // Build valid asset indices
   std::vector<size_t> valid_indices;

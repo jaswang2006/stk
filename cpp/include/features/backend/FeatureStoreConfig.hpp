@@ -167,29 +167,49 @@ constexpr FeatureRange get_feature_range(FeatureDataType type) {
   return {start, end};
 }
 
-// Macros for convenient access
+// Macros for runtime level selection (prefer constexpr ranges above for compile-time)
 #define GET_TS_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::TS)
 #define GET_CS_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::CS)
 #define GET_LB_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::LB)
-#define GET_OT_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::OT)
+#define GET_SH_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::SH)
+#define GET_META_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::META)
 
 // ============================================================================
-// SYSTEM FEATURE INDICES - For synchronization
+// FEATURE TYPE RANGES - Auto-computed from FeatureDataType, name-independent
 // ============================================================================
 
-// Level 0 system features (for TS-CS synchronization)
-constexpr size_t L0_SYS_DONE_IDX = L0_FieldOffset::_sys_done;
-constexpr size_t L0_SYS_VALID_IDX = L0_FieldOffset::_sys_valid;
-constexpr size_t L0_SYS_TIMESTAMP_IDX = L0_FieldOffset::_sys_timestamp;
+// Auto-computed ranges for each level and data type
+// Usage: L0_TS_RANGE.start, L0_TS_RANGE.end, L0_TS_RANGE.count()
 
-// Feature range boundaries for Level 0
-constexpr size_t L0_TS_START = L0_FieldOffset::tick_ret_z;
-constexpr size_t L0_TS_END = L0_FieldOffset::cs_spread_rank;
-constexpr size_t L0_CS_START = L0_FieldOffset::cs_spread_rank;
-constexpr size_t L0_CS_END = L0_FieldOffset::next_tick_ret;
-constexpr size_t L0_LB_START = L0_FieldOffset::next_tick_ret;
-constexpr size_t L0_LB_END = L0_FieldOffset::_sys_done;
-constexpr size_t L0_OT_START = L0_FieldOffset::_sys_done;
+// Level 0
+constexpr auto L0_TS_RANGE = get_feature_range<0>(FeatureDataType::TS);
+constexpr auto L0_CS_RANGE = get_feature_range<0>(FeatureDataType::CS);
+constexpr auto L0_LB_RANGE = get_feature_range<0>(FeatureDataType::LB);
+constexpr auto L0_SH_RANGE = get_feature_range<0>(FeatureDataType::SH);
+constexpr auto L0_META_RANGE = get_feature_range<0>(FeatureDataType::META);
+
+// Level 1
+constexpr auto L1_TS_RANGE = get_feature_range<1>(FeatureDataType::TS);
+constexpr auto L1_CS_RANGE = get_feature_range<1>(FeatureDataType::CS);
+constexpr auto L1_LB_RANGE = get_feature_range<1>(FeatureDataType::LB);
+constexpr auto L1_SH_RANGE = get_feature_range<1>(FeatureDataType::SH);
+
+// Level 2
+constexpr auto L2_TS_RANGE = get_feature_range<2>(FeatureDataType::TS);
+constexpr auto L2_CS_RANGE = get_feature_range<2>(FeatureDataType::CS);
+constexpr auto L2_LB_RANGE = get_feature_range<2>(FeatureDataType::LB);
+constexpr auto L2_SH_RANGE = get_feature_range<2>(FeatureDataType::SH);
+
+// Legacy aliases for compatibility (deprecated, use L0_TS_RANGE.start/.end instead)
+constexpr size_t L0_TS_START = L0_TS_RANGE.start;
+constexpr size_t L0_TS_END = L0_TS_RANGE.end;
+constexpr size_t L0_CS_START = L0_CS_RANGE.start;
+constexpr size_t L0_CS_END = L0_CS_RANGE.end;
+constexpr size_t L0_LB_START = L0_LB_RANGE.start;
+constexpr size_t L0_LB_END = L0_LB_RANGE.end;
+constexpr size_t L0_SH_START = L0_SH_RANGE.start;
+constexpr size_t L0_SH_END = L0_SH_RANGE.end;
+constexpr size_t L0_META_START = L0_META_RANGE.start;
 
 // ============================================================================
 // TIME INDEX CONVERSION

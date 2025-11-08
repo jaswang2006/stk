@@ -55,13 +55,12 @@
 //     │              flush_tensor() 导出到磁盘 -> 清零 -> 重绑定新日期
 //     └─ 负载均衡: 最快的 TS core 触发分配，自动回收最老的完成 tensor
 //
-//   - 写入特征: TS_WRITE_FEATURES_WITH_SYNC()
+//   - 写入特征: TS_WRITE_FEATURES()
 //     ├─ 写入 [T][F][A] 布局的数据
-//     ├─ 自动更新 parent_link[level][t]: 记录 L0_t -> L1_t, L1_t -> L2_t 映射
-//     │  （若该时刻父级未更新，继承 t-1 的 parent，实现非均匀提频映射）
-//     └─ mark_ts_core_done(date, level, core_id, l0_t): 更新 ts_progress[level][core]
+//     └─ mark_ts_core_done(date, level, core_id, l0_t): 更新 ts_progress[level][core] (唯一同步机制)
 //
-//   - 父级更新: L1/L2 TS 写入时，调用 UPDATE_PARENT_LINK() 刷新子级的 parent 指针
+//   - 时间映射: L0 feature store 包含 _link_to_L1 和 _link_to_L2 两个特殊 feature
+//     └─ 使用 WRITE_LINK_FEATURE() 宏写入 L0_t -> L1_t, L0_t -> L2_t 的映射关系
 //
 // 【2. CS Worker 读取/写入流程】
 //   - 轮询等待: is_timeslot_ready(date, level, l0_t)
@@ -77,22 +76,28 @@
 //   - Pool 大小固定 (默认 10 个 daily tensor)
 //   - 新日期分配时若 pool 满:
 //     ├─ 找到第一个 cs_done=true 的 tensor (已完成全部 TS+CS 处理)
-//     ├─ flush_tensor(): 导出提频后的完整 [T_L0, F0+F1+F2, A] 到磁盘
+//     ├─ flush_tensor(): 根据 STORE_UNIFIED_DAILY_TENSOR 模式导出到磁盘
+//     │  * Unified 模式: 导出提频后的 [T_L0, F_total, A] 单文件
+//     │  * Separate 模式: 导出三个独立的 [T_Lx, F_Lx, A] 文件
 //     └─ reset() 清零重用
 //
 // 【4. 导出机制 (flush_tensor)】
-//   - 遍历 L0 时间 t0 = 0..T_L0-1:
-//     ├─ L0 特征: data[0][t0][:][:] 
-//     ├─ L1 特征: t1 = parent_link[0][t0], data[1][t1][:][:]  (提频)
-//     └─ L2 特征: t2 = parent_link[1][t1], data[2][t2][:][:]  (提频)
-//   - 输出文件: output/features/YYYY/MM/DD/features.bin
-//     格式: [header: T,F,A] + [T_L0 个 [F_total, A] 块]
+//   - 两种模式 (STORE_UNIFIED_DAILY_TENSOR):
+//     * Unified (true): 单文件 features.bin, [T_L0, F_total, A]
+//       - 遍历 L0 时间 t0, 从 L0 的 _link_to_L1/_link_to_L2 feature 读取 t1/t2
+//       - 输出 [L0[t0] + L1[t1] + L2[t2]] 按 F 维度拼接
+//     * Separate (false): 三个文件 features_L0/L1/L2.bin
+//       - features_L0.bin: [T0, F0, A] 包含 _link_to_L1/_link_to_L2
+//       - features_L1.bin: [T1, F1, A]
+//       - features_L2.bin: [T2, F2, A]
+//   - 输出目录: output/features/YYYY/MM/DD/
 //
-// 【5. 多级 Parent Linkage】
-//   - parent_link[0][t0] = t1: L0 的第 t0 个时刻对应 L1 的第 t1 个时刻
-//   - parent_link[1][t1] = t2: L1 的第 t1 个时刻对应 L2 的第 t2 个时刻
-//   - 自动填充逻辑: 若当前 L0_t 时，L1 未更新，则继承 parent_link[0][t-1]
-//     └─ 支持非均匀时间映射 (例: L1 每 N 个 L0 更新一次)
+// 【5. 时间映射机制 (Link Features)】
+//   - L0 包含两个 META 类型 feature: _link_to_L1, _link_to_L2
+//   - 存储格式: _Float16 (reinterpret 为 uint16 时间索引)
+//   - 映射关系: L0[t0]._link_to_L1 = t1, L0[t0]._link_to_L2 = t2
+//   - TS worker 负责在计算 L1/L2 feature 时更新对应的 link feature
+//   - 支持非均匀时间映射 (例: L1 每 N 个 L0 更新一次，多个 L0 指向同一 L1)
 //
 // 【关键设计】
 //   - 无锁同步: ts_progress 用 atomic，CS 轮询检查，无 condition_variable
@@ -106,20 +111,20 @@
 //
 // >> TS Worker 接口:
 //   - mark_ts_core_done(date, level, core_id, l0_t): 更新 TS core 进度，通知 CS worker 该 core 已完成 l0_t 时刻
-//   - get_data_ptr(date, level) -> float*: 获取 [T][F][A] 布局的数据指针，供宏访问
-//   - update_parent_link(date, child_level, child_t, parent_t): 手动更新父级映射（L1/L2 TS 更新时调用）
+//   - get_data_ptr(date, level) -> feature_storage_t*: 获取 [T][F][A] 布局的数据指针（_Float16），供宏访问
+//   - write_link(date, l0_t, asset_idx, link_feature_offset, link_value): 写入 L0 时间映射（_link_to_L1/_link_to_L2）
 //
 // >> CS Worker 接口:
 //   - is_timeslot_ready(date, level, l0_t) -> bool: 检查所有 TS cores 是否完成该时刻（轮询等待）
 //   - mark_date_complete(date): 标记该日期所有 TS+CS 处理完成，允许 tensor 被回收
 //
 // >> 宏接口 (TS/CS):
-//   - TS_WRITE_FEATURES_WITH_SYNC(store, date, level, t, a, f_start, f_end, src, ...): 写入 TS 特征 + 自动同步 + 自动填充 parent_link
-//   - CS_READ_ALL_ASSETS(store, date, level, t, f) -> float*: 读取某时刻某特征的所有资产（返回 A 个连续 float 指针）
+//   - TS_WRITE_FEATURES(store, date, level, t, a, f_start, f_end, src): 批量写入 TS 特征
+//   - CS_READ_ALL_ASSETS(store, date, level, t, f) -> feature_storage_t*: 读取某时刻某特征的所有资产（返回 A 个连续指针）
 //   - CS_WRITE_ALL_ASSETS(store, date, level, t, f, src, count): 写入某时刻某特征的所有资产
-//   - READ_FEATURE(store, date, level, t, f, a) -> float: 读取单个特征值
+//   - READ_FEATURE(store, date, level, t, f, a) -> feature_storage_t: 读取单个特征值
 //   - WRITE_FEATURE(store, date, level, t, f, a, value): 写入单个特征值
-//   - UPDATE_PARENT_LINK(store, date, child_level, child_t, parent_t): 手动更新 parent linkage（L1/L2 更新时调用）
+//   - WRITE_LINK_FEATURE(store, date, l0_t, asset_idx, link_offset, link_value): 写入 L0 时间映射 (backend专用)
 //
 // >> 元数据:
 //   - get_F(level) -> size_t         获取该层级特征数
@@ -202,13 +207,11 @@ enum class NormMethod : uint8_t {
   X(cs_liquidity_ratio,   "流动性比率截面",     "CS Liquidity Ratio",         CS,   LIQUIDITY,      RATIO,      ZSCORE,    "(top_size/median_H)/z-score",                               "当前top-of-book size相对历史中位数的截面z-score") \
   X(next_tick_ret,        "下tick收益",         "Next Tick Return",           LB,   LABEL,          FUTURE_RET, NONE,      "log(mid_{t+1}/mid_t)",                                      "下一个tick的对数收益，作为预测目标") \
   X(next_5tick_ret,       "未来5tick收益",      "Next 5-Tick Return",         LB,   LABEL,          FUTURE_RET, NONE,      "log(mid_{t+5}/mid_t)",                                      "未来5个tick的累计对数收益，中期预测目标") \
+  X(asset_valid,          "资产有效标志",       "Asset Valid Flag",           SH,   META,           RAW,        NONE,      "1.0=valid, 0.0=invalid(inactive/suspended)",                "TS/CS共享：标记该asset数据是否有效(停牌/无数据则为0)，业务逻辑使用") \
   X(universe_size,        "全域规模",           "Universe Size",              SH,   META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "TS/CS共享：当前时刻universe中有效合约数量") \
   X(market_mid_price,     "市场基准价格",       "Market Mid Price",           SH,   META,           BENCHMARK,  NONE,      "benchmark_instrument_mid_price",                            "TS/CS共享：市场基准合约的mid价格") \
-  X(_sys_done,            "计算完成标志",       "Computation Done Flag",      SH,   META,           RAW,        NONE,      "1.0=done, 0.0=not done",                                    "TS/CS共享：标记该asset在该时刻的TS计算是否完成") \
-  X(_sys_valid,           "数据有效标志",       "Data Valid Flag",            SH,   META,           RAW,        NONE,      "1.0=valid, 0.0=invalid(inactive/suspended)",                "TS/CS共享：标记该asset数据是否有效(停牌/无数据则为0)") \
-  X(_sys_timestamp,       "计算时间戳",         "Computation Timestamp",      SH,   META,           RAW,        NONE,      "unix_timestamp_ms",                                         "TS/CS共享：记录该asset完成计算的时间戳(用于调试/验证)") \
-  X(_link_to_L1,          "L1时间索引",         "Link to L1 Time Index",      META, META,           RAW,        NONE,      "reinterpret_cast<float>(uint32_t_L1_index)",                "Backend元数据：L0时刻对应的L1时间索引，存储为float16但解释为uint16") \
-  X(_link_to_L2,          "L2时间索引",         "Link to L2 Time Index",      META, META,           RAW,        NONE,      "reinterpret_cast<float>(uint32_t_L2_index)",                "Backend元数据：L0时刻对应的L2时间索引，存储为float16但解释为uint16")
+  X(_link_to_L1,          "L1时间索引",         "Link to L1 Time Index",      META, META,           RAW,        NONE,      "static_cast<_Float16>(size_t_L1_index)",                    "Backend元数据：L0时刻对应的L1时间索引，存储为_Float16，导出时转为size_t") \
+  X(_link_to_L2,          "L2时间索引",         "Link to L2 Time Index",      META, META,           RAW,        NONE,      "static_cast<_Float16>(size_t_L2_index)",                    "Backend元数据：L0时刻对应的L2时间索引，存储为_Float16，导出时转为size_t")
 
 // ============================================================================
 // LEVEL 1: Minute-level Features (聚合分钟条, 窗口: 1/5/15/60 minutes)
