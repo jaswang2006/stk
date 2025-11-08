@@ -25,7 +25,7 @@ public:
   }
 
 private:
-  const HourBar* hour_bar_;
+  [[maybe_unused]] const HourBar* hour_bar_;
   GlobalFeatureStore* feature_store_ = nullptr;
   size_t asset_id_ = 0;
 };

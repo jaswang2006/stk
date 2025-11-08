@@ -45,6 +45,96 @@
 // stride<1MB: L2访问优化; 
 
 // ============================================================================
+// GlobalFeatureStore 内部流程说明
+// ============================================================================
+//
+// 【1. TS Core 写入流程】
+//   - 首次写入某日期: get_day_data(date) 检查 tensor pool
+//     ├─ Pool 有空位 -> 分配新 tensor，清零，绑定到 date_map_
+//     ├─ Pool 已满 -> 查找 cs_done=true 的 tensor
+//     │              flush_tensor() 导出到磁盘 -> 清零 -> 重绑定新日期
+//     └─ 负载均衡: 最快的 TS core 触发分配，自动回收最老的完成 tensor
+//
+//   - 写入特征: TS_WRITE_FEATURES_WITH_SYNC()
+//     ├─ 写入 [T][F][A] 布局的数据
+//     ├─ 自动更新 parent_link[level][t]: 记录 L0_t -> L1_t, L1_t -> L2_t 映射
+//     │  （若该时刻父级未更新，继承 t-1 的 parent，实现非均匀提频映射）
+//     └─ mark_ts_core_done(date, level, core_id, l0_t): 更新 ts_progress[level][core]
+//
+//   - 父级更新: L1/L2 TS 写入时，调用 UPDATE_PARENT_LINK() 刷新子级的 parent 指针
+//
+// 【2. CS Worker 读取/写入流程】
+//   - 轮询等待: is_timeslot_ready(date, level, l0_t)
+//     └─ 检查所有 TS cores 的 ts_progress[level][core] > l0_t (无锁轮询)
+//
+//   - 跨资产计算: CS_READ_ALL_ASSETS() / CS_WRITE_ALL_ASSETS()
+//     └─ 直接访问 [T][F][A] 布局，F 维度按 A 连续，cache 友好
+//
+//   - 完成标记: mark_date_complete(date)
+//     └─ 设置 cs_done=true，允许该 tensor 被后续回收
+//
+// 【3. Tensor Pool 回收机制】
+//   - Pool 大小固定 (默认 10 个 daily tensor)
+//   - 新日期分配时若 pool 满:
+//     ├─ 找到第一个 cs_done=true 的 tensor (已完成全部 TS+CS 处理)
+//     ├─ flush_tensor(): 导出提频后的完整 [T_L0, F0+F1+F2, A] 到磁盘
+//     └─ reset() 清零重用
+//
+// 【4. 导出机制 (flush_tensor)】
+//   - 遍历 L0 时间 t0 = 0..T_L0-1:
+//     ├─ L0 特征: data[0][t0][:][:] 
+//     ├─ L1 特征: t1 = parent_link[0][t0], data[1][t1][:][:]  (提频)
+//     └─ L2 特征: t2 = parent_link[1][t1], data[2][t2][:][:]  (提频)
+//   - 输出文件: output/features/YYYY/MM/DD/features.bin
+//     格式: [header: T,F,A] + [T_L0 个 [F_total, A] 块]
+//
+// 【5. 多级 Parent Linkage】
+//   - parent_link[0][t0] = t1: L0 的第 t0 个时刻对应 L1 的第 t1 个时刻
+//   - parent_link[1][t1] = t2: L1 的第 t1 个时刻对应 L2 的第 t2 个时刻
+//   - 自动填充逻辑: 若当前 L0_t 时，L1 未更新，则继承 parent_link[0][t-1]
+//     └─ 支持非均匀时间映射 (例: L1 每 N 个 L0 更新一次)
+//
+// 【关键设计】
+//   - 无锁同步: ts_progress 用 atomic，CS 轮询检查，无 condition_variable
+//   - 内存复用: Tensor pool 避免频繁 alloc/free，预分配固定数量
+//   - 自动负载均衡: 最快的 TS core 触发回收，隐式实现生产者-消费者同步
+//   - Cache 友好: [T][F][A] 布局，CS 操作时 A 维度连续访问
+//
+// ============================================================================
+//
+// 【GlobalFeatureStore Public API】
+//
+// >> TS Worker 接口:
+//   - mark_ts_core_done(date, level, core_id, l0_t): 更新 TS core 进度，通知 CS worker 该 core 已完成 l0_t 时刻
+//   - get_data_ptr(date, level) -> float*: 获取 [T][F][A] 布局的数据指针，供宏访问
+//   - update_parent_link(date, child_level, child_t, parent_t): 手动更新父级映射（L1/L2 TS 更新时调用）
+//
+// >> CS Worker 接口:
+//   - is_timeslot_ready(date, level, l0_t) -> bool: 检查所有 TS cores 是否完成该时刻（轮询等待）
+//   - mark_date_complete(date): 标记该日期所有 TS+CS 处理完成，允许 tensor 被回收
+//
+// >> 宏接口 (TS/CS):
+//   - TS_WRITE_FEATURES_WITH_SYNC(store, date, level, t, a, f_start, f_end, src, ...): 写入 TS 特征 + 自动同步 + 自动填充 parent_link
+//   - CS_READ_ALL_ASSETS(store, date, level, t, f) -> float*: 读取某时刻某特征的所有资产（返回 A 个连续 float 指针）
+//   - CS_WRITE_ALL_ASSETS(store, date, level, t, f, src, count): 写入某时刻某特征的所有资产
+//   - READ_FEATURE(store, date, level, t, f, a) -> float: 读取单个特征值
+//   - WRITE_FEATURE(store, date, level, t, f, a, value): 写入单个特征值
+//   - UPDATE_PARENT_LINK(store, date, child_level, child_t, parent_t): 手动更新 parent linkage（L1/L2 更新时调用）
+//
+// >> 元数据:
+//   - get_F(level) -> size_t         获取该层级特征数
+//   - get_A() -> size_t              获取资产数
+//   - get_T(level) -> size_t         获取该层级时间容量
+//   - get_num_assets() -> size_t     总资产数
+//   - get_num_dates() -> size_t      当前日期数
+//
+// >> 导出接口:
+//   - set_output_dir(dir)            设置导出目录
+//   - flush_all()                    导出所有 tensor 到磁盘
+//
+// ============================================================================
+
+// ============================================================================
 // FEATURE METADATA ENCODING SYSTEM
 // ============================================================================
 
@@ -111,6 +201,9 @@ enum class NormMethod : uint8_t {
   X(cs_liquidity_ratio,   "流动性比率截面",     "CS Liquidity Ratio",         CS, LIQUIDITY,      RATIO,      ZSCORE,    "(top_size/median_H)/z-score",                               "当前top-of-book size相对历史中位数的截面z-score") \
   X(next_tick_ret,        "下tick收益",         "Next Tick Return",           LB, LABEL,          FUTURE_RET, NONE,      "log(mid_{t+1}/mid_t)",                                      "下一个tick的对数收益，作为预测目标") \
   X(next_5tick_ret,       "未来5tick收益",      "Next 5-Tick Return",         LB, LABEL,          FUTURE_RET, NONE,      "log(mid_{t+5}/mid_t)",                                      "未来5个tick的累计对数收益，中期预测目标") \
+  X(_sys_done,            "计算完成标志",       "Computation Done Flag",      OT, META,           RAW,        NONE,      "1.0=done, 0.0=not done",                                    "系统特征：标记该asset在该时刻的TS计算是否完成") \
+  X(_sys_valid,           "数据有效标志",       "Data Valid Flag",            OT, META,           RAW,        NONE,      "1.0=valid, 0.0=invalid(inactive/suspended)",                "系统特征：标记该asset数据是否有效(停牌/无数据则为0)") \
+  X(_sys_timestamp,       "计算时间戳",         "Computation Timestamp",      OT, META,           RAW,        NONE,      "unix_timestamp_ms",                                         "系统特征：记录该asset完成计算的时间戳(用于调试/验证)") \
   X(universe_size,        "全域规模",           "Universe Size",              OT, META,           UNIVERSE,   NONE,      "count(valid_instruments)",                                  "当前时刻universe中有效合约数量，用于截面计算") \
   X(market_mid_price,     "市场基准价格",       "Market Mid Price",           OT, META,           BENCHMARK,  NONE,      "benchmark_instrument_mid_price",                            "市场基准合约的mid价格，用于计算beta和相对表现")
 

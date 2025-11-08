@@ -54,6 +54,12 @@ public:
       hour_sequential_.set_store_context(feature_store_, asset_id_);
     }
   }
+  
+  void set_date(const std::string& date_str) {
+    date_str_ = date_str;
+    tick_sequential_.set_date(date_str);
+    // TODO: add set_date for minute/hour when needed
+  }
 
   // Main entry: compute all 3 levels with cascading resampling
   void compute_and_store() noexcept {
@@ -180,6 +186,7 @@ private:
   
   GlobalFeatureStore* feature_store_;
   size_t asset_id_;
+  std::string date_str_;
   
   // Resampled data buffers
   MinuteBar minute_bar_;

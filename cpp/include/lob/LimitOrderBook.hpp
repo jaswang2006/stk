@@ -45,6 +45,11 @@ public:
         exchange_type_(exchange_type),
         core_sequential_(&LOB_feature_, feature_store, asset_id) {
   }
+  
+  // Set current date for feature computation
+  void set_current_date(const std::string& date_str) {
+    core_sequential_.set_date(date_str);
+  }
 
   //======================================================================================
   // PUBLIC API: Order Processing

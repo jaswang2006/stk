@@ -70,6 +70,9 @@ set(SOURCES
     ../../src/codec/binary_encoder_L2.cpp
     ../../src/misc/logging.cpp
     ../../src/misc/file_check.cpp
+    ../../src/worker/encoding_worker.cpp
+    ../../src/worker/sequential_worker.cpp
+    ../../src/worker/crosssectional_worker.cpp
     ../../src/main.cpp
 )
 
@@ -90,8 +93,11 @@ set(HEADERS
     ../../include/codec/binary_decoder_L2.hpp
     ../../include/codec/binary_encoder_L2.hpp
     ../../include/codec/L2_DataType.hpp
-    # ../../include/AnalysisTechnical.hpp
     ../../include/lob/LimitOrderBook.hpp
+    ../../include/worker/shared_state.hpp
+    ../../include/worker/encoding_worker.hpp
+    ../../include/worker/sequential_worker.hpp
+    ../../include/worker/crosssectional_worker.hpp
 )
 
 # Disable fast-math specifically for JSON library to avoid infinity issues

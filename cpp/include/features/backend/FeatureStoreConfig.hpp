@@ -163,6 +163,24 @@ constexpr FeatureRange get_feature_range(FeatureDataType type) {
 #define GET_OT_RANGE(level_idx) get_feature_range<level_idx>(FeatureDataType::OT)
 
 // ============================================================================
+// SYSTEM FEATURE INDICES - For synchronization
+// ============================================================================
+
+// Level 0 system features (for TS-CS synchronization)
+constexpr size_t L0_SYS_DONE_IDX = L0_FieldOffset::_sys_done;
+constexpr size_t L0_SYS_VALID_IDX = L0_FieldOffset::_sys_valid;
+constexpr size_t L0_SYS_TIMESTAMP_IDX = L0_FieldOffset::_sys_timestamp;
+
+// Feature range boundaries for Level 0
+constexpr size_t L0_TS_START = L0_FieldOffset::tick_ret_z;
+constexpr size_t L0_TS_END = L0_FieldOffset::cs_spread_rank;
+constexpr size_t L0_CS_START = L0_FieldOffset::cs_spread_rank;
+constexpr size_t L0_CS_END = L0_FieldOffset::next_tick_ret;
+constexpr size_t L0_LB_START = L0_FieldOffset::next_tick_ret;
+constexpr size_t L0_LB_END = L0_FieldOffset::_sys_done;
+constexpr size_t L0_OT_START = L0_FieldOffset::_sys_done;
+
+// ============================================================================
 // TIME INDEX CONVERSION
 // ============================================================================
 
