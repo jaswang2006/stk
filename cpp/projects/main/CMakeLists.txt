@@ -34,7 +34,7 @@ if(PROFILE_MODE)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-vectorize")                    # No auto-vectorization
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-slp-vectorize")                # No SLP vectorization
     # Disable builtin optimizations
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-builtin")                      # No builtin function optimizations    
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-builtin")                      # No builtin function optimizations
 else()
     message(STATUS "Production build: Optimized for performance")
     
@@ -73,6 +73,7 @@ set(SOURCES
     ../../src/worker/encoding_worker.cpp
     ../../src/worker/sequential_worker.cpp
     ../../src/worker/crosssectional_worker.cpp
+    ../../src/worker/io_worker.cpp
     ../../src/main.cpp
 )
 
@@ -98,6 +99,7 @@ set(HEADERS
     ../../include/worker/encoding_worker.hpp
     ../../include/worker/sequential_worker.hpp
     ../../include/worker/crosssectional_worker.hpp
+    ../../include/worker/io_worker.hpp
 )
 
 # Disable fast-math specifically for JSON library to avoid infinity issues

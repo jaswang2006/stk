@@ -17,6 +17,7 @@ import time
 # Configuration
 # ============================================================================
 ENABLE_PROFILE = False
+ENABLE_BACKTRACE = False
 APP_NAME = "main"                              # C++ project name
 CPUPROFILE_FREQUENCY = 1000000                 # Profiler sampling rate (Hz)
 PROFILER_LIB = '/usr/lib/x86_64-linux-gnu/libprofiler.so.0'
@@ -122,7 +123,7 @@ def run_with_profiling(binary_path, working_dir):
             "\nProfile not generated. Install: sudo apt-get install libgoogle-perftools-dev")
 
 
-def build_project(app_name, enable_profile_mode):
+def build_project(app_name, enable_profile_mode, enable_backtrace):
     """Trigger build via py/{app_name}.py -> build.sh."""
     py_script = f"./py/{app_name}.py"
 
@@ -132,6 +133,7 @@ def build_project(app_name, enable_profile_mode):
 
     env = os.environ.copy()
     env['PROFILE_MODE'] = 'ON' if enable_profile_mode else 'OFF'
+    env['ENABLE_BACKTRACE'] = 'ON' if enable_backtrace else 'OFF'
 
     result = subprocess.run(["python3", py_script], env=env, check=False)
 
@@ -165,7 +167,7 @@ def main():
     _cleanup_background_processes()
 
     # Build project
-    build_project(APP_NAME, ENABLE_PROFILE)
+    build_project(APP_NAME, ENABLE_PROFILE, ENABLE_BACKTRACE)
 
     # Run binary from build directory (binary expects to run from build/ for relative paths)
     build_dir = os.path.abspath(f"cpp/projects/{APP_NAME}/build")

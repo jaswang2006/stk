@@ -1,7 +1,8 @@
-#include "worker/shared_state.hpp"
-#include "worker/encoding_worker.hpp"
-#include "worker/sequential_worker.hpp"
 #include "worker/crosssectional_worker.hpp"
+#include "worker/encoding_worker.hpp"
+#include "worker/io_worker.hpp"
+#include "worker/sequential_worker.hpp"
+#include "worker/shared_state.hpp"
 
 #include "codec/json_config.hpp"
 #include "features/backend/FeatureStore.hpp"
@@ -91,6 +92,7 @@ constexpr const char *DEFAULT_L2_ARCHIVE_BASE = "/I/AM/A/FAKE/PATH/TO/SKIP/ARCHI
 
 constexpr const char *DEFAULT_DATABASE_DIR = "../../../../output/database";
 constexpr const char *DEFAULT_FEATURE_DIR = "../../../../output/features";
+constexpr const char *DEFAULT_CRASH_LOG_DIR = "../../../../output/crash";
 
 // Processing settings - modify for different behaviors
 const bool CLEANUP_AFTER_PROCESSING = false; // Clean up temp files after processing (saves disk space)
@@ -103,15 +105,27 @@ const bool SKIP_EXISTING_BINARIES = true;    // Skip extraction/encoding if bina
 // ============================================================================
 
 int main() {
+  // Load configuration paths first
+  const std::string config_file = Config::DEFAULT_CONFIG_FILE;
+  const std::string stock_info_file = Config::DEFAULT_STOCK_INFO_FILE;
+  const std::string l2_archive_base = Config::DEFAULT_L2_ARCHIVE_BASE;
+  const std::string database_dir = Config::DEFAULT_DATABASE_DIR;
+  const std::string feature_dir = Config::DEFAULT_FEATURE_DIR;
+  const std::string crash_log_dir = Config::DEFAULT_CRASH_LOG_DIR;
+
+  // Create crash log directory and clear old logs
+  std::filesystem::create_directories(crash_log_dir);
+  for (const auto &entry : std::filesystem::directory_iterator(crash_log_dir)) {
+    if (entry.is_regular_file() && entry.path().extension() == ".log") {
+      std::filesystem::remove(entry.path());
+    }
+  }
+
+  // Initialize crash handler globally (once, all threads auto-register)
+  // misc::init_tracer(crash_log_dir.c_str());
+
   try {
     std::cout << "=== L2 Data Processor (CSV Mode) ===" << "\n";
-
-    // Load configuration
-    const std::string config_file = Config::DEFAULT_CONFIG_FILE;
-    const std::string stock_info_file = Config::DEFAULT_STOCK_INFO_FILE;
-    const std::string l2_archive_base = Config::DEFAULT_L2_ARCHIVE_BASE;
-    const std::string database_dir = Config::DEFAULT_DATABASE_DIR;
-    const std::string feature_dir = Config::DEFAULT_FEATURE_DIR;
 
     const JsonConfig::AppConfig app_config = JsonConfig::ParseAppConfig(config_file);
     auto stock_info_map = JsonConfig::ParseStockInfo(stock_info_file);
@@ -229,7 +243,9 @@ int main() {
 
     for (unsigned int i = 0; i < num_workers; ++i) {
       encoding_workers.push_back(
-          std::async(std::launch::async, encoding_worker, std::ref(state), std::ref(asset_id_queue), std::ref(queue_mutex), std::cref(l2_archive_base), std::cref(database_dir), i, encoding_progress->get_handle(static_cast<int>(i))));
+          std::async(std::launch::async, [&state, &asset_id_queue, &queue_mutex, &l2_archive_base, &database_dir, i, encoding_progress]() {
+            encoding_worker(state, asset_id_queue, queue_mutex, l2_archive_base, database_dir, i, encoding_progress->get_handle(static_cast<int>(i)));
+          }));
     }
 
     for (auto &worker : encoding_workers) {
@@ -250,11 +266,17 @@ int main() {
     std::cout << "=== Phase 2: Analysis ===" << "\n";
 
     // Initialize global feature store
-    // Analysis phase: (N-1) TS workers + 1 CS worker = N total workers
-    const unsigned int num_ts_workers = num_workers - 1;
+    // Analysis phase: (N-2) TS workers + 1 CS worker + 1 Flush IO worker = N total workers
+    const unsigned int num_ts_workers = num_workers - 2;
+    const unsigned int flush_io_core = num_workers - 1;  // Last core for Flush IO
+    const unsigned int cs_worker_core = num_workers - 2; // Second-to-last core for CS
     const size_t num_assets = state.assets.size();
-    const size_t tensor_pool_size = state.all_dates.size(); // Match total dates
-    GlobalFeatureStore feature_store(num_assets, num_ts_workers, tensor_pool_size, feature_dir);
+
+    // Tensor pool size: small fixed size (10-20), recycled through flush_and_recycle
+    // Rule of thumb: ~2x number of TS workers to allow pipeline overlap
+    const size_t total_dates = state.all_dates.size();
+
+    GlobalFeatureStore feature_store(num_assets, num_ts_workers, feature_dir);
 
     // Load balancing: sort assets by order count (already collected during encoding!)
     std::vector<std::pair<size_t, size_t>> asset_workloads; // (asset_id, order_count)
@@ -276,11 +298,19 @@ int main() {
       worker_loads[min_worker] += order_count;
     }
 
-    // Launch (N-1) TS workers + 1 CS worker = N total workers
+    // Launch (N-2) TS workers + 1 CS worker + 1 IO worker = N total workers
     auto analysis_progress = std::make_shared<misc::ParallelProgress>(num_workers);
     std::vector<std::future<void>> workers;
 
-    // TS workers (cores 0 to N-2)
+    // IO worker (core N-1, last core)
+    workers.push_back(std::async(std::launch::async, [&feature_store, analysis_progress, flush_io_core, total_dates]() {
+      if (misc::Affinity::supported()) {
+        misc::Affinity::pin_to_core(flush_io_core);
+      }
+      io_worker(&feature_store, analysis_progress->get_handle(static_cast<int>(flush_io_core)), total_dates, static_cast<int>(flush_io_core));
+    }));
+
+    // TS workers (cores 0 to N-3)
     for (unsigned int i = 0; i < num_ts_workers; ++i) {
       workers.push_back(std::async(std::launch::async, [&state, i, &feature_store, analysis_progress]() {
         if (misc::Affinity::supported()) {
@@ -290,12 +320,12 @@ int main() {
       }));
     }
 
-    // CS worker (core N-1)
-    workers.push_back(std::async(std::launch::async, [&state, &feature_store, analysis_progress, num_ts_workers]() {
+    // CS worker (core N-2, second-to-last core)
+    workers.push_back(std::async(std::launch::async, [&state, &feature_store, analysis_progress, cs_worker_core]() {
       if (misc::Affinity::supported()) {
-        misc::Affinity::pin_to_core(num_ts_workers);
+        misc::Affinity::pin_to_core(cs_worker_core);
       }
-      crosssectional_worker(state, &feature_store, static_cast<int>(num_ts_workers), analysis_progress->get_handle(static_cast<int>(num_ts_workers)));
+      crosssectional_worker(state, &feature_store, static_cast<int>(cs_worker_core), analysis_progress->get_handle(static_cast<int>(cs_worker_core)));
     }));
 
     // Wait for all workers
@@ -307,13 +337,8 @@ int main() {
     // Print feature storage summary
     std::cout << "\n";
     std::cout << "Feature Storage Summary:\n";
-    std::cout << "  Total assets: " << feature_store.get_num_assets() << "\n";
-    std::cout << "  Total dates: " << feature_store.get_num_dates() << "\n";
-    std::cout << "\n";
-    
-    // Flush all remaining tensors to disk
-    std::cout << "=== Flushing Features to Disk ===" << "\n";
-    feature_store.flush_all();
+    std::cout << "  Total assets: " << feature_store.query_num_assets() << "\n";
+    std::cout << "  Total dates: " << feature_store.query_num_dates() << "\n";
     std::cout << "\n";
 
     Logger::close();

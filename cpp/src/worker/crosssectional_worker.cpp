@@ -19,8 +19,7 @@ void crosssectional_worker(const SharedState& state,
   // Date-first traversal
   for (size_t date_idx = 0; date_idx < state.all_dates.size(); ++date_idx) {
     const std::string& date_str = state.all_dates[date_idx];
-    constexpr size_t level_idx = 0;
-    const size_t capacity = feature_store->get_T(level_idx);
+    const size_t capacity = feature_store->query_T(0);
     
     // Update progress label
     char label_buf[128];
@@ -32,7 +31,7 @@ void crosssectional_worker(const SharedState& state,
     size_t t = 0;
     while (t < capacity) {
       // Wait for time slot t to be ready (simple polling)
-      while (!feature_store->is_timeslot_ready(date_str, level_idx, t)) {
+      while (!feature_store->cs_check_ready(date_str, 0, t)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
       
@@ -51,7 +50,7 @@ void crosssectional_worker(const SharedState& state,
     progress_handle.update(completed_dates, total_dates, "");
     
     // Mark this date as complete for tensor pool recycling
-    feature_store->mark_date_complete(date_str);
+    feature_store->cs_mark_complete(date_str);
   }
   
   // Final update

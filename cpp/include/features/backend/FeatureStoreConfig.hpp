@@ -203,13 +203,19 @@ constexpr auto L2_SH_RANGE = get_feature_range<2>(FeatureDataType::SH);
 // Legacy aliases for compatibility (deprecated, use L0_TS_RANGE.start/.end instead)
 constexpr size_t L0_TS_START = L0_TS_RANGE.start;
 constexpr size_t L0_TS_END = L0_TS_RANGE.end;
+constexpr size_t L0_TS_COUNT = L0_TS_END - L0_TS_START;
 constexpr size_t L0_CS_START = L0_CS_RANGE.start;
 constexpr size_t L0_CS_END = L0_CS_RANGE.end;
+constexpr size_t L0_CS_COUNT = L0_CS_END - L0_CS_START;
 constexpr size_t L0_LB_START = L0_LB_RANGE.start;
 constexpr size_t L0_LB_END = L0_LB_RANGE.end;
+constexpr size_t L0_LB_COUNT = L0_LB_END - L0_LB_START;
 constexpr size_t L0_SH_START = L0_SH_RANGE.start;
 constexpr size_t L0_SH_END = L0_SH_RANGE.end;
+constexpr size_t L0_SH_COUNT = L0_SH_END - L0_SH_START;
 constexpr size_t L0_META_START = L0_META_RANGE.start;
+constexpr size_t L0_META_END = L0_META_RANGE.end;
+constexpr size_t L0_META_COUNT = L0_META_END - L0_META_START;
 
 // ============================================================================
 // TIME INDEX CONVERSION

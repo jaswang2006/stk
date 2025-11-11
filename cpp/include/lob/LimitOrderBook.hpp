@@ -97,12 +97,12 @@ public:
     LOB_feature_.depth_updated = sync_tob_to_depth_center();
     // ==================== depth update triggered =======================
 
-    // Process resampling (only for TAKER orders)
-    if (is_taker_) {
-      if (resampler_.resample(curr_tick_, is_bid_, order.volume)) {
-        // std::cout << "[RESAMPLE] Bar formed at " << format_time() << std::endl;
-      }
-    }
+    // // Process resampling (only for TAKER orders)
+    // if (is_taker_) {
+    //   if (resampler_.resample(curr_tick_, is_bid_, order.volume)) {
+    //     // std::cout << "[RESAMPLE] Bar formed at " << format_time() << std::endl;
+    //   }
+    // }
 
     // 计算特征(depth 更新后)
     if (LOB_feature_.depth_updated) {

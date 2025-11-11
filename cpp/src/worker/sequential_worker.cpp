@@ -11,33 +11,10 @@
 #include <memory>
 #include <vector>
 
-// ============================================================================
-// ANALYSIS HELPER
-// ============================================================================
-
-static size_t process_binary_files(const AssetInfo::DateInfo &date_info,
-                                   L2::BinaryDecoder_L2 &decoder,
-                                   LimitOrderBook &lob) {
-  size_t order_count = 0;
-  if (!date_info.orders_file.empty()) {
-    std::vector<L2::Order> decoded_orders;
-    if (!decoder.decode_orders(date_info.orders_file, decoded_orders)) {
-      return 0;
-    }
-
-    order_count = decoded_orders.size();
-    for (const auto &ord : decoded_orders) {
-      lob.process(ord);
-    }
-    lob.clear();
-  }
-  return order_count;
-}
-
 void sequential_worker(const SharedState &state,
-                      int worker_id,
-                      GlobalFeatureStore *feature_store,
-                      misc::ProgressHandle progress_handle) {
+                       int worker_id,
+                       GlobalFeatureStore *feature_store,
+                       misc::ProgressHandle progress_handle) {
 
   // Initialize as idle (will be updated if assets are assigned)
   progress_handle.set_label("Idle");
@@ -102,16 +79,29 @@ void sequential_worker(const SharedState &state,
       lobs[i]->set_current_date(date_str);
 
       if (date_info.has_binaries()) {
-        cumulative_orders += process_binary_files(date_info, *decoders[i], *lobs[i]);
+        size_t order_count = 0;
+        if (!date_info.orders_file.empty()) {
+          std::vector<L2::Order> decoded_orders;
+          if (decoders[i]->decode_orders(date_info.orders_file, decoded_orders)) {
+            order_count = decoded_orders.size();
+            for (const auto &ord : decoded_orders) {
+              lobs[i]->process(ord);
+            }
+            lobs[i]->clear();
+          }
+        }
+        cumulative_orders += order_count;
       }
     }
 
     // Mark this core as done for this date (for CS sync)
     // Even if this core had no data, CS worker needs to know this core is done
     // By marking the last timeslot, all previous timeslots are implicitly marked as done
-    constexpr size_t level_idx = 0;
-    const size_t capacity = feature_store->get_T(level_idx);
-    feature_store->mark_ts_core_done(date_str, level_idx, worker_id, capacity - 1);
+    {
+      // L0
+      const size_t capacity = feature_store->query_T(0);
+      feature_store->ts_mark_done(date_str, 0, worker_id, capacity - 1);
+    }
 
     // Update progress
     auto current_time = std::chrono::steady_clock::now();
@@ -123,4 +113,3 @@ void sequential_worker(const SharedState &state,
     progress_handle.update(date_idx + 1, state.all_dates.size(), msg_buf);
   }
 }
-

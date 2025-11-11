@@ -49,11 +49,9 @@
 // ============================================================================
 //
 // 【1. TS Core 写入流程】
-//   - 首次写入某日期: get_day_data(date) 检查 tensor pool
-//     ├─ Pool 有空位 -> 分配新 tensor，清零，绑定到 date_map_
-//     ├─ Pool 已满 -> 查找 cs_done=true 的 tensor
-//     │              flush_tensor() 导出到磁盘 -> 清零 -> 重绑定新日期
-//     └─ 负载均衡: 最快的 TS core 触发分配，自动回收最老的完成 tensor
+//   - 首次写入某日期: get_day_data(date, worker_id, asset_info) 检查 tensor pool
+//     ├─ Pool 有空位 (UNUSED) -> 分配新 tensor (state=IN_USE)，清零，绑定到 date_map_
+//     └─ Pool 已满 -> sleep 10ms，打印等待信息，继续重试
 //
 //   - 写入特征: TS_WRITE_FEATURES()
 //     ├─ 写入 [T][F][A] 布局的数据
@@ -70,16 +68,54 @@
 //     └─ 直接访问 [T][F][A] 布局，F 维度按 A 连续，cache 友好
 //
 //   - 完成标记: mark_date_complete(date)
-//     └─ 设置 cs_done=true，允许该 tensor 被后续回收
+//     └─ 设置 state = CS_DONE (atomic)，IO worker 可见
 //
-// 【3. Tensor Pool 回收机制】
-//   - Pool 大小固定 (默认 10 个 daily tensor)
-//   - 新日期分配时若 pool 满:
-//     ├─ 找到第一个 cs_done=true 的 tensor (已完成全部 TS+CS 处理)
-//     ├─ flush_tensor(): 根据 STORE_UNIFIED_DAILY_TENSOR 模式导出到磁盘
-//     │  * Unified 模式: 导出提频后的 [T_L0, F_total, A] 单文件
-//     │  * Separate 模式: 导出三个独立的 [T_Lx, F_Lx, A] 文件
-//     └─ reset() 清零重用
+// 【2.5. IO Worker 异步 Flush 流程】
+//   - 直接扫描 pool: flush_cs_done_tensors()
+//     └─ 遍历 tensor_pool_[]，检查 state == CS_DONE（无锁，IO worker 独占访问）
+//
+//   - 批量 flush: 对每个 CS_DONE 的 slot
+//     ├─ copy date 字符串（避免引用悬空）
+//     ├─ flush_tensor(): 写入磁盘 (根据 STORE_UNIFIED_DAILY_TENSOR)
+//     ├─ 从 date_map_ 移除（需要锁，仅此处）
+//     └─ reset(): 清零数据，最后原子切换 CS_DONE → UNUSED
+//
+//   - 进度显示: "IO核心11: 23/117" (通过 progress handle，不输出到 stdout)
+//
+// 【3. Tensor Pool 回收机制 - 独立 IO Worker 异步 Flush】
+//   - Pool 大小固定 (默认 2×TS_workers，如 20 个 daily tensor，总内存 ~0.9GB)
+//   - Tensor 生命周期状态机 (atomic state):
+//     UNUSED → (CAS) IN_USE → (atomic) CS_DONE → (IO exclusive) UNUSED
+//   
+//   - Worker 分工 (N 核心总数):
+//     ├─ (N-2) TS核心: 时序特征计算，调用 store.get_data_ptr()
+//     ├─ 1 个 CS核心: 截面特征计算，调用 store.mark_date_complete()
+//     └─ 1 个 IO核心: 独立 worker，直接扫描 pool，flush 到磁盘
+//   
+//   - TS核心分配新日期 (store.get_day_data):
+//     ├─ 1) 查找 UNUSED 状态的 slot，用 CAS 原子切换为 IN_USE
+//     ├─ 2) 成功 → 绑定 date 到 date_map，返回预分配的内存指针
+//     └─ 3) 失败 → sleep 10ms，打印等待信息，继续重试
+//        "TS核心 4: 9 Assets: 301105.SZ(鸿铭股份) - 20250630 - waiting for free tensor"
+//   
+//   - CS核心完成处理 (store.mark_date_complete):
+//     └─ 原子设置 state = CS_DONE，之后不再访问此 tensor
+//   
+//   - IO worker 异步 flush (io_worker):
+//     ├─ 直接扫描 tensor_pool_[] (10ms 间隔)
+//     ├─ 找到 CS_DONE 的 slot → store.flush_cs_done_tensors()
+//     │  ├─ copy date 字符串（避免引用问题）
+//     │  ├─ flush_tensor(): 写入磁盘，无锁（IO worker 独占访问 CS_DONE slot）
+//     │  ├─ erase from date_map（唯一需要锁的地方）
+//     │  └─ reset(): 清零数据，最后原子切换 → UNUSED
+//     └─ 更新 progress: "IO核心11: 23/117" (通过 progress handle)
+//   
+//   - 关键特性:
+//     * 职责边界清晰: state=CS_DONE 后，只有 IO worker 访问，完全无锁
+//     * 预分配内存: 构造时分配所有内存，运行时不再 allocate/free
+//     * CAS 原子分配: UNUSED → IN_USE 用 compare_exchange_strong
+//     * 直接扫描 pool: IO worker 不走 date_map，避免间接访问
+//     * 单一 IO 线程: 无竞争，架构简单
 //
 // 【4. 导出机制 (flush_tensor)】
 //   - 两种模式 (STORE_UNIFIED_DAILY_TENSOR):
@@ -100,10 +136,47 @@
 //   - 支持非均匀时间映射 (例: L1 每 N 个 L0 更新一次，多个 L0 指向同一 L1)
 //
 // 【关键设计】
-//   - 无锁同步: ts_progress 用 atomic，CS 轮询检查，无 condition_variable
-//   - 内存复用: Tensor pool 避免频繁 alloc/free，预分配固定数量
-//   - 自动负载均衡: 最快的 TS core 触发回收，隐式实现生产者-消费者同步
+//   - 数据平面无锁: ts_progress 用 atomic，数据写入无竞争（不同 worker 写不同 assets）
+//   - 控制平面简单: 只在 tensor 分配/回收时需要同步（CAS + 最小化锁范围）
+//   - 职责边界清晰: state=CS_DONE 后独占访问，IO worker 直接扫描 pool
+//   - 预分配内存池: 构造时一次性分配，运行时零 malloc/free
+//   - CAS 原子分配: UNUSED → IN_USE 用 compare_exchange_strong 防止竞争
+//   - 引用安全: flush 前立即 copy date 字符串，避免悬空引用
+//   - 输出隔离: flush 过程无 stdout 输出，避免干扰 parallel progress
 //   - Cache 友好: [T][F][A] 布局，CS 操作时 A 维度连续访问
+//   - 清晰等待: TS 核心 sleep 10ms + 打印等待信息
+//
+// 【并发场景示例】
+//   场景: Pool 大小 20，处理 117 个 dates，N=12 cores (10 TS + 1 CS + 1 IO)
+//   
+//   T0 (初始): Pool 全 UNUSED，内存已预分配（~0.9GB）
+//   
+//   T1 (Day 1-20 计算中):
+//     TS核心 0-9 → 并行计算，用 CAS 分配 20 个 tensor (全部 IN_USE)
+//     CS核心    → 轮询 ts_progress，逐个完成截面计算，原子标记 CS_DONE
+//     IO worker → 扫描 pool[0-19]，发现 CS_DONE，独占访问 flush
+//   
+//   T2 (Day 21 到来):
+//     TS核心 2 需要新 tensor → CAS 循环找 UNUSED，全部失败
+//     → 打印: "TS核心 2: 9 Assets: 002205.SZ(国统股份) - 20250121 - waiting for free tensor"
+//     → sleep 10ms，继续重试
+//   
+//   T3 (IO worker 完成):
+//     IO worker flush 完 Day 1:
+//       1. copy date = "20250102"
+//       2. flush_tensor(day) → 写入 ~/output/features/2025/01/02/*.bin
+//       3. erase("20250102") from date_map
+//       4. reset(): memset清零，原子切换 CS_DONE → UNUSED
+//   
+//   T4 (TS核心继续):
+//     TS核心 2 重试成功 → CAS 抢占 Day 1 的 slot (UNUSED → IN_USE)
+//     → 绑定 date="20250121"，使用预分配内存，继续计算
+//   
+//   结果: 
+//     - TS/CS worker 无磁盘 IO 阻塞，专注计算
+//     - IO worker 独占访问 CS_DONE，完全无锁 flush
+//     - 预分配内存池，零运行时 malloc/free
+//     - Pool 动态回收，20 个 slot 处理 117 个 dates
 //
 // ============================================================================
 //
@@ -112,11 +185,16 @@
 // >> TS Worker 接口:
 //   - mark_ts_core_done(date, level, core_id, l0_t): 更新 TS core 进度，通知 CS worker 该 core 已完成 l0_t 时刻
 //   - get_data_ptr(date, level) -> feature_storage_t*: 获取 [T][F][A] 布局的数据指针（_Float16），供宏访问
+//     * 首次访问新日期会触发 tensor 分配（CAS 抢占 UNUSED slot）
+//     * 如 pool 满则 sleep 10ms 等待 IO worker 回收
 //   - write_link(date, l0_t, asset_idx, link_feature_offset, link_value): 写入 L0 时间映射（_link_to_L1/_link_to_L2）
 //
 // >> CS Worker 接口:
-//   - is_timeslot_ready(date, level, l0_t) -> bool: 检查所有 TS cores 是否完成该时刻（轮询等待）
-//   - mark_date_complete(date): 标记该日期所有 TS+CS 处理完成，允许 tensor 被回收
+//   - is_timeslot_ready(date, level, l0_t) -> bool: 检查所有 TS cores 是否完成该时刻（无锁轮询 ts_progress）
+//   - mark_date_complete(date): 原子标记 state → CS_DONE，之后 CS worker 不再访问此 tensor
+//
+// >> IO Worker 接口:
+//   - flush_cs_done_tensors() -> size_t: 扫描 pool，flush 所有 CS_DONE 的 slot，返回 flush 数量
 //
 // >> 宏接口 (TS/CS):
 //   - TS_WRITE_FEATURES(store, date, level, t, a, f_start, f_end, src): 批量写入 TS 特征
